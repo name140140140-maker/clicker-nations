@@ -4106,10 +4106,38 @@ async function claimAllPassRewards(me, onSetPlayer) {
 }
 
 async function buyPremiumPass(me, onSetPlayer) {
-  if (!me || me.hasPremiumPass) return;
-  const updated = { ...me, hasPremiumPass: true };
-  await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-  onSetPlayer(updated);
+  if (!me || me.hasPremiumPass) return false;
+
+  const tg = window.Telegram?.WebApp;
+  if (!tg?.openInvoice) {
+    alert("Оплата Telegram Stars доступна лише всередині Telegram.");
+    return false;
+  }
+
+  let link;
+  try {
+    const resp = await fetch("/api/create-invoice", { method: "POST" });
+    const data = await resp.json();
+    if (!data.link) throw new Error(data.error || "Не вдалося створити рахунок");
+    link = data.link;
+  } catch (err) {
+    console.warn("buyPremiumPass: помилка створення рахунку:", err?.message || err);
+    alert("Не вдалося відкрити оплату. Спробуй ще раз пізніше.");
+    return false;
+  }
+
+  return new Promise((resolve) => {
+    tg.openInvoice(link, async (status) => {
+      if (status !== "paid") {
+        resolve(false);
+        return;
+      }
+      const updated = { ...me, hasPremiumPass: true };
+      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
+      onSetPlayer(updated);
+      resolve(true);
+    });
+  });
 }
 
 function ProfileScreen({
@@ -6176,9 +6204,12 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
           <button
             className="cn-pass-buy-btn"
             type="button"
-            onClick={() => buyPremiumPass(me, onSetPlayer)}
+            onClick={async () => {
+              const paid = await buyPremiumPass(me, onSetPlayer);
+              if (paid) cnSfx.purchase();
+            }}
           >
-            <Crown size={13} /> Купити
+            <Crown size={13} /> Купити за 50 ⭐
           </button>
         </div>
       )}
@@ -6388,7 +6419,8 @@ function PremiumPassModal({ onClose, me, onSetPlayer, onGoToSeason }) {
 
   const handleBuy = async () => {
     if (!me || owned) return;
-    await buyPremiumPass(me, onSetPlayer);
+    const paid = await buyPremiumPass(me, onSetPlayer);
+    if (!paid) return;
     cnSfx.purchase();
     onClose();
     if (onGoToSeason) onGoToSeason();
@@ -6430,7 +6462,7 @@ function PremiumPassModal({ onClose, me, onSetPlayer, onGoToSeason }) {
           disabled={owned}
           onClick={handleBuy}
         >
-          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати Premium Pass"}
+          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати за 50 ⭐"}
         </button>
       </div>
     </div>
