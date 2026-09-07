@@ -6209,7 +6209,7 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
               if (paid) cnSfx.purchase();
             }}
           >
-            <Crown size={13} /> Купити за 50 ⭐
+            <Crown size={13} /> Купити за 1 ⭐
           </button>
         </div>
       )}
@@ -6462,7 +6462,7 @@ function PremiumPassModal({ onClose, me, onSetPlayer, onGoToSeason }) {
           disabled={owned}
           onClick={handleBuy}
         >
-          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати за 50 ⭐"}
+          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати за 1 ⭐"}
         </button>
       </div>
     </div>

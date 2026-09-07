@@ -27,7 +27,7 @@ export default async function handler(req, res) {
           payload: "premium_pass_purchase",
           provider_token: "", // порожній рядок обов'язковий для оплати Telegram Stars
           currency: "XTR",
-          prices: [{ label: "Premium Pass", amount: 50 }],
+          prices: [{ label: "Premium Pass", amount: 1 }],
         }),
       }
     );
