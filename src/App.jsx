@@ -53,6 +53,7 @@ import {
   Pencil,
   Copy,
 } from "lucide-react";
+import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
@@ -860,44 +861,32 @@ function getTelegramUser() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Storage helpers                                                     */
+/*  Storage helpers — реальна база даних Supabase замість window.storage */
 /* ------------------------------------------------------------------ */
 
-/* In-memory fallback store: used when window.storage is unavailable/unstable
-   in this preview session, so the app stays usable for the current session
-   even without real cross-session persistence. */
-const memoryStore = new Map();
 let storagePersistenceHealthy = true;
 let lastStorageError = "";
-function memKey(key, shared) {
-  return (shared ? "s:" : "p:") + key;
-}
 
 async function storageGet(key, shared) {
-  const mk = memKey(key, shared);
   try {
-    const res = await window.storage.get(key, shared);
-    if (res && typeof res.value !== "undefined") {
-      memoryStore.set(mk, res.value);
-      storagePersistenceHealthy = true;
-      return res.value;
-    }
+    const value = await sbStorageGet(key, shared);
+    storagePersistenceHealthy = true;
+    return value;
   } catch (err) {
     lastStorageError = err?.message || String(err);
+    storagePersistenceHealthy = false;
+    return null;
   }
-  return memoryStore.has(mk) ? memoryStore.get(mk) : null;
 }
 
 async function storageSet(key, value, shared) {
-  const mk = memKey(key, shared);
-  memoryStore.set(mk, value);
   try {
-    const result = await window.storage.set(key, value, shared);
-    if (!result) throw new Error("storage.set повернув порожній результат");
-    storagePersistenceHealthy = true;
+    const ok = await sbStorageSet(key, value, shared);
+    storagePersistenceHealthy = !!ok;
+    if (!ok) lastStorageError = "sbStorageSet повернув false";
     return true;
   } catch (err) {
-    console.warn("storageSet: збережено лише в пам'яті сесії (window.storage недоступний):", key, err?.message || err);
+    console.warn("storageSet: не вдалося зберегти в Supabase:", key, err?.message || err);
     lastStorageError = err?.message || String(err);
     storagePersistenceHealthy = false;
     return true;
@@ -906,8 +895,7 @@ async function storageSet(key, value, shared) {
 
 async function fetchAllPlayers() {
   try {
-    const listRes = await window.storage.list(PLAYER_PREFIX, true);
-    const keys = listRes?.keys || [];
+    const keys = await sbStorageListKeys(PLAYER_PREFIX, true);
     const results = await Promise.all(
       keys.map(async (k) => {
         const raw = await storageGet(k, true);
