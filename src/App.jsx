@@ -76,6 +76,12 @@ const SHOP_BANNER_IMG = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBD
 /* ------------------------------------------------------------------ */
 
 const MAX_ENERGY = 100;
+/* Автоклікер (Premium Pass): один "клік" щосекунди, максимум половину
+   доби активної роботи на добу (ліміт скидається щодня). */
+const AUTO_CLICKER_TICK_MS = 1000;
+const AUTO_CLICKER_DAILY_LIMIT_MS = 12 * 60 * 60 * 1000;
+/* Кулдаун між діями лідера/радника/повстанця (8 годин) */
+const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 const ENERGY_REGEN_PER_SEC = 1;
 const ID_KEY = "my-player-id";
 const TUTORIAL_KEY = "tutorial-done-v1";
@@ -842,6 +848,37 @@ function fmt(n) {
   return new Intl.NumberFormat("uk-UA").format(Math.max(0, Math.round(n)));
 }
 
+/* Формат "2 год 15 хв" / "45 хв" для таймерів і кулдаунів */
+function fmtDuration(ms) {
+  const totalMin = Math.max(0, Math.ceil(ms / 60000));
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0) return `${h} год ${m} хв`;
+  return `${m} хв`;
+}
+
+/* Супер-адмін: єдиний Telegram-акаунт, якому доступна Developer-панель */
+const SUPER_ADMIN_TG_ID = "6667421162";
+function isSuperAdmin() {
+  try {
+    const tgId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+    return tgId != null && String(tgId) === SUPER_ADMIN_TG_ID;
+  } catch {
+    return false;
+  }
+}
+
+/* Країна вважається "повністю захопленою", якщо ВСІ її області
+   контролюються іншою країною — за таку більше не можна почати грати. */
+function isCountryFullyConquered(countryCode, cityControl) {
+  const regions = getRegionData()[countryCode]?.regions || [];
+  if (regions.length === 0) return false;
+  return regions.every((r) => {
+    const owner = cityControl?.[countryCode + "|" + r.name];
+    return owner && owner !== countryCode;
+  });
+}
+
 function genId() {
   return "p_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
 }
@@ -1534,7 +1571,7 @@ export default function App() {
       ) : tosStatus === "declined" ? (
         <TosDeclinedScreen lang={language} onReview={reviewTosAgain} />
       ) : !player ? (
-        <OnboardingScreen onCreate={createPlayer} lang={language} />
+        <OnboardingScreen onCreate={createPlayer} lang={language} cityControl={cityControl} />
       ) : (
         <div className="cn-app">
           <div className="cn-content">
@@ -1613,6 +1650,7 @@ export default function App() {
                 alliances={alliances}
                 cityControl={cityControl}
                 isLeader={isLeader}
+                onSetPlayer={setPlayer}
                 onRefreshGameData={() => refreshGameData(true)}
               />
             )}
@@ -1833,7 +1871,7 @@ function TosDeclinedScreen({ lang, onReview }) {
 /*  Onboarding                                                          */
 /* ------------------------------------------------------------------ */
 
-function OnboardingScreen({ onCreate, lang = "uk" }) {
+function OnboardingScreen({ onCreate, lang = "uk", cityControl }) {
   const tgUser = getTelegramUser();
   const defaultName = tgUser?.first_name || tgUser?.username || "";
   const [username, setUsername] = useState(defaultName);
@@ -1841,6 +1879,7 @@ function OnboardingScreen({ onCreate, lang = "uk" }) {
   const [submitting, setSubmitting] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [blockedMsg, setBlockedMsg] = useState("");
 
   const canSubmit = username.trim().length > 0 && selected && !submitting;
   const selectedCountry = selected ? COUNTRY_MAP[selected] : null;
@@ -1855,6 +1894,11 @@ function OnboardingScreen({ onCreate, lang = "uk" }) {
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
+    if (isCountryFullyConquered(selected, cityControl)) {
+      setBlockedMsg("Цю країну повністю захоплено — оберіть іншу.");
+      setSelected(null);
+      return;
+    }
     setSubmitting(true);
     await onCreate(username, selected);
   };
@@ -1864,6 +1908,8 @@ function OnboardingScreen({ onCreate, lang = "uk" }) {
   };
 
   const pickCountry = (code) => {
+    if (isCountryFullyConquered(code, cityControl)) return;
+    setBlockedMsg("");
     setSelected(code);
     setPickerOpen(false);
     setQuery("");
@@ -1926,24 +1972,33 @@ function OnboardingScreen({ onCreate, lang = "uk" }) {
                 {filteredCountries.length === 0 && (
                   <div className="cn-country-dropdown-empty">{t(lang, "onboard_country_empty")}</div>
                 )}
-                {filteredCountries.map((c) => (
-                  <button
-                    key={c.code}
-                    type="button"
-                    className={
-                      "cn-country-dropdown-item" +
-                      (selected === c.code ? " cn-country-dropdown-item--active" : "")
-                    }
-                    onClick={() => pickCountry(c.code)}
-                  >
-                    <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
-                    <span className="cn-country-dropdown-name">{c.name}</span>
-                  </button>
-                ))}
+                {filteredCountries.map((c) => {
+                  const conquered = isCountryFullyConquered(c.code, cityControl);
+                  return (
+                    <button
+                      key={c.code}
+                      type="button"
+                      disabled={conquered}
+                      className={
+                        "cn-country-dropdown-item" +
+                        (selected === c.code ? " cn-country-dropdown-item--active" : "") +
+                        (conquered ? " cn-country-dropdown-item--disabled" : "")
+                      }
+                      onClick={() => pickCountry(c.code)}
+                    >
+                      <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
+                      <span className="cn-country-dropdown-name">
+                        {c.name}
+                        {conquered && " — повністю захоплена"}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </>
         )}
+        {blockedMsg && <div className="cn-onboard-blocked-msg">{blockedMsg}</div>}
       </div>
 
       <button className="cn-primary-btn" disabled={!canSubmit} onClick={handleSubmit}>
@@ -1999,6 +2054,51 @@ function ClickerScreen({
     return () => clearInterval(t);
   }, []);
   const energy = getCurrentEnergy(player);
+
+  /* ---- Автоклікер: доступний лише власникам Premium Pass, максимум
+     половину доби (12 годин) активної роботи на добу. ---- */
+  const autoSaveTimerRef = useRef(null);
+  const persistPlayerSoon = useCallback((record) => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      storageSet(PLAYER_PREFIX + record.id, JSON.stringify(record), true);
+    }, 1200);
+  }, []);
+
+  const todayKeyStr = new Date().toISOString().slice(0, 10);
+  const autoClickerUsedToday = player.autoClickerDate === todayKeyStr ? player.autoClickerUsedMs || 0 : 0;
+  const autoClickerRemainingMs = Math.max(0, AUTO_CLICKER_DAILY_LIMIT_MS - autoClickerUsedToday);
+  const autoClickerActive = !!player.hasPremiumPass && !!player.autoClickerOn && autoClickerRemainingMs > 0;
+
+  const toggleAutoClicker = useCallback(() => {
+    if (!player.hasPremiumPass) return;
+    onSetPlayer((prev) => {
+      if (!prev) return prev;
+      const t = new Date().toISOString().slice(0, 10);
+      const usedToday = prev.autoClickerDate === t ? prev.autoClickerUsedMs || 0 : 0;
+      if (!prev.autoClickerOn && usedToday >= AUTO_CLICKER_DAILY_LIMIT_MS) return prev;
+      const updated = { ...prev, autoClickerOn: !prev.autoClickerOn, autoClickerDate: t, autoClickerUsedMs: usedToday };
+      persistPlayerSoon(updated);
+      return updated;
+    });
+  }, [player.hasPremiumPass, onSetPlayer, persistPlayerSoon]);
+
+  useEffect(() => {
+    if (!autoClickerActive || energy < 1) return;
+    const timer = setTimeout(() => {
+      onClick();
+      onSetPlayer((prev) => {
+        if (!prev) return prev;
+        const t = new Date().toISOString().slice(0, 10);
+        const usedToday = (prev.autoClickerDate === t ? prev.autoClickerUsedMs || 0 : 0) + AUTO_CLICKER_TICK_MS;
+        const stillOn = prev.autoClickerOn && usedToday < AUTO_CLICKER_DAILY_LIMIT_MS;
+        const updated = { ...prev, autoClickerDate: t, autoClickerUsedMs: usedToday, autoClickerOn: stillOn };
+        persistPlayerSoon(updated);
+        return updated;
+      });
+    }, AUTO_CLICKER_TICK_MS);
+    return () => clearTimeout(timer);
+  }, [autoClickerActive, energy, onClick, onSetPlayer, persistPlayerSoon]);
 
   const spawnEffects = useCallback((clientX, clientY, allowed) => {
     if (!allowed) {
@@ -2234,6 +2334,25 @@ function ClickerScreen({
         {isEmpty && <div className="cn-energy-empty-note">Енергія відновлюється +1 щосекунди</div>}
       </div>
 
+      {player.hasPremiumPass && (
+        <div className="cn-autoclicker-block">
+          <button
+            type="button"
+            className={"cn-autoclicker-toggle" + (autoClickerActive ? " cn-autoclicker-toggle--on" : "")}
+            onClick={toggleAutoClicker}
+            disabled={!player.autoClickerOn && autoClickerRemainingMs <= 0}
+          >
+            <Crown size={14} />
+            Автоклікер: {autoClickerActive ? "УВІМКНЕНО" : "вимкнено"}
+          </button>
+          <div className="cn-autoclicker-hint">
+            {autoClickerRemainingMs > 0
+              ? `Залишилось на сьогодні: ${fmtDuration(autoClickerRemainingMs)}`
+              : "Ліміт на сьогодні вичерпано — повернеться завтра"}
+          </div>
+        </div>
+      )}
+
       <div className="cn-stats-row">
         <div className="cn-stat-chip">
           <span className="cn-stat-chip-dots">⁚⁚</span>
@@ -2464,6 +2583,7 @@ function ControlPanel({ player, wars, rebellions, alliances, cityControl, cityDe
           isAdvisor={isAdvisor}
           wars={wars}
           cityControl={cityControl}
+          onSetPlayer={onSetPlayer}
           onRefreshGameData={onRefreshGameData}
         />
       )}
@@ -2483,6 +2603,7 @@ function ControlPanel({ player, wars, rebellions, alliances, cityControl, cityDe
           isLeader={isLeader}
           isAdvisor={isAdvisor}
           players={players}
+          onSetPlayer={onSetPlayer}
           onRefreshGameData={onRefreshGameData}
         />
       )}
@@ -3030,13 +3151,24 @@ function DiplomacySection({ player, alliances }) {
   );
 }
 
-function DeclareWarSection({ player, isLeader, isAdvisor, wars, cityControl, onRefreshGameData }) {
+function DeclareWarSection({ player, isLeader, isAdvisor, wars, cityControl, onSetPlayer, onRefreshGameData }) {
   const [countryQuery, setCountryQuery] = useState("");
   const [targetCountry, setTargetCountry] = useState(null);
   const [cityQuery, setCityQuery] = useState("");
   const [targetCity, setTargetCity] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [, forceTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const cooldownLeftMs = isLeader
+    ? Math.max(0, ACTION_COOLDOWN_MS - (Date.now() - (player.lastWarDeclareAt || 0)))
+    : 0;
+  const onCooldown = isLeader && cooldownLeftMs > 0;
 
   const filteredCountries = useMemo(() => {
     const q = countryQuery.trim().toLowerCase();
@@ -3068,6 +3200,16 @@ function DeclareWarSection({ player, isLeader, isAdvisor, wars, cityControl, onR
     );
   }
 
+  if (onCooldown) {
+    return (
+      <div className="cn-control-section">
+        <div className="cn-control-empty">
+          Ти нещодавно оголошував(ла) війну. Наступне оголошення можливе через {fmtDuration(cooldownLeftMs)}.
+        </div>
+      </div>
+    );
+  }
+
   const submit = async () => {
     if (!targetCountry || !targetCity) return;
     setBusy(true);
@@ -3078,6 +3220,9 @@ function DeclareWarSection({ player, isLeader, isAdvisor, wars, cityControl, onR
         setMsg("✓ Війну оголошено! Підготовка триває 10 хвилин.");
         setTargetCountry(null);
         setTargetCity(null);
+        const updated = { ...player, lastWarDeclareAt: Date.now() };
+        await storageSet(PLAYER_PREFIX + player.id, JSON.stringify(updated), true);
+        if (onSetPlayer) onSetPlayer(updated);
       } else {
         setMsg("✗ " + result.reason);
       }
@@ -3221,12 +3366,30 @@ function FormAllianceSection({ player, isLeader, isAdvisor, alliances, onRefresh
 /*  Влада: Рада (список радників + рішення на голосуванні)              */
 /* ------------------------------------------------------------------ */
 
-function CouncilSection({ player, isLeader, isAdvisor, players, onRefreshGameData }) {
+function CouncilSection({ player, isLeader, isAdvisor, players, onSetPlayer, onRefreshGameData }) {
   const [advisors, setAdvisors] = useState([]);
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [, forceTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => forceTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const advisorCooldownLeftMs = isAdvisor
+    ? Math.max(0, ACTION_COOLDOWN_MS - (Date.now() - (player.lastCouncilActionAt || 0)))
+    : 0;
+  const advisorOnCooldown = isAdvisor && advisorCooldownLeftMs > 0;
+
+  const markAdvisorActionUsed = async () => {
+    if (!isAdvisor || isLeader) return; // ліміт стосується лише дій радника, не лідера
+    const updated = { ...player, lastCouncilActionAt: Date.now() };
+    await storageSet(PLAYER_PREFIX + player.id, JSON.stringify(updated), true);
+    if (onSetPlayer) onSetPlayer(updated);
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3271,16 +3434,20 @@ function CouncilSection({ player, isLeader, isAdvisor, players, onRefreshGameDat
   };
 
   const proposeKickAdvisor = async (target) => {
+    if (advisorOnCooldown) return;
     setBusy(true);
     await createCouncilProposal(player.countryCode, { type: "kickAdvisor", payload: { targetPlayerId: target.id, targetName: target.username } }, player.id);
+    await markAdvisorActionUsed();
     setMsg("✓ Пропозицію винесено на голосування ради");
     await load();
     setBusy(false);
   };
 
   const proposeKickLeader = async () => {
+    if (advisorOnCooldown) return;
     setBusy(true);
     await createCouncilProposal(player.countryCode, { type: "kickLeader", payload: {} }, player.id);
+    await markAdvisorActionUsed();
     setMsg("✓ Пропозицію про усунення лідера винесено на голосування ради");
     await load();
     setBusy(false);
@@ -3335,7 +3502,7 @@ function CouncilSection({ player, isLeader, isAdvisor, players, onRefreshGameDat
               </button>
             )}
             {isAdvisor && !isLeader && p.id !== player.id && (
-              <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => proposeKickAdvisor(p)}>
+              <button className="cn-dev-btn" type="button" disabled={busy || advisorOnCooldown} onClick={() => proposeKickAdvisor(p)}>
                 Запропонувати вигнання
               </button>
             )}
@@ -3344,9 +3511,14 @@ function CouncilSection({ player, isLeader, isAdvisor, players, onRefreshGameDat
       </div>
 
       {isAdvisor && !isLeader && (
-        <button className="cn-dev-btn" type="button" style={{ marginTop: 10 }} disabled={busy} onClick={proposeKickLeader}>
+        <button className="cn-dev-btn" type="button" style={{ marginTop: 10 }} disabled={busy || advisorOnCooldown} onClick={proposeKickLeader}>
           <Crown size={13} /> Запропонувати усунення лідера
         </button>
+      )}
+      {isAdvisor && !isLeader && advisorOnCooldown && (
+        <div className="cn-control-hint" style={{ marginTop: 6 }}>
+          Наступну дію ради можна вчинити через {fmtDuration(advisorCooldownLeftMs)}
+        </div>
       )}
 
       {msg && <div className="cn-dev-status-msg" style={{ marginTop: 8 }}>{msg}</div>}
@@ -3514,6 +3686,17 @@ function RebellionSection({ player, isLeader, isAdvisor, rebellions, players, on
     );
   }
 
+  const rebelCooldownLeftMs = Math.max(0, ACTION_COOLDOWN_MS - (Date.now() - (player.lastRebelActionAt || 0)));
+  if (rebelCooldownLeftMs > 0) {
+    return (
+      <div className="cn-control-section">
+        <div className="cn-control-empty">
+          Ти нещодавно піднімав(ла) повстання. Наступна спроба можлива через {fmtDuration(rebelCooldownLeftMs)}.
+        </div>
+      </div>
+    );
+  }
+
   if (loadingAdvisors) {
     return (
       <div className="cn-control-section">
@@ -3539,6 +3722,9 @@ function RebellionSection({ player, isLeader, isAdvisor, rebellions, players, on
       setMsg("✓ Повстання оголошено! Підготовка триває 10 хвилин.");
       setTargetType(null);
       setTargetPlayerId(null);
+      const updated = { ...player, lastRebelActionAt: Date.now() };
+      await storageSet(PLAYER_PREFIX + player.id, JSON.stringify(updated), true);
+      if (onSetPlayer) onSetPlayer(updated);
     } else {
       setMsg("✗ " + result.reason);
     }
@@ -5224,12 +5410,14 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, i
         <ChevronRight size={16} />
       </button>
 
-      <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setDevOpen((o) => !o); }}>
-        <Bug size={14} /> Developer / Test
-        <ChevronDown size={16} className={"cn-chevron" + (devOpen ? " cn-chevron--open" : "")} />
-      </button>
+      {isSuperAdmin() && (
+        <>
+          <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setDevOpen((o) => !o); }}>
+            <Bug size={14} /> Developer / Test
+            <ChevronDown size={16} className={"cn-chevron" + (devOpen ? " cn-chevron--open" : "")} />
+          </button>
 
-      {devOpen && (
+          {devOpen && (
         <div className="cn-dev-panel">
           {!storagePersistenceHealthy && (
             <div className="cn-dev-warning">
@@ -5317,6 +5505,8 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, i
             </button>
           </div>
         </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -5326,7 +5516,7 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityControl, isLeader, onRefreshGameData }) {
+function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityControl, isLeader, onSetPlayer, onRefreshGameData }) {
   const [drillCountry, setDrillCountry] = useState(null);
   const [dataReady, setDataReady] = useState(false);
 
@@ -5382,6 +5572,7 @@ function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityContr
           alliances={alliances}
           cityControl={cityControl}
           isLeader={isLeader}
+          onSetPlayer={onSetPlayer}
           onRefreshGameData={onRefreshGameData}
           onBack={() => setDrillCountry(null)}
         />
@@ -5666,7 +5857,7 @@ function regionCountryMeta(code) {
   return { code, name: EXTRA_REGION_NAMES[code] || code, flag: isoToFlagEmoji(code) };
 }
 
-function RegionMapScreen({ countryCode, me, wars, alliances, cityControl, isLeader, onRefreshGameData, onBack }) {
+function RegionMapScreen({ countryCode, me, wars, alliances, cityControl, isLeader, onSetPlayer, onRefreshGameData, onBack }) {
   const [selectedRegion, setSelectedRegion] = useState(null);
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
   const [busy, setBusy] = useState(false);
@@ -5807,7 +5998,10 @@ function RegionMapScreen({ countryCode, me, wars, alliances, cityControl, isLead
     selected &&
     currentController !== me.countryCode &&
     !countryAtWar(wars || [], me.countryCode) &&
-    !countryAtWar(wars || [], currentController);
+    !countryAtWar(wars || [], currentController) &&
+    Date.now() - (me.lastWarDeclareAt || 0) >= ACTION_COOLDOWN_MS;
+
+  const warCooldownLeftMs = Math.max(0, ACTION_COOLDOWN_MS - (Date.now() - (me.lastWarDeclareAt || 0)));
 
   const declareWar = async () => {
     if (!selected || busy) return;
@@ -5816,6 +6010,9 @@ function RegionMapScreen({ countryCode, me, wars, alliances, cityControl, isLead
     if (result.ok) {
       setWarMsg("✓ Війну оголошено! Підготовка триває 10 хвилин.");
       setSelectedRegion(null);
+      const updated = { ...me, lastWarDeclareAt: Date.now() };
+      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
+      if (onSetPlayer) onSetPlayer(updated);
     } else {
       setWarMsg("✗ " + result.reason);
     }
@@ -6011,6 +6208,15 @@ function RegionMapScreen({ countryCode, me, wars, alliances, cityControl, isLead
           {isLeader && currentController !== me.countryCode && !countryAtWar(wars || [], me.countryCode) && countryAtWar(wars || [], currentController) && (
             <div className="cn-region-card-note">Ця країна вже веде іншу війну</div>
           )}
+          {isLeader &&
+            currentController !== me.countryCode &&
+            !countryAtWar(wars || [], me.countryCode) &&
+            !countryAtWar(wars || [], currentController) &&
+            warCooldownLeftMs > 0 && (
+              <div className="cn-region-card-note">
+                Наступне оголошення війни можливе через {fmtDuration(warCooldownLeftMs)}
+              </div>
+            )}
           {warMsg && <div className="cn-dev-status-msg" style={{ marginTop: 8 }}>{warMsg}</div>}
         </div>
       )}
@@ -6788,6 +6994,23 @@ function GlobalStyles() {
       .cn-energy-bar { width: 100%; height: 14px; border-radius: 999px; background: rgba(255,255,255,0.06); overflow: hidden; border: 1px solid rgba(255,255,255,0.08); box-shadow: inset 0 0 10px rgba(0,0,0,0.35); }
       .cn-energy-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #FBBF24, #34D399 55%, #22D3EE); box-shadow: 0 0 12px rgba(34,211,238,0.5); transition: width 0.4s ease; }
       .cn-energy-empty-note { text-align: center; font-size: 11px; color: #F87171; margin-top: 6px; }
+      .cn-autoclicker-block { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; margin-top: 10px; gap: 4px; }
+      .cn-autoclicker-toggle {
+        display: flex; align-items: center; gap: 6px; justify-content: center;
+        width: 100%; padding: 9px 12px; border-radius: 12px;
+        background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+        color: #C4D6EF; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 12px;
+        letter-spacing: 0.02em; cursor: pointer; transition: all 0.2s ease;
+      }
+      .cn-autoclicker-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+      .cn-autoclicker-toggle--on {
+        background: linear-gradient(90deg, rgba(52,211,153,0.25), rgba(34,211,238,0.2));
+        border-color: rgba(52,211,153,0.5); color: #6EE7B7;
+        box-shadow: 0 0 14px rgba(52,211,153,0.25);
+      }
+      .cn-autoclicker-hint { font-size: 10.5px; color: #8FA6C4; text-align: center; }
+      .cn-onboard-blocked-msg { color: #F87171; font-size: 12px; margin-top: 6px; text-align: center; }
+      .cn-country-dropdown-item--disabled { opacity: 0.4; cursor: not-allowed; }
 
       .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; }
       .cn-stat-chip {
