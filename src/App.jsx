@@ -857,6 +857,9 @@ function fmtDuration(ms) {
   return `${m} хв`;
 }
 
+/* Ключ у спільному сховищі для динамічної ціни Premium Pass (у Stars) */
+const PREMIUM_PASS_PRICE_KEY = "premium_pass_price_stars";
+
 /* Супер-адмін: єдиний Telegram-акаунт, якому доступна Developer-панель */
 const SUPER_ADMIN_TG_ID = "6667421162";
 function isSuperAdmin() {
@@ -1278,6 +1281,18 @@ export default function App() {
         setIsLeader(leaderId === player.id);
         const advisors = await getAdvisors(player.countryCode);
         setIsAdvisor(advisors.includes(player.id));
+        // Синхронізуємо статус блокування (адмін міг заблокувати гравця з панелі)
+        try {
+          const freshRaw = await storageGet(PLAYER_PREFIX + player.id, true);
+          if (freshRaw) {
+            const fresh = JSON.parse(freshRaw);
+            if (!!fresh.blocked !== !!player.blocked || fresh.blockedReason !== player.blockedReason) {
+              setPlayer((prev) => (prev ? { ...prev, blocked: !!fresh.blocked, blockedReason: fresh.blockedReason || "" } : prev));
+            }
+          }
+        } catch {
+          /* ignore */
+        }
       }
     },
     [player]
@@ -1572,6 +1587,8 @@ export default function App() {
         <TosDeclinedScreen lang={language} onReview={reviewTosAgain} />
       ) : !player ? (
         <OnboardingScreen onCreate={createPlayer} lang={language} cityControl={cityControl} />
+      ) : player.blocked ? (
+        <BlockedScreen reason={player.blockedReason} />
       ) : (
         <div className="cn-app">
           <div className="cn-content">
@@ -1614,6 +1631,7 @@ export default function App() {
                 unreadCount={unreadCount}
                 onRefreshMail={refreshMail}
                 wars={wars}
+                season={season}
                 isLeader={isLeader}
                 onSetPlayer={setPlayer}
                 onRefreshGameData={() => refreshGameData(true)}
@@ -1861,6 +1879,21 @@ function TosDeclinedScreen({ lang, onReview }) {
             <span className="cn-primary-btn-label">{t(lang, "tos_review_again")}</span>
             <ChevronRight size={20} className="cn-primary-btn-chevron" />
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BlockedScreen({ reason }) {
+  return (
+    <div className="cn-tos-screen">
+      <div className="cn-tos-glow" />
+      <div className="cn-tos-card">
+        <Ban size={36} className="cn-tos-icon cn-tos-icon--dim" />
+        <div className="cn-tos-title">Акаунт заблоковано</div>
+        <div className="cn-tos-body">
+          {reason || "Доступ до гри для цього акаунту обмежено адміністрацією."}
         </div>
       </div>
     </div>
@@ -4336,6 +4369,7 @@ function ProfileScreen({
   unreadCount,
   onRefreshMail,
   wars,
+  season,
   isLeader,
   onSetPlayer,
   onRefreshGameData,
@@ -4435,6 +4469,8 @@ function ProfileScreen({
         onBack={() => setView("main")}
         onSetPlayer={onSetPlayer}
         wars={wars}
+        season={season}
+        players={players}
         isLeader={isLeader}
         mail={mail}
         unreadCount={unreadCount}
@@ -5210,7 +5246,7 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
 /*  Settings (Theme + Developer/Test panel)                             */
 /* ------------------------------------------------------------------ */
 
-function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage }) {
+function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage }) {
   const [devOpen, setDevOpen] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -5218,6 +5254,92 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, i
   const [countryPickerOpen, setCountryPickerOpen] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
   const statusTimerRef = useRef(null);
+
+  /* --- Адмін-панель (лише SUPER_ADMIN_TG_ID) --- */
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminQuery, setAdminQuery] = useState("");
+  const [adminEditId, setAdminEditId] = useState(null);
+  const [adminEditPower, setAdminEditPower] = useState("");
+  const [adminEditClicks, setAdminEditClicks] = useState("");
+  const [adminBlockReason, setAdminBlockReason] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminMsg, setAdminMsg] = useState("");
+  const [adminSeasonDate, setAdminSeasonDate] = useState("");
+  const [adminPassPrice, setAdminPassPrice] = useState("");
+  const [adminPassPriceLoaded, setAdminPassPriceLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!adminOpen || !isSuperAdmin()) return;
+    if (season?.startedAt) {
+      const endsAt = season.startedAt + (season.durationDays || SEASON_DURATION_DAYS) * 24 * 60 * 60 * 1000;
+      setAdminSeasonDate(new Date(endsAt).toISOString().slice(0, 10));
+    }
+    if (!adminPassPriceLoaded) {
+      storageGet(PREMIUM_PASS_PRICE_KEY, true).then((raw) => {
+        setAdminPassPrice(raw ? String(JSON.parse(raw)) : "50");
+        setAdminPassPriceLoaded(true);
+      });
+    }
+  }, [adminOpen, season, adminPassPriceLoaded]);
+
+  const adminResults = useMemo(() => {
+    if (!adminOpen) return [];
+    const q = adminQuery.trim().toLowerCase();
+    const list = players || [];
+    if (!q) return list.slice(0, 25);
+    return list.filter((p) => (p.username || "").toLowerCase().includes(q) || p.id.toLowerCase().includes(q)).slice(0, 25);
+  }, [adminOpen, adminQuery, players]);
+
+  const startEditPlayer = (p) => {
+    setAdminEditId(p.id);
+    setAdminEditPower(String(Math.round(p.power || 0)));
+    setAdminEditClicks(String(Math.round(p.totalClicks || 0)));
+    setAdminBlockReason(p.blockedReason || "");
+    setAdminMsg("");
+  };
+
+  const saveAdminPlayerEdit = async (p) => {
+    setAdminBusy(true);
+    const power = Math.max(0, Math.round(Number(adminEditPower) || 0));
+    const totalClicks = Math.max(0, Math.round(Number(adminEditClicks) || 0));
+    const updated = { ...p, power, totalClicks };
+    await storageSet(PLAYER_PREFIX + p.id, JSON.stringify(updated), true);
+    if (me.id === p.id && onSetPlayer) onSetPlayer(updated);
+    setAdminMsg(`✓ Оновлено гравця ${p.username || p.id}`);
+    setAdminEditId(null);
+    if (onRefreshGameData) await onRefreshGameData();
+    setAdminBusy(false);
+  };
+
+  const toggleBlockPlayer = async (p) => {
+    setAdminBusy(true);
+    const updated = { ...p, blocked: !p.blocked, blockedReason: !p.blocked ? adminBlockReason || "Заблоковано адміністрацією" : "" };
+    await storageSet(PLAYER_PREFIX + p.id, JSON.stringify(updated), true);
+    if (me.id === p.id && onSetPlayer) onSetPlayer(updated);
+    setAdminMsg(updated.blocked ? `⛔ Гравця ${p.username || p.id} заблоковано` : `✓ Гравця ${p.username || p.id} розблоковано`);
+    if (onRefreshGameData) await onRefreshGameData();
+    setAdminBusy(false);
+  };
+
+  const saveSeasonEndDate = async () => {
+    if (!adminSeasonDate) return;
+    setAdminBusy(true);
+    const startedAt = season?.startedAt || Date.now();
+    const targetMs = new Date(adminSeasonDate + "T23:59:59").getTime();
+    const durationDays = Math.max(1, Math.ceil((targetMs - startedAt) / (24 * 60 * 60 * 1000)));
+    await saveGameStatePart({ season: { ...(season || EMPTY_GAME_STATE.season), startedAt, durationDays } });
+    setAdminMsg("✓ Дату завершення сезону оновлено");
+    if (onRefreshGameData) await onRefreshGameData();
+    setAdminBusy(false);
+  };
+
+  const savePremiumPassPrice = async () => {
+    const price = Math.max(1, Math.round(Number(adminPassPrice) || 0));
+    setAdminBusy(true);
+    await storageSet(PREMIUM_PASS_PRICE_KEY, JSON.stringify(price), true);
+    setAdminMsg(`✓ Вартість Premium Pass тепер ${price} ⭐`);
+    setAdminBusy(false);
+  };
 
   const flashStatus = (msg) => {
     setStatusMsg(msg);
@@ -5412,6 +5534,108 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, i
 
       {isSuperAdmin() && (
         <>
+          <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setAdminOpen((o) => !o); }}>
+            <ShieldCheck size={14} /> Адмін-панель
+            <ChevronDown size={16} className={"cn-chevron" + (adminOpen ? " cn-chevron--open" : "")} />
+          </button>
+
+          {adminOpen && (
+            <div className="cn-dev-panel">
+              {adminMsg && <div className="cn-dev-status-msg">{adminMsg}</div>}
+
+              <div className="cn-admin-block-title">Гравці</div>
+              <input
+                className="cn-admin-input"
+                type="text"
+                placeholder="Пошук за нікнеймом або ID…"
+                value={adminQuery}
+                onChange={(e) => setAdminQuery(e.target.value)}
+              />
+              <div className="cn-admin-player-list">
+                {adminResults.map((p) => (
+                  <div className="cn-admin-player-row" key={p.id}>
+                    <div className="cn-admin-player-head">
+                      <span className="cn-admin-player-name">{p.username || p.id}{p.blocked ? " ⛔" : ""}</span>
+                      <span className="cn-admin-player-sub">{fmt(p.power || 0)} Power · {fmt(p.totalClicks || 0)} кліків</span>
+                    </div>
+                    {adminEditId === p.id ? (
+                      <div className="cn-admin-edit-form">
+                        <label className="cn-admin-field-label">
+                          Power
+                          <input
+                            className="cn-admin-input"
+                            type="number"
+                            value={adminEditPower}
+                            onChange={(e) => setAdminEditPower(e.target.value)}
+                          />
+                        </label>
+                        <label className="cn-admin-field-label">
+                          Кількість кліків
+                          <input
+                            className="cn-admin-input"
+                            type="number"
+                            value={adminEditClicks}
+                            onChange={(e) => setAdminEditClicks(e.target.value)}
+                          />
+                        </label>
+                        <div className="cn-admin-edit-actions">
+                          <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => saveAdminPlayerEdit(p)}>
+                            Зберегти
+                          </button>
+                          <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => setAdminEditId(null)}>
+                            Скасувати
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="cn-admin-edit-actions">
+                        <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => startEditPlayer(p)}>
+                          Редагувати
+                        </button>
+                        <button
+                          className={"cn-dev-btn" + (p.blocked ? "" : " cn-dev-btn--danger")}
+                          type="button"
+                          disabled={adminBusy}
+                          onClick={() => toggleBlockPlayer(p)}
+                        >
+                          {p.blocked ? "Розблокувати" : "Заблокувати"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {adminResults.length === 0 && <div className="cn-control-empty">Гравців не знайдено</div>}
+              </div>
+
+              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Дата завершення сезону</div>
+              <div className="cn-admin-row">
+                <input
+                  className="cn-admin-input"
+                  type="date"
+                  value={adminSeasonDate}
+                  onChange={(e) => setAdminSeasonDate(e.target.value)}
+                />
+                <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={saveSeasonEndDate}>
+                  Зберегти
+                </button>
+              </div>
+
+              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Вартість Premium Pass (⭐)</div>
+              <div className="cn-admin-row">
+                <input
+                  className="cn-admin-input"
+                  type="number"
+                  min="1"
+                  value={adminPassPrice}
+                  onChange={(e) => setAdminPassPrice(e.target.value)}
+                />
+                <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={savePremiumPassPrice}>
+                  Зберегти
+                </button>
+              </div>
+            </div>
+          )}
+
           <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setDevOpen((o) => !o); }}>
             <Bug size={14} /> Developer / Test
             <ChevronDown size={16} className={"cn-chevron" + (devOpen ? " cn-chevron--open" : "")} />
@@ -6415,7 +6639,7 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
               if (paid) cnSfx.purchase();
             }}
           >
-            <Crown size={13} /> Купити за 50 ⭐
+            <Crown size={13} /> Купити Premium Pass
           </button>
         </div>
       )}
@@ -6668,7 +6892,7 @@ function PremiumPassModal({ onClose, me, onSetPlayer, onGoToSeason }) {
           disabled={owned}
           onClick={handleBuy}
         >
-          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати за 50 ⭐"}
+          <Crown size={16} /> {owned ? "Вже придбано" : "Активувати Premium Pass"}
         </button>
       </div>
     </div>
@@ -7011,6 +7235,22 @@ function GlobalStyles() {
       .cn-autoclicker-hint { font-size: 10.5px; color: #8FA6C4; text-align: center; }
       .cn-onboard-blocked-msg { color: #F87171; font-size: 12px; margin-top: 6px; text-align: center; }
       .cn-country-dropdown-item--disabled { opacity: 0.4; cursor: not-allowed; }
+      .cn-admin-block-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 12px; color: #FDE68A; letter-spacing: 0.03em; margin-bottom: 6px; }
+      .cn-admin-input {
+        width: 100%; padding: 8px 10px; border-radius: 10px; margin-bottom: 8px;
+        background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+        color: #EAF2FF; font-size: 12.5px; font-family: inherit;
+      }
+      .cn-admin-row { display: flex; gap: 8px; align-items: center; }
+      .cn-admin-row .cn-admin-input { margin-bottom: 0; flex: 1; }
+      .cn-admin-player-list { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
+      .cn-admin-player-row { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 10px; }
+      .cn-admin-player-head { display: flex; flex-direction: column; margin-bottom: 8px; }
+      .cn-admin-player-name { font-weight: 700; font-size: 12.5px; color: #EAF2FF; }
+      .cn-admin-player-sub { font-size: 10.5px; color: #8FA6C4; margin-top: 2px; }
+      .cn-admin-edit-form { display: flex; flex-direction: column; gap: 4px; }
+      .cn-admin-field-label { font-size: 10.5px; color: #8FA6C4; display: flex; flex-direction: column; gap: 3px; }
+      .cn-admin-edit-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
       .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; }
       .cn-stat-chip {
