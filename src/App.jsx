@@ -4619,73 +4619,109 @@ function ProfileScreen({
         </div>
       </div>
 
-      <div className="cn-profile-hero">
-        <button
-          type="button"
-          className="cn-profile-avatar-ring"
-          onClick={() => setView("icons")}
-          aria-label="Змінити іконку профілю"
-        >
-          {equippedIcon ? <ProfileIconGlyph opt={equippedIcon} size={44} /> : <User size={44} />}
+      <div className="cn-profile-banner">
+        <div className="cn-profile-banner-bg">
+          <span className="cn-profile-banner-dev-tag">Банер профілю: у розробці</span>
+        </div>
+
+        <div className="cn-profile-hero">
+          <button
+            type="button"
+            className="cn-profile-avatar-ring"
+            onClick={() => setView("icons")}
+            aria-label="Змінити іконку профілю"
+          >
+            {equippedIcon ? <ProfileIconGlyph opt={equippedIcon} size={48} /> : <User size={48} />}
+          </button>
+
+          <div className="cn-profile-name-banner">
+            {isLeader && <Crown size={14} className="cn-profile-name-banner-crown" />}
+            <div className="cn-profile-name-row">
+              <div className="cn-profile-name">{me.username}</div>
+              <button className="cn-profile-edit-btn" type="button" onClick={openRename} aria-label="Змінити ім'я">
+                <Pencil size={13} />
+              </button>
+            </div>
+            <button type="button" className="cn-profile-title-pill" onClick={() => setView("titles")}>
+              {equippedTitleUnlocked ? equippedTitleUnlocked.label : "Без титулу"}
+              <ChevronRight size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="cn-profile-id-row cn-profile-id-row--centered">
+        <span>ID: {me.id}</span>
+        <button className="cn-profile-copy-btn" type="button" onClick={copyId} aria-label="Скопіювати ID">
+          {copiedId ? <Check size={13} /> : <Copy size={13} />}
         </button>
-
-        <div className="cn-profile-name-row">
-          <div className="cn-profile-name">{me.username}</div>
-          <button className="cn-profile-edit-btn" type="button" onClick={openRename} aria-label="Змінити ім'я">
-            <Pencil size={15} />
-          </button>
-        </div>
-
-        <div className="cn-profile-id-row">
-          <span>ID: {me.id}</span>
-          <button className="cn-profile-copy-btn" type="button" onClick={copyId} aria-label="Скопіювати ID">
-            {copiedId ? <Check size={13} /> : <Copy size={13} />}
-          </button>
-        </div>
-
         {isLeader && (
-          <span className="cn-profile-chip cn-profile-chip--leader" style={{ marginTop: 8 }}>
+          <span className="cn-profile-chip cn-profile-chip--leader" style={{ marginLeft: 6 }}>
             <Crown size={12} /> Лідер країни
           </span>
         )}
       </div>
 
-      <div className="cn-profile-info-card">
-        <div className="cn-profile-info-row">
-          <Flag code={country?.code} size={30} className="cn-profile-info-flag" />
-          <div className="cn-profile-info-text">
-            <div className="cn-profile-info-label">Країна</div>
-            <div className="cn-profile-info-value">{country?.name}</div>
-          </div>
-          <button className="cn-profile-change-btn" type="button" onClick={() => setCountryPickerOpen(true)}>
-            Змінити
-          </button>
-        </div>
-
-        <div className="cn-profile-info-divider" />
-
-        <div className="cn-profile-info-label cn-profile-info-label--section">Титул</div>
-        <button className="cn-profile-title-row" type="button" onClick={() => setView("titles")}>
-          <span className="cn-profile-title-row-icon"><Shield size={16} /></span>
-          <span className="cn-profile-title-row-text">
-            {equippedTitleUnlocked ? equippedTitleUnlocked.label : "Без титулу"}
+      <div className="cn-profile-stats-bar">
+        <button className="cn-profile-stats-item" type="button" onClick={() => setView("stats")}>
+          <span className="cn-profile-stats-icon"><MousePointerClick size={18} /></span>
+          <span className="cn-profile-stats-text">
+            <span className="cn-profile-stats-label">Всього кліків</span>
+            <span className="cn-profile-stats-value">{fmt(me.totalClicks)}</span>
           </span>
-          <ChevronRight size={17} className="cn-menu-row-chevron" />
         </button>
 
-        <div className="cn-profile-info-label cn-profile-info-label--section">Значки</div>
-        <div className="cn-profile-badge-slots">
+        <div className="cn-profile-stats-divider" />
+
+        <button className="cn-profile-stats-item" type="button" onClick={() => setCountryPickerOpen(true)}>
+          <span className="cn-profile-stats-icon"><Globe2 size={18} /></span>
+          <span className="cn-profile-stats-text">
+            <span className="cn-profile-stats-label">Країна</span>
+            <span className="cn-profile-stats-value cn-profile-stats-value--country">
+              <Flag code={country?.code} size={14} className="cn-profile-stats-flag" /> {country?.name}
+            </span>
+          </span>
+        </button>
+
+        <div className="cn-profile-stats-divider" />
+
+        <div className="cn-profile-stats-item cn-profile-stats-item--static">
+          <span className="cn-profile-stats-icon"><Star size={18} /></span>
+          <span className="cn-profile-stats-text">
+            <span className="cn-profile-stats-label">Глобальний рейтинг</span>
+            <span className="cn-profile-stats-value">
+              {typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank}
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <div className="cn-profile-badges-card">
+        <button type="button" className="cn-profile-badges-header" onClick={() => setView("achievements")}>
+          <span className="cn-profile-badges-header-left">
+            <Shield size={16} /> Значки
+          </span>
+          <span className="cn-profile-badges-header-right">
+            {Math.min(equippedBadgesList.length, MAX_EQUIPPED_BADGES)}/{MAX_EQUIPPED_BADGES}
+            <ChevronRight size={16} />
+          </span>
+        </button>
+
+        <div className="cn-profile-badge-row">
           {Array.from({ length: MAX_EQUIPPED_BADGES }).map((_, i) => {
             const b = equippedBadgesList[i];
             return (
               <button
                 key={i}
                 type="button"
-                className={"cn-badge-slot" + (b ? " cn-badge-slot--filled" : "")}
+                className={"cn-badge-slot2" + (b ? " cn-badge-slot2--filled" : "")}
                 onClick={() => setView("achievements")}
                 aria-label={b ? b.label : "Обрати значок"}
               >
-                {b ? <img src={b.icon} alt={b.label} style={{ width: 18, height: 18 }} /> : <Plus size={16} />}
+                <span className="cn-badge-slot2-ring">
+                  {b ? <img src={b.icon} alt={b.label} /> : <Plus size={16} />}
+                </span>
+                <span className="cn-badge-slot2-label">{b ? b.label : "???"}</span>
               </button>
             );
           })}
@@ -4969,30 +5005,87 @@ function PlayerPeekModal({ player, players, onClose }) {
           </button>
         </div>
 
-        <div className="cn-profile-card cn-profile-card--peek">
-          <div className="cn-profile-avatar">
-            {icon ? <ProfileIconGlyph opt={icon} size={24} /> : <Flag code={country?.code} size={24} />}
+        <div className="cn-profile-banner cn-profile-banner--peek">
+          <div className="cn-profile-banner-bg">
+            <span className="cn-profile-banner-dev-tag">Банер профілю: у розробці</span>
           </div>
-          <div className="cn-profile-name">{player.username}</div>
-          <div className="cn-profile-country">{country?.name}</div>
-          <div className="cn-profile-chips">
-            {title && (
-              <span className="cn-profile-chip cn-profile-chip--title">
-                <Sparkles size={12} /> {title.label}
+
+          <div className="cn-profile-hero">
+            <div className="cn-profile-avatar-ring cn-profile-avatar-ring--static">
+              {icon ? <ProfileIconGlyph opt={icon} size={44} /> : <Flag code={country?.code} size={40} />}
+            </div>
+
+            <div className="cn-profile-name-banner">
+              <div className="cn-profile-name-row">
+                <div className="cn-profile-name">{player.username}</div>
+              </div>
+              <span className="cn-profile-title-pill cn-profile-title-pill--static">
+                {title ? title.label : "Без титулу"}
               </span>
-            )}
-            {badges.map((b) => (
-              <span key={b.id} className="cn-profile-chip cn-profile-chip--badge">
-                <img src={b.icon} alt="" style={{ width: 12, height: 12 }} /> {b.label}
-              </span>
-            ))}
+            </div>
           </div>
         </div>
 
-        <div className="cn-profile-grid">
-          <ProfileStat label="Power" value={fmt(player.power)} />
-          <ProfileStat label="Total Clicks" value={fmt(player.totalClicks)} />
-          <ProfileStat label="Global Rank" value={typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank} />
+        <div className="cn-profile-stats-bar">
+          <div className="cn-profile-stats-item cn-profile-stats-item--static">
+            <span className="cn-profile-stats-icon"><MousePointerClick size={18} /></span>
+            <span className="cn-profile-stats-text">
+              <span className="cn-profile-stats-label">Всього кліків</span>
+              <span className="cn-profile-stats-value">{fmt(player.totalClicks)}</span>
+            </span>
+          </div>
+
+          <div className="cn-profile-stats-divider" />
+
+          <div className="cn-profile-stats-item cn-profile-stats-item--static">
+            <span className="cn-profile-stats-icon"><Globe2 size={18} /></span>
+            <span className="cn-profile-stats-text">
+              <span className="cn-profile-stats-label">Країна</span>
+              <span className="cn-profile-stats-value cn-profile-stats-value--country">
+                <Flag code={country?.code} size={14} className="cn-profile-stats-flag" /> {country?.name}
+              </span>
+            </span>
+          </div>
+
+          <div className="cn-profile-stats-divider" />
+
+          <div className="cn-profile-stats-item cn-profile-stats-item--static">
+            <span className="cn-profile-stats-icon"><Star size={18} /></span>
+            <span className="cn-profile-stats-text">
+              <span className="cn-profile-stats-label">Глобальний рейтинг</span>
+              <span className="cn-profile-stats-value">
+                {typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank}
+              </span>
+            </span>
+          </div>
+        </div>
+
+        <div className="cn-profile-badges-card">
+          <div className="cn-profile-badges-header cn-profile-badges-header--static">
+            <span className="cn-profile-badges-header-left">
+              <Shield size={16} /> Значки
+            </span>
+            <span className="cn-profile-badges-header-right">
+              {Math.min(badges.length, MAX_EQUIPPED_BADGES)}/{MAX_EQUIPPED_BADGES}
+            </span>
+          </div>
+
+          <div className="cn-profile-badge-row">
+            {Array.from({ length: MAX_EQUIPPED_BADGES }).map((_, i) => {
+              const b = badges[i];
+              return (
+                <div
+                  key={i}
+                  className={"cn-badge-slot2" + (b ? " cn-badge-slot2--filled" : "")}
+                >
+                  <span className="cn-badge-slot2-ring">
+                    {b ? <img src={b.icon} alt={b.label} /> : <Lock size={14} />}
+                  </span>
+                  <span className="cn-badge-slot2-label">{b ? b.label : "???"}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </div>
@@ -7845,64 +7938,135 @@ function GlobalStyles() {
       .cn-profile-chip--badge { color: #C4B5FD; background: rgba(167,139,250,0.12); border: 1px solid rgba(167,139,250,0.35); }
       .cn-profile-chip--leader { color: #FCD34D; background: rgba(252,211,77,0.12); border: 1px solid rgba(252,211,77,0.35); }
 
+      /* Profile banner (background placeholder + hero avatar/name) */
+      .cn-profile-banner {
+        position: relative; border-radius: 22px; overflow: hidden; margin-bottom: 14px;
+        border: 1px solid rgba(var(--cn-accent-rgb),0.4);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      }
+      .cn-profile-banner-bg {
+        position: absolute; inset: 0;
+        background:
+          repeating-linear-gradient(135deg, rgba(255,255,255,0.03) 0 14px, rgba(255,255,255,0) 14px 28px),
+          radial-gradient(140% 120% at 20% 0%, rgba(var(--cn-accent-rgb),0.32), transparent 60%),
+          radial-gradient(140% 120% at 100% 100%, rgba(var(--cn-accent-rgb),0.22), transparent 55%),
+          linear-gradient(160deg, #060c1c, #0b1730 55%, #060c1c);
+      }
+      .cn-profile-banner-dev-tag {
+        position: absolute; top: 10px; left: 10px; z-index: 1;
+        font-size: 9.5px; letter-spacing: 0.04em; font-weight: 700; text-transform: uppercase;
+        color: var(--cn-text-dim); background: rgba(3,8,20,0.55); border: 1px solid rgba(var(--cn-accent-rgb),0.35);
+        padding: 4px 9px; border-radius: 999px;
+      }
+
       /* Profile hero (avatar ring, name, id) */
-      .cn-profile-hero { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 0 18px; }
+      .cn-profile-hero { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 0; padding: 26px 16px 22px; }
       .cn-profile-avatar-ring {
-        width: 96px; height: 96px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        width: 104px; height: 104px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
         background: radial-gradient(120% 120% at 30% 20%, rgba(var(--cn-accent-rgb),0.28), rgba(6,14,32,0.9));
-        border: 2px solid rgba(var(--cn-accent-rgb),0.75); color: #EAF6FF; cursor: pointer;
-        box-shadow: 0 0 28px rgba(var(--cn-accent-rgb),0.45), inset 0 0 16px rgba(255,255,255,0.06);
-        margin-bottom: 10px;
-        position: relative; overflow: hidden;
+        border: 3px solid rgba(var(--cn-accent-rgb),0.85); color: #EAF6FF; cursor: pointer;
+        box-shadow: 0 0 32px rgba(var(--cn-accent-rgb),0.5), inset 0 0 16px rgba(255,255,255,0.08);
+        margin-bottom: -14px; position: relative; overflow: hidden; z-index: 2;
+      }
+      .cn-profile-name-banner {
+        position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
+        padding: 22px 22px 12px; margin-top: 0; min-width: 190px;
+        background: linear-gradient(180deg, rgba(6,14,32,0.92), rgba(6,14,32,0.75));
+        border: 1px solid rgba(var(--cn-accent-rgb),0.45); border-radius: 16px;
+        box-shadow: 0 0 20px rgba(var(--cn-accent-rgb),0.18);
+      }
+      .cn-profile-name-banner-crown {
+        position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
+        color: #FCD34D; filter: drop-shadow(0 0 4px rgba(252,211,77,0.9));
       }
       .cn-profile-name-row { display: flex; align-items: center; gap: 8px; }
       .cn-profile-edit-btn {
-        width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+        width: 24px; height: 24px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
         background: rgba(var(--cn-accent-rgb),0.14); border: 1px solid rgba(var(--cn-accent-rgb),0.4); color: var(--cn-accent-bright); cursor: pointer;
+      }
+      .cn-profile-title-pill {
+        display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700;
+        color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.14);
+        border: 1px solid rgba(var(--cn-accent-rgb),0.4); border-radius: 999px; padding: 5px 12px; cursor: pointer;
       }
       .cn-profile-id-row {
         display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--cn-text-dim); margin-top: 2px;
       }
+      .cn-profile-id-row--centered { justify-content: center; margin: 4px 0 14px; }
       .cn-profile-copy-btn {
         width: 22px; height: 22px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
         background: rgba(var(--cn-accent-rgb),0.1); border: 1px solid rgba(var(--cn-accent-rgb),0.3); color: var(--cn-text-dim); cursor: pointer;
       }
 
-      /* Profile info card: country / title / badges */
-      .cn-profile-info-card {
-        padding: 14px; border-radius: 20px; margin-bottom: 18px;
+      /* Profile stats bar: total clicks / country / global rank */
+      .cn-profile-stats-bar {
+        display: flex; align-items: stretch; gap: 4px; padding: 14px 10px; margin-bottom: 14px;
+        border-radius: 18px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.4);
+      }
+      .cn-profile-stats-item {
+        flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; background: none; border: none; cursor: pointer;
+        padding: 2px; text-align: left;
+      }
+      .cn-profile-stats-item--static { cursor: default; }
+      .cn-profile-stats-icon {
+        width: 34px; height: 34px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        background: rgba(var(--cn-accent-rgb),0.14); border: 1px solid rgba(var(--cn-accent-rgb),0.4); color: var(--cn-accent-bright);
+      }
+      .cn-profile-stats-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .cn-profile-stats-label {
+        font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cn-text-dimmer); white-space: nowrap;
+      }
+      .cn-profile-stats-value {
+        font-size: 13.5px; font-weight: 700; color: var(--cn-text); font-family: 'Space Grotesk', sans-serif;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .cn-profile-stats-value--country { display: flex; align-items: center; gap: 5px; }
+      .cn-profile-stats-flag { border-radius: 3px; flex-shrink: 0; }
+      .cn-profile-stats-divider { width: 1px; align-self: stretch; background: rgba(var(--cn-accent-rgb),0.22); flex-shrink: 0; }
+
+      /* Profile badges card */
+      .cn-profile-badges-card {
+        padding: 14px; border-radius: 18px; margin-bottom: 18px;
         background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.4);
       }
-      .cn-profile-info-row { display: flex; align-items: center; gap: 12px; }
-      .cn-profile-info-flag { border-radius: 6px; flex-shrink: 0; }
-      .cn-profile-info-text { flex: 1; min-width: 0; }
-      .cn-profile-info-label {
-        font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cn-text-dimmer); margin-bottom: 2px;
+      .cn-profile-badges-header {
+        display: flex; align-items: center; justify-content: space-between; width: 100%;
+        background: none; border: none; cursor: pointer; color: var(--cn-text); padding: 0 0 12px;
       }
-      .cn-profile-info-label--section { margin: 14px 0 8px; }
-      .cn-profile-info-value { font-size: 14.5px; font-weight: 700; color: var(--cn-text); }
-      .cn-profile-change-btn {
-        padding: 8px 16px; border-radius: 12px; font-size: 12.5px; font-weight: 700; white-space: nowrap;
-        background: rgba(var(--cn-accent-rgb),0.12); border: 1px solid rgba(var(--cn-accent-rgb),0.5); color: var(--cn-accent-bright); cursor: pointer;
+      .cn-profile-badges-header-left { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700; }
+      .cn-profile-badges-header-right {
+        display: flex; align-items: center; gap: 3px; font-size: 12px; font-weight: 700; color: var(--cn-text-dim);
       }
-      .cn-profile-info-divider { height: 1px; background: rgba(var(--cn-accent-rgb),0.2); margin: 14px 0; }
-      .cn-profile-title-row {
-        display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; cursor: pointer;
-        padding: 12px 14px; border-radius: 14px; background: rgba(3,8,20,0.5); border: 1px solid rgba(var(--cn-accent-rgb),0.3); color: var(--cn-text);
+      .cn-profile-badge-row {
+        display: flex; gap: 10px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none;
       }
-      .cn-profile-title-row-icon { color: var(--cn-accent-bright); flex-shrink: 0; display: flex; }
-      .cn-profile-title-row-text { flex: 1; font-size: 13.5px; font-weight: 600; }
-      .cn-profile-badge-slots { display: flex; gap: 8px; justify-content: space-between; }
-      .cn-badge-slot {
-        flex: 1; aspect-ratio: 1; max-width: 56px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
-        background: rgba(3,8,20,0.5); border: 1px dashed rgba(var(--cn-accent-rgb),0.35); color: var(--cn-text-dimmer); cursor: pointer;
-        clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+      .cn-profile-badge-row::-webkit-scrollbar { display: none; }
+      .cn-badge-slot2 {
+        flex: 0 0 auto; width: 58px; display: flex; flex-direction: column; align-items: center; gap: 6px;
+        background: none; border: none; cursor: pointer; color: var(--cn-text-dimmer);
       }
-      .cn-badge-slot--filled {
-        border-style: solid; border-color: rgba(var(--cn-accent-rgb),0.6); color: var(--cn-accent-bright);
-        background: rgba(var(--cn-accent-rgb),0.14); box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.3);
+      .cn-badge-slot2-ring {
+        width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        background: rgba(3,8,20,0.5); border: 1.5px dashed rgba(var(--cn-accent-rgb),0.35); color: var(--cn-text-dimmer);
       }
+      .cn-badge-slot2-ring img { width: 26px; height: 26px; object-fit: contain; }
+      .cn-badge-slot2--filled .cn-badge-slot2-ring {
+        border-style: solid; border-color: rgba(var(--cn-accent-rgb),0.7);
+        background: radial-gradient(120% 120% at 30% 20%, rgba(var(--cn-accent-rgb),0.35), rgba(6,14,32,0.9));
+        box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.35);
+      }
+      .cn-badge-slot2-label {
+        font-size: 9.5px; font-weight: 600; text-align: center; line-height: 1.15; color: var(--cn-text-dim);
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+      }
+      .cn-badge-slot2--filled .cn-badge-slot2-label { color: var(--cn-text); }
       .cn-achv-hint { font-size: 12px; color: var(--cn-text-dimmer); margin-bottom: 12px; }
+
+      /* Read-only variants (viewing another player's profile) */
+      .cn-profile-banner--peek { margin-bottom: 12px; }
+      .cn-profile-avatar-ring--static { cursor: default; }
+      .cn-profile-title-pill--static { cursor: default; }
+      .cn-profile-badges-header--static { cursor: default; padding-bottom: 12px; }
 
       .cn-menu-list { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; padding-bottom: 12px; }
       .cn-menu-row {
