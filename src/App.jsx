@@ -4028,8 +4028,21 @@ function LbAvatar({ player }) {
 }
 
 function PlayerRow({ p, rank, isMine, country }) {
+  const banner = bannerById(p.equippedBanner);
   return (
-    <div className={"cn-row cn-row--player" + (isMine ? " cn-row--mine" : "") + (p.hasPremiumPass ? " cn-row--premium" : "")}>
+    <div
+      className={
+        "cn-row cn-row--player" +
+        (isMine ? " cn-row--mine" : "") +
+        (p.hasPremiumPass ? " cn-row--premium" : "") +
+        (banner ? " cn-row--banner" : "")
+      }
+      style={
+        banner
+          ? { backgroundImage: `linear-gradient(90deg, rgba(6,10,18,0.78), rgba(6,10,18,0.42)), url(${banner.img})` }
+          : undefined
+      }
+    >
       <span className={"cn-row-rank" + rankClass(rank)}>{rank}</span>
       <LbAvatar player={p} />
       <Flag code={country?.code} size={16} className="cn-row-flag" />
@@ -7973,6 +7986,14 @@ function GlobalStyles() {
 
       /* Leaderboard avatars + premium frame */
       .cn-row--player { padding: 8px 13px; }
+      .cn-row--banner {
+        background-size: cover;
+        background-position: center;
+        border-color: rgba(255,255,255,0.18);
+      }
+      .cn-row--banner .cn-row-name,
+      .cn-row--banner .cn-row-value { color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
+      .cn-row--banner.cn-row--mine { background-blend-mode: normal; box-shadow: 0 0 16px rgba(var(--cn-accent-rgb),0.35); }
       .cn-lb-avatar {
         position: relative; width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
         display: flex; align-items: center; justify-content: center;
