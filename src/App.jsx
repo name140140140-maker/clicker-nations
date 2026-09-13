@@ -55,6 +55,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
+import WorldMap3D from "./WorldMap3D";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
@@ -6078,10 +6079,7 @@ function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityContr
 
 function WorldMapScreen({ players, me, wars, onShowRegions }) {
   const [selected, setSelected] = useState(null);
-  const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
   const [leaderInfo, setLeaderInfo] = useState(null); // { username } | null | undefined(loading)
-  const dragRef = useRef(null);
-  const svgRef = useRef(null);
 
   const ranked = useMemo(() => {
     const map = {};
@@ -6126,153 +6124,18 @@ function WorldMapScreen({ players, me, wars, onShowRegions }) {
     };
   }, [selected, players]);
 
-  /* Drag to pan. During the drag itself we mutate the SVG's transform
-     directly on the DOM node (bypassing React) so ~470 country paths
-     don't get diffed on every single pointermove event; the final
-     position is committed to React state once, on pointer up. */
-  const onPointerDown = (e) => {
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: view.x, origY: view.y, lastX: view.x, lastY: view.y, moved: false };
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-  };
-  const rafRef = useRef(null);
-  const onPointerMove = (e) => {
-    if (!dragRef.current) return;
-    const { startX, startY, origX, origY } = dragRef.current;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragRef.current.moved = true;
-    const nx = origX + dx;
-    const ny = origY + dy;
-    dragRef.current.lastX = nx;
-    dragRef.current.lastY = ny;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(() => {
-      if (svgRef.current) {
-        svgRef.current.style.transform = `translate(${nx}px, ${ny}px) scale(${view.scale})`;
-      }
-    });
-  };
-  const onPointerUp = () => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    if (dragRef.current) {
-      const { lastX, lastY } = dragRef.current;
-      setView((v) => ({ ...v, x: lastX, y: lastY }));
-    }
-    dragRef.current = null;
-  };
-  const onWheel = (e) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -0.25 : 0.25;
-    setView((v) => ({ ...v, scale: clamp(+(v.scale + delta).toFixed(2), 0.8, 8) }));
-  };
-
-  const zoomIn = () => setView((v) => ({ ...v, scale: clamp(+(v.scale + 0.5).toFixed(2), 0.8, 8) }));
-  const zoomOut = () => setView((v) => ({ ...v, scale: clamp(+(v.scale - 0.5).toFixed(2), 0.8, 8) }));
-  const resetView = () => setView({ x: 0, y: 0, scale: 1 });
-
   return (
     <>
-      <div className="cn-map-hint">Перетягуй мапу та масштабуй, натисни будь-яку країну, щоб побачити деталі</div>
+      <div className="cn-map-hint">Перетягуй мапу, обертай і нахиляй, натисни на країну, щоб побачити деталі</div>
 
       <div className="cn-map-viewport-wrap">
-        <div
-          className="cn-map-viewport"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
-          onWheel={onWheel}
-        >
-          <svg
-            ref={svgRef}
-            viewBox={MAP_VIEWBOX}
-            className="cn-map-svg"
-            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
-          >
-            <rect x="0" y="0" width="2000" height="857" fill="transparent" />
-            {ranked.map((c) => {
-              const isMine = me?.countryCode === c.code;
-              const isSelected = selected === c.code;
-              const fillColor = isMine ? "#3a2f10" : mixColor(c.ratio);
-              return (
-                <g
-                  key={c.code}
-                  className={
-                    "cn-map-country" +
-                    (isMine ? " cn-map-country--mine" : "") +
-                    (isSelected ? " cn-map-country--selected" : "")
-                  }
-                  onClick={() => selectCountry(c.code)}
-                >
-                  {(COUNTRY_SVG_PATHS[c.code] || []).map((d, i) => (
-                    <path key={i} d={d} style={{ fill: fillColor }} />
-                  ))}
-                </g>
-              );
-            })}
-            {ranked
-              .filter((c) => c.rank === 1 || me?.countryCode === c.code)
-              .map((c) => {
-                const centroid = COUNTRY_CENTROIDS[c.code];
-                if (!centroid) return null;
-                const [cx, cy] = centroid;
-                const isMine = me?.countryCode === c.code;
-                return (
-                  <g key={"mk" + c.code} transform={`translate(${cx},${cy})`} pointerEvents="none">
-                    {isMine && <circle className="cn-map-pulse-ring" r="14" />}
-                    {c.rank === 1 && (
-                      <text x="0" y="-16" textAnchor="middle" fontSize="26" className="cn-map-crown">
-                        👑
-                      </text>
-                    )}
-                    <text x="0" y="8" textAnchor="middle" fontSize="20" className="cn-map-flag-label">
-                      {c.flag}
-                    </text>
-                  </g>
-                );
-              })}
-            {(wars || [])
-              .filter((w) => w.status !== "ended")
-              .map((w) => {
-                const centroid = COUNTRY_CENTROIDS[w.defenderCountry];
-                if (!centroid) return null;
-                const [cx, cy] = centroid;
-                return (
-                  <text
-                    key={"fire-" + w.id}
-                    x={cx}
-                    y={cy - 30}
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    fontSize="22"
-                    className="cn-map-fire-icon"
-                    pointerEvents="none"
-                  >
-                    🔥
-                  </text>
-                );
-              })}
-          </svg>
-        </div>
-
-        <div className="cn-map-toolbar">
-          <button className="cn-map-zoom-btn" onClick={zoomIn} type="button" aria-label="Наблизити">
-            +
-          </button>
-          <button className="cn-map-zoom-btn" onClick={zoomOut} type="button" aria-label="Віддалити">
-            −
-          </button>
-          <button className="cn-map-zoom-btn cn-map-zoom-btn--reset" onClick={resetView} type="button" aria-label="Скинути">
-            ⟲
-          </button>
+        <div className="cn-map-viewport">
+          <WorldMap3D ranked={ranked} selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} />
         </div>
       </div>
 
       <div className="cn-map-legend">
-        <span className="cn-map-legend-dot" /> Яскравість позначки = сила країни
+        <span className="cn-map-legend-dot" /> Колір країни = її сила у грі
       </div>
 
       {selectedCountry && (
@@ -8343,6 +8206,9 @@ function GlobalStyles() {
         cursor: grab; touch-action: none;
       }
       .cn-map-viewport--big { aspect-ratio: 4 / 3; }
+      .cn-map3d-wrap { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .cn-map3d-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .maplibregl-ctrl-attrib { font-size: 9px; opacity: 0.5; }
       .cn-map-viewport:active { cursor: grabbing; }
       .cn-map-svg { width: 100%; height: 100%; display: block; transform-origin: 0 0; }
       .cn-map-country path { stroke: var(--cn-accent); stroke-width: 1; cursor: pointer; transition: filter 0.15s ease, stroke-width 0.15s ease; }
