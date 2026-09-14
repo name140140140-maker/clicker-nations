@@ -70,6 +70,74 @@ function boundsFromGeometry(geometry) {
   return [[minLng, minLat], [maxLng, maxLat]];
 }
 
+/* Знаходить id джерела вектор-тайлів, яке містить вказаний source-layer
+   (напр. "boundary" чи "place") — без здогадок про конкретну назву,
+   читаємо її напряму зі стилю, що вже завантажений. */
+function findVectorSourceId(style, sourceLayerName) {
+  const layer = style.layers?.find((l) => l["source-layer"] === sourceLayerName);
+  return layer ? layer.source : null;
+}
+
+/* Додає кордони областей (тонкі пунктирні лінії) та назви міст —
+   з'являються лише при наближенні, дані беремо з тієї самої базової
+   карти (OpenFreeMap), нічого додатково завантажувати не треба. */
+function addRegionsAndCityLabels(map) {
+  const style = map.getStyle();
+  const boundarySourceId = findVectorSourceId(style, "boundary");
+  const placeSourceId = findVectorSourceId(style, "place");
+  const textFont =
+    style.layers?.find((l) => l.type === "symbol" && l.layout?.["text-font"])?.layout?.["text-font"] ||
+    ["Noto Sans Regular"];
+
+  if (boundarySourceId) {
+    try {
+      map.addLayer({
+        id: "cn-admin-regions",
+        type: "line",
+        source: boundarySourceId,
+        "source-layer": "boundary",
+        filter: ["all", ["==", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], true]],
+        minzoom: 3.2,
+        paint: {
+          "line-color": "#4d7fac",
+          "line-width": 1,
+          "line-dasharray": [2, 2],
+          "line-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4.5, 0.75],
+        },
+      });
+    } catch {
+      /* базова карта може не мати цього джерела — пропускаємо без помилки */
+    }
+  }
+
+  if (placeSourceId) {
+    try {
+      map.addLayer({
+        id: "cn-place-cities",
+        type: "symbol",
+        source: placeSourceId,
+        "source-layer": "place",
+        filter: ["in", ["get", "class"], ["literal", ["city", "town"]]],
+        minzoom: 4,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-font": textFont,
+          "text-size": ["interpolate", ["linear"], ["zoom"], 4, 9, 8, 13],
+          "text-anchor": "top",
+          "text-offset": [0, 0.3],
+        },
+        paint: {
+          "text-color": "#dbe9ff",
+          "text-halo-color": "#050810",
+          "text-halo-width": 1.2,
+        },
+      });
+    } catch {
+      /* немає шару міст у цій базовій карті — пропускаємо без помилки */
+    }
+  }
+}
+
 export default function WorldMap3D({ selected, onSelect, myCountryCode }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -169,6 +237,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode }) {
         map.on("mouseleave", "cn-countries-fill", () => {
           map.getCanvas().style.cursor = "";
         });
+
+        addRegionsAndCityLabels(map);
 
         readyRef.current = true;
       } catch (err) {
