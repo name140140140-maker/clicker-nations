@@ -2,6 +2,14 @@
 // Створює посилання на оплату через Telegram Stars (валюта "XTR").
 // Токен бота НІКОЛИ не потрапляє у код фронтенду — він читається
 // лише тут, на сервері, зі змінної середовища BOT_TOKEN.
+//
+// Клієнт зобов'язаний передати свої Telegram WebApp initData — вони
+// перевіряються (HMAC підпис Telegram), і саме перевірений telegramId
+// зашивається в payload інвойсу. Це потрібно, щоб пізніше, коли прийде
+// реальне підтвердження оплати (successful_payment) на /api/webhook,
+// сервер точно знав, кому видавати Premium Pass — а не довіряв клієнту.
+
+import { verifyTelegramInitData } from "./_telegramAuth.js";
 
 const SUPABASE_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
 const SUPABASE_KEY = "sb_publishable_Kp13ZD0NtWypUYegahB35g_X2nOWmzn";
@@ -36,8 +44,18 @@ export default async function handler(req, res) {
     return;
   }
 
+  const { initData } = req.body || {};
+  const user = verifyTelegramInitData(initData, BOT_TOKEN);
+  if (!user) {
+    res.status(401).json({ error: "Не вдалося підтвердити Telegram-користувача" });
+    return;
+  }
+
   try {
     const price = await getPremiumPassPrice();
+    const nonce = Math.random().toString(36).slice(2, 10);
+    const payload = `premium_pass:${user.id}:${nonce}`;
+
     const tgRes = await fetch(
       `https://api.telegram.org/bot${BOT_TOKEN}/createInvoiceLink`,
       {
@@ -46,7 +64,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           title: "Premium Pass",
           description: "2× сили, ексклюзивні аватарки, титули та значки на весь сезон",
-          payload: "premium_pass_purchase",
+          payload,
           provider_token: "", // порожній рядок обов'язковий для оплати Telegram Stars
           currency: "XTR",
           prices: [{ label: "Premium Pass", amount: price }],

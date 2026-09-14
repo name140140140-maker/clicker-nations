@@ -128,6 +128,10 @@ const ID_KEY = "my-player-id";
 const TUTORIAL_KEY = "tutorial-done-v1";
 const TOS_KEY = "tos-accepted-v1";
 const PLAYER_PREFIX = "players:";
+// Мапінг Telegram ID -> playerId. Гравець зберігається під рандомним genId(),
+// тому щоб серверний webhook міг знайти правильний запис після оплати,
+// клієнт при створенні/бекфілі гравця пише сюди tgmap:{telegramId} -> playerId.
+const TG_MAP_PREFIX = "tgmap:";
 const LEADERBOARD_STALE_MS = 8000;
 
 /* ------------------------------------------------------------------ */
@@ -1425,6 +1429,16 @@ export default function App() {
             if (rec.__offlineCredited) {
               const { __offlineCredited, ...clean } = rec;
               await storageSet(PLAYER_PREFIX + id, JSON.stringify(clean), true);
+              rec = clean;
+            }
+            // Бекфіл: у старих записах ще немає telegramId — доклеюємо
+            // поле й мапінг, інакше сервер не зможе видати Premium Pass.
+            const tgUser = getTelegramUser();
+            if (tgUser?.id && !rec.telegramId) {
+              const patched = { ...rec, telegramId: tgUser.id };
+              setPlayer(patched);
+              await storageSet(PLAYER_PREFIX + id, JSON.stringify(patched), true);
+              await storageSet(TG_MAP_PREFIX + tgUser.id, id, true);
             }
           } catch {
             /* corrupt record, ignore */
@@ -1438,8 +1452,11 @@ export default function App() {
   /* Create a new player */
   const createPlayer = useCallback(async (username, countryCode) => {
     const id = genId();
+    const tgUser = getTelegramUser();
+    const telegramId = tgUser?.id ?? null;
     const rec = {
       id,
+      telegramId,
       username: username.trim() || "Гравець",
       countryCode,
       power: 0,
@@ -1456,6 +1473,7 @@ export default function App() {
     };
     await storageSet(ID_KEY, id, false);
     await storageSet(PLAYER_PREFIX + id, JSON.stringify(rec), true);
+    if (telegramId) await storageSet(TG_MAP_PREFIX + telegramId, id, true);
     setPlayer(rec);
   }, []);
 
@@ -4435,7 +4453,11 @@ async function buyPremiumPass(me, onSetPlayer) {
 
   let link;
   try {
-    const resp = await fetch("/api/create-invoice", { method: "POST" });
+    const resp = await fetch("/api/create-invoice", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: tg.initData || "" }),
+    });
     const data = await resp.json();
     if (!data.link) throw new Error(data.error || "Не вдалося створити рахунок");
     link = data.link;
@@ -4451,12 +4473,34 @@ async function buyPremiumPass(me, onSetPlayer) {
         resolve(false);
         return;
       }
-      const updated = { ...me, hasPremiumPass: true };
-      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-      onSetPlayer(updated);
-      resolve(true);
+      // Premium видає СЕРВЕР через /api/webhook після реального платежу.
+      // Клієнт більше нічого сам не пише — лише чекає, поки запис
+      // гравця (players:{me.id}) оновиться в базі.
+      const finalRecord = await waitForPremiumGrant(me.id);
+      if (finalRecord) {
+        onSetPlayer(finalRecord);
+      } else {
+        alert("Оплата пройшла, але активація Premium триває довше зазвичай. Онови гру за хвилину.");
+      }
+      resolve(!!finalRecord?.hasPremiumPass);
     });
   });
+}
+
+async function waitForPremiumGrant(playerId, attempts = 8, delayMs = 1500) {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    const raw = await storageGet(PLAYER_PREFIX + playerId, true);
+    if (raw) {
+      try {
+        const rec = JSON.parse(raw);
+        if (rec.hasPremiumPass) return rec;
+      } catch {
+        /* ignore corrupt record, keep polling */
+      }
+    }
+  }
+  return null;
 }
 
 function ProfileScreen({
