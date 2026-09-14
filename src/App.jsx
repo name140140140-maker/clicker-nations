@@ -89,6 +89,7 @@ const AUTO_CLICKER_TICK_MS = 200;
 const AUTO_CLICKER_DAILY_LIMIT_MS = 12 * 60 * 60 * 1000;
 /* Кулдаун між діями лідера/радника/повстанця (8 годин) */
 const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
+export { cnSfx };
 
 /* Автоклікер, поки гравець НЕ в грі: коли гра завантажується, рахуємо,
    скільки енергії "накопичилось" за час відсутності (регенерація вже
@@ -6130,16 +6131,16 @@ function WorldMapScreen({ players, me, wars, onShowRegions }) {
 
       <div className="cn-map-viewport-wrap">
         <div className="cn-map-viewport">
-          <WorldMap3D ranked={ranked} selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} />
+          <WorldMap3D selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} />
         </div>
       </div>
 
       <div className="cn-map-legend">
-        <span className="cn-map-legend-dot" /> Колір країни = її сила у грі
+        <span className="cn-map-legend-dot" /> Твоя країна світиться яскравіше за інші
       </div>
 
       {selectedCountry && (
-        <div className="cn-map-card">
+        <div className="cn-map-card cn-map-card--anim" key={selectedCountry.code}>
           <button className="cn-map-card-close" onClick={() => setSelected(null)} type="button" aria-label="Закрити">
             <X size={14} />
           </button>
@@ -8208,7 +8209,16 @@ function GlobalStyles() {
       .cn-map-viewport--big { aspect-ratio: 4 / 3; }
       .cn-map3d-wrap { position: absolute; inset: 0; width: 100%; height: 100%; }
       .cn-map3d-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .cn-map3d-loading {
+        position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 12px; background: #050810; color: var(--cn-text-dim); font-size: 13px;
+      }
       .maplibregl-ctrl-attrib { font-size: 9px; opacity: 0.5; }
+      @keyframes cn-card-in {
+        from { opacity: 0; transform: translateY(14px) scale(0.97); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      .cn-map-card--anim { animation: cn-card-in 0.38s cubic-bezier(0.22, 1, 0.36, 1); }
       .cn-map-viewport:active { cursor: grabbing; }
       .cn-map-svg { width: 100%; height: 100%; display: block; transform-origin: 0 0; }
       .cn-map-country path { stroke: var(--cn-accent); stroke-width: 1; cursor: pointer; transition: filter 0.15s ease, stroke-width 0.15s ease; }
