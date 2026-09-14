@@ -89,7 +89,7 @@ const AUTO_CLICKER_TICK_MS = 200;
 const AUTO_CLICKER_DAILY_LIMIT_MS = 12 * 60 * 60 * 1000;
 /* Кулдаун між діями лідера/радника/повстанця (8 годин) */
 const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
-export { cnSfx };
+export { cnSfx, getRegionData };
 
 /* Автоклікер, поки гравець НЕ в грі: коли гра завантажується, рахуємо,
    скільки енергії "накопичилось" за час відсутності (регенерація вже
@@ -6060,7 +6060,7 @@ function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityContr
       </div>
 
       {!drillCountry ? (
-        <WorldMapScreen players={players} me={me} wars={wars} onShowRegions={setDrillCountry} />
+        <WorldMapScreen players={players} me={me} wars={wars} cityControl={cityControl} onShowRegions={setDrillCountry} />
       ) : (
         <RegionMapScreen
           countryCode={drillCountry}
@@ -6078,7 +6078,7 @@ function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityContr
   );
 }
 
-function WorldMapScreen({ players, me, wars, onShowRegions }) {
+function WorldMapScreen({ players, me, wars, cityControl, onShowRegions }) {
   const [selected, setSelected] = useState(null);
   const [leaderInfo, setLeaderInfo] = useState(null); // { username } | null | undefined(loading)
 
@@ -6131,7 +6131,7 @@ function WorldMapScreen({ players, me, wars, onShowRegions }) {
 
       <div className="cn-map-viewport-wrap">
         <div className="cn-map-viewport">
-          <WorldMap3D selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} />
+          <WorldMap3D selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} cityControl={cityControl} />
         </div>
       </div>
 

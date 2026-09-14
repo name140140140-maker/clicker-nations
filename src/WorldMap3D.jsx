@@ -1,7 +1,57 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
-import { cnSfx } from "./App";
+import { cnSfx, getRegionData } from "./App";
+
+/* --- ПІЛОТНА ЗОНА: тест реальних меж областей на прикладі України ---
+   Поки що тільки для цієї країни ми маємо реальні геополігони областей
+   (geoBoundaries, публічна ліцензія CC-BY), звірені з іменами регіонів
+   гри. Якщо тест підтвердить, що це працює добре — розширимо на інші
+   країни тим самим підходом. */
+const PILOT_REGION_COUNTRY = "UA";
+const PILOT_REGIONS_GEOJSON_URL =
+  "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson";
+
+/* Відомі розбіжності назв між грою та реальним геонабором даних
+   (перейменування областей, старі/нові назви тощо). */
+const PILOT_NAME_ALIASES = {
+  kirovohrad: ["kropyvnytskyi", "kirovograd"],
+  transcarpathia: ["zakarpattia", "zakarpatska", "zakarpattya"],
+  lviv: ["lvivska", "lvov"],
+  odessa: ["odesa", "odeska"],
+  crimea: ["avtonomnarespublikakrym", "autonomousrepublicofcrimea"],
+  kyivcity: ["kyiv city", "misto kyiv", "kyivcity"],
+};
+
+function normalizePilotName(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/['’‘]/g, "")
+    .replace(/\b(oblast|region|province|city|autonomous republic of|republic of)\b/g, "")
+    .replace(/[^a-z]/g, "")
+    .trim();
+}
+
+/* Зіставляє назву області гри з реальним об'єктом геоданих за
+   нормалізованою назвою або відомим аліасом; повертає null, якщо
+   впевненого збігу не знайдено (тоді ця область просто не бере
+   участі в новому шарі — не ламає решту карти). */
+function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
+  const norm = normalizePilotName(gameRegionName);
+  if (featuresByNormName[norm]) return featuresByNormName[norm];
+  for (const [key, aliases] of Object.entries(PILOT_NAME_ALIASES)) {
+    if (key === norm || aliases.some((a) => normalizePilotName(a) === norm)) {
+      if (featuresByNormName[key]) return featuresByNormName[key];
+      for (const a of aliases) {
+        const an = normalizePilotName(a);
+        if (featuresByNormName[an]) return featuresByNormName[an];
+      }
+    }
+  }
+  return null;
+}
 
 /* Публічні, безкоштовні джерела даних — без API-ключів:
    - базова "підложка" карти (океан/суша) від OpenFreeMap
@@ -138,14 +188,19 @@ function addRegionsAndCityLabels(map) {
   }
 }
 
-export default function WorldMap3D({ selected, onSelect, myCountryCode }) {
+export default function WorldMap3D({ selected, onSelect, myCountryCode, cityControl }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const readyRef = useRef(false);
   const featuresByCodeRef = useRef({});
+  const regionFeaturesRef = useRef([]);
   const prevSelectedRef = useRef(null);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const cityControlRef = useRef(cityControl);
+  cityControlRef.current = cityControl;
+  const myCountryCodeRef = useRef(myCountryCode);
+  myCountryCodeRef.current = myCountryCode;
   const [loaded, setLoaded] = useState(false);
 
   /* Ініціалізація карти — один раз */
@@ -240,6 +295,69 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode }) {
 
         addRegionsAndCityLabels(map);
 
+        /* --- Пілотний шар: реальні області України, кольор залежить
+           від того, хто зараз контролює область у грі --- */
+        try {
+          const regionsRes = await fetch(PILOT_REGIONS_GEOJSON_URL);
+          const regionsGeo = await regionsRes.json();
+          const featuresByNormName = {};
+          regionsGeo.features.forEach((f) => {
+            const shapeName = f.properties.shapeName || f.properties.shapename || "";
+            featuresByNormName[normalizePilotName(shapeName)] = f;
+          });
+
+          const gameRegions = (getRegionData()[PILOT_REGION_COUNTRY]?.regions || []).map((r) => r.name);
+          const matchedFeatures = [];
+          const unmatched = [];
+          gameRegions.forEach((name) => {
+            const f = matchGameRegionToFeature(name, featuresByNormName);
+            if (f) {
+              const copy = JSON.parse(JSON.stringify(f));
+              const owner = cityControlRef.current?.[PILOT_REGION_COUNTRY + "|" + name] || PILOT_REGION_COUNTRY;
+              copy.properties.cn_region_name = name;
+              copy.properties.cn_region_owner = owner;
+              copy.properties.cn_region_mine = owner === myCountryCodeRef.current ? 1 : 0;
+              matchedFeatures.push(copy);
+            } else {
+              unmatched.push(name);
+            }
+          });
+          if (unmatched.length) {
+            console.warn("WorldMap3D (пілот UA): не знайдено відповідність для областей:", unmatched);
+          }
+
+          regionFeaturesRef.current = matchedFeatures;
+
+          map.addSource("cn-pilot-regions", {
+            type: "geojson",
+            data: { type: "FeatureCollection", features: matchedFeatures },
+          });
+
+          map.addLayer({
+            id: "cn-pilot-regions-fill",
+            type: "fill",
+            source: "cn-pilot-regions",
+            minzoom: 3.2,
+            paint: {
+              "fill-color": ["case", ["==", ["get", "cn_region_mine"], 1], "#22d3ee", "#1c4f7a"],
+              "fill-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4, 0.78],
+            },
+          });
+          map.addLayer({
+            id: "cn-pilot-regions-outline",
+            type: "line",
+            source: "cn-pilot-regions",
+            minzoom: 3.2,
+            paint: {
+              "line-color": "#0a1626",
+              "line-width": 0.7,
+              "line-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4, 1],
+            },
+          });
+        } catch (err) {
+          console.warn("WorldMap3D: пілотний шар областей України не завантажився:", err?.message || err);
+        }
+
         readyRef.current = true;
       } catch (err) {
         console.warn("WorldMap3D: не вдалося завантажити межі країн:", err?.message || err);
@@ -272,6 +390,29 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode }) {
       cancelled = true;
     };
   }, [myCountryCode]);
+
+  /* Перефарбувати пілотний шар областей України, коли змінюється хто
+     контролює область (наприклад після завершення війни) або коли
+     гравець змінив свою країну */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    const src = map.getSource("cn-pilot-regions");
+    if (!src) return;
+    const updated = regionFeaturesRef.current.map((f) => {
+      const owner = cityControl?.[PILOT_REGION_COUNTRY + "|" + f.properties.cn_region_name] || PILOT_REGION_COUNTRY;
+      return {
+        ...f,
+        properties: {
+          ...f.properties,
+          cn_region_owner: owner,
+          cn_region_mine: owner === myCountryCode ? 1 : 0,
+        },
+      };
+    });
+    regionFeaturesRef.current = updated;
+    src.setData({ type: "FeatureCollection", features: updated });
+  }, [cityControl, myCountryCode]);
 
   /* Підсвітка обраної країни + кінематографічний переліт камери до неї,
      і назад до огляду світу при знятті виділення. Плюс звук. */
