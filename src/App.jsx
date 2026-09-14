@@ -24,6 +24,7 @@ import {
   Send,
   Check,
   Ban,
+  ArrowRight,
   Trash2,
   Bug,
   Handshake,
@@ -6081,6 +6082,14 @@ function MapScreen({ players, me, loading, onRefresh, wars, alliances, cityContr
 function WorldMapScreen({ players, me, wars, cityControl, onShowRegions }) {
   const [selected, setSelected] = useState(null);
   const [leaderInfo, setLeaderInfo] = useState(null); // { username } | null | undefined(loading)
+  const [captureToast, setCaptureToast] = useState(null);
+  const captureToastTimerRef = useRef(null);
+
+  const handleCapture = useCallback((evt) => {
+    setCaptureToast(evt);
+    if (captureToastTimerRef.current) clearTimeout(captureToastTimerRef.current);
+    captureToastTimerRef.current = setTimeout(() => setCaptureToast(null), 4200);
+  }, []);
 
   const ranked = useMemo(() => {
     const map = {};
@@ -6131,7 +6140,25 @@ function WorldMapScreen({ players, me, wars, cityControl, onShowRegions }) {
 
       <div className="cn-map-viewport-wrap">
         <div className="cn-map-viewport">
-          <WorldMap3D selected={selected} onSelect={selectCountry} myCountryCode={me?.countryCode} cityControl={cityControl} />
+          <WorldMap3D
+            selected={selected}
+            onSelect={selectCountry}
+            myCountryCode={me?.countryCode}
+            cityControl={cityControl}
+            onCapture={handleCapture}
+          />
+          {captureToast && (
+            <div className="cn-capture-toast" key={captureToast.name + captureToast.newOwner}>
+              <div className="cn-capture-toast-title">⚡ Територію захоплено</div>
+              <div className="cn-capture-toast-name">{captureToast.name}</div>
+              <div className="cn-capture-toast-row">
+                <span>{COUNTRY_MAP[captureToast.previousOwner]?.name || captureToast.previousOwner}</span>
+                <ArrowRight size={13} />
+                <span>{COUNTRY_MAP[captureToast.newOwner]?.name || captureToast.newOwner}</span>
+              </div>
+              <div className="cn-capture-toast-size">≈ {fmt(captureToast.areaKm2)} км²</div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -8219,6 +8246,23 @@ function GlobalStyles() {
         to { opacity: 1; transform: translateY(0) scale(1); }
       }
       .cn-map-card--anim { animation: cn-card-in 0.38s cubic-bezier(0.22, 1, 0.36, 1); }
+      @keyframes cn-toast-in {
+        from { opacity: 0; transform: translate(-50%, -10px) scale(0.95); }
+        to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+      }
+      .cn-capture-toast {
+        position: absolute; top: 14px; left: 50%; z-index: 6; min-width: 200px; max-width: 84%;
+        padding: 12px 16px; border-radius: 14px; text-align: center;
+        background: linear-gradient(160deg, rgba(8,16,30,0.92), rgba(10,25,45,0.88));
+        border: 1px solid rgba(34,211,238,0.55);
+        box-shadow: 0 0 0 1px rgba(34,211,238,0.15), 0 0 26px rgba(34,211,238,0.35), 0 10px 30px rgba(0,0,0,0.5);
+        animation: cn-toast-in 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+        backdrop-filter: blur(6px);
+      }
+      .cn-capture-toast-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 11px; letter-spacing: 0.06em; color: #7cf0ff; text-transform: uppercase; }
+      .cn-capture-toast-name { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 16px; color: #fff; margin-top: 2px; }
+      .cn-capture-toast-row { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; color: #C4D6EF; margin-top: 4px; }
+      .cn-capture-toast-size { font-size: 10.5px; color: #7CA9D6; margin-top: 4px; }
       .cn-map-viewport:active { cursor: grabbing; }
       .cn-map-svg { width: 100%; height: 100%; display: block; transform-origin: 0 0; }
       .cn-map-country path { stroke: var(--cn-accent); stroke-width: 1; cursor: pointer; transition: filter 0.15s ease, stroke-width 0.15s ease; }
