@@ -1,12 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { simplify } from "@turf/turf";
 
 const API_URL = "https://www.geoboundaries.org/api/current/gbOpen/ALL/ADM1/";
 const COUNTRIES_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
 const DATA_DIR = new URL("../public/data/", import.meta.url);
-const OUTPUT_DIR = new URL("../public/data/world-regions/", import.meta.url);
-const MANIFEST_PATH = new URL("../public/data/world-regions-index.json", import.meta.url);
+const OUTPUT_PATH = new URL("../public/data/world-regions.geojson", import.meta.url);
 const CONCURRENCY = 6;
-const MAX_CHUNK_BYTES = 70 * 1024 * 1024;
+const SIMPLIFY_TOLERANCE = 0.05;
 
 async function fetchJson(url) {
   const response = await fetch(url);
@@ -14,8 +14,52 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function toBytes(value) {
-  return Buffer.byteLength(JSON.stringify(value));
+function roundCoord(value) {
+  return Number(value.toFixed(4));
+}
+
+function normalizeGeometry(geometry) {
+  if (!geometry) return geometry;
+
+  const walk = (coords) => {
+    if (!Array.isArray(coords)) return coords;
+    if (typeof coords[0] === "number") {
+      return [roundCoord(coords[0]), roundCoord(coords[1])];
+    }
+    return coords.map(walk);
+  };
+
+  if (geometry.type === "Polygon") {
+    return { ...geometry, coordinates: geometry.coordinates.map((ring) => walk(ring)) };
+  }
+
+  if (geometry.type === "MultiPolygon") {
+    return {
+      ...geometry,
+      coordinates: geometry.coordinates.map((polygon) => polygon.map((ring) => walk(ring))),
+    };
+  }
+
+  return geometry;
+}
+
+function simplifyFeature(feature) {
+  if (!feature || !feature.geometry) return feature;
+
+  let simplified = simplify(feature, {
+    tolerance: SIMPLIFY_TOLERANCE,
+    highQuality: false,
+    mutate: false,
+  });
+
+  simplified = simplify(simplified, {
+    tolerance: SIMPLIFY_TOLERANCE * 1.5,
+    highQuality: false,
+    mutate: false,
+  });
+
+  const normalized = normalizeGeometry(simplified.geometry);
+  return { ...simplified, geometry: normalized };
 }
 
 async function main() {
@@ -35,25 +79,32 @@ async function main() {
     while (next < catalog.length) {
       const metadata = catalog[next++];
       try {
-        const geo = await fetchJson(metadata.simplifiedGeometryGeoJSON);
+        const url = metadata.simplifiedGeometryGeoJSON || metadata.geometryGeoJSON;
+        if (!url || !/simplified/i.test(url)) {
+          console.warn(`Skipping ${metadata.boundaryISO}: not a simplified geometry URL`);
+          continue;
+        }
+        const geo = await fetchJson(url);
         const iso3 = metadata.boundaryISO;
         const iso2 = iso2ByIso3.get(iso3);
         if (!iso2) {
           console.warn(`Skipping ${iso3}: no ISO2 mapping`);
           continue;
         }
+
         for (const feature of geo.features || []) {
           const properties = feature.properties || {};
           if (!feature.geometry || !properties.shapeName) continue;
-          feature.properties = {
+          const cleaned = simplifyFeature(feature);
+          cleaned.properties = {
             cn_region_name: properties.shapeName,
             cn_region_iso: iso2,
             cn_region_iso3: properties.shapeGroup || iso3,
             cn_region_id: properties.shapeID || "",
           };
-          features.push(feature);
+          features.push(cleaned);
         }
-        console.log(`${iso3}: ${geo.features?.length || 0} regions`);
+        console.log(`${iso3}: ${geo.features?.length || 0} regions -> simplified`);
       } catch (error) {
         console.warn(`Skipping ${metadata.boundaryISO}: ${error.message}`);
       }
@@ -64,38 +115,9 @@ async function main() {
   features.sort((a, b) => `${a.properties.cn_region_iso}|${a.properties.cn_region_name}`.localeCompare(`${b.properties.cn_region_iso}|${b.properties.cn_region_name}`));
 
   await mkdir(DATA_DIR, { recursive: true });
-  await mkdir(OUTPUT_DIR, { recursive: true });
-
-  const chunks = [];
-  let chunk = [];
-  let chunkBytes = 0;
-
-  const flush = async () => {
-    if (!chunk.length) return;
-    const index = chunks.length.toString().padStart(3, "0");
-    const fileName = `world-regions-${index}.geojson`;
-    const payload = { type: "FeatureCollection", features: chunk };
-    chunks.push({ fileName, count: chunk.length, bytes: toBytes(payload) });
-    await writeFile(new URL(fileName, OUTPUT_DIR), `${JSON.stringify(payload)}\n`);
-    chunk = [];
-    chunkBytes = 0;
-  };
-
-  for (const feature of features) {
-    const size = toBytes(feature);
-    if (chunk.length && chunkBytes + size > MAX_CHUNK_BYTES) {
-      await flush();
-    }
-    chunk.push(feature);
-    chunkBytes += size;
-  }
-  await flush();
-
-  const manifest = { files: chunks.map(({ fileName, count }) => ({ fileName, count })) };
-  await writeFile(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
-
-  console.log(`Wrote ${features.length} ADM1 features across ${chunks.length} file(s) to ${OUTPUT_DIR.pathname}`);
-  console.log(`Manifest: ${MANIFEST_PATH.pathname}`);
+  const compact = JSON.stringify({ type: "FeatureCollection", features });
+  await writeFile(OUTPUT_PATH, `${compact}\n`);
+  console.log(`Wrote ${features.length} simplified ADM1 features to ${OUTPUT_PATH.pathname} (${(Buffer.byteLength(compact) / (1024 * 1024)).toFixed(2)} MB)`);
 }
 
 main().catch((error) => {

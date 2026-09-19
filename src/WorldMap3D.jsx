@@ -7,22 +7,7 @@ import { cnSfx, getRegionData } from "./App";
    Раніше тут була "пілотна зона" лише для України (окремий remote
   geoBoundaries-фетч). Тепер це один локальний файл ADM1 GeoJSON,
   зібраний build-скриптом з geoBoundaries для всіх доступних країн. */
-const WORLD_REGIONS_MANIFEST_URL = "/data/world-regions-index.json";
-
-async function loadRegionFeatures() {
-  const manifest = await fetch(WORLD_REGIONS_MANIFEST_URL).then((res) => res.json());
-  const files = manifest?.files || [];
-  const allFeatures = [];
-
-  for (const entry of files) {
-    const response = await fetch(`/data/world-regions/${entry.fileName}`);
-    if (!response.ok) continue;
-    const geo = await response.json();
-    if (Array.isArray(geo.features)) allFeatures.push(...geo.features);
-  }
-
-  return { type: "FeatureCollection", features: allFeatures };
-}
+const WORLD_REGIONS_URL = "/data/world-regions.geojson";
 
 /* Відомі розбіжності назв між грою та реальним геонабором даних
    (перейменування областей, старі/нові назви тощо). Ключі — нормалізовані
@@ -341,7 +326,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         /* --- Шар реальних областей для всіх країн, кольор залежить
            від того, хто зараз контролює область у грі --- */
         try {
-          const worldGeo = await loadRegionFeatures();
+          const regionsRes = await fetch(WORLD_REGIONS_URL);
+          const worldGeo = await regionsRes.json();
 
           /* Групуємо geoBoundaries-фічі по ISO2 країни та нормалізованій назві,
              щоб зіставити їх з іменами регіонів гри окремо для кожної країни. */
