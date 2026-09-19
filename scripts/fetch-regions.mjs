@@ -2,13 +2,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 
 const API_URL = "https://www.geoboundaries.org/api/current/gbOpen/ALL/ADM1/";
 const COUNTRIES_URL = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
-const OUTPUT = new URL("../public/data/world-regions.geojson", import.meta.url);
+const DATA_DIR = new URL("../public/data/", import.meta.url);
+const OUTPUT_DIR = new URL("../public/data/world-regions/", import.meta.url);
+const MANIFEST_PATH = new URL("../public/data/world-regions-index.json", import.meta.url);
 const CONCURRENCY = 6;
+const MAX_CHUNK_BYTES = 70 * 1024 * 1024;
 
 async function fetchJson(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json();
+}
+
+function toBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value));
 }
 
 async function main() {
@@ -23,6 +30,7 @@ async function main() {
 
   const features = [];
   let next = 0;
+
   async function worker() {
     while (next < catalog.length) {
       const metadata = catalog[next++];
@@ -54,9 +62,40 @@ async function main() {
 
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   features.sort((a, b) => `${a.properties.cn_region_iso}|${a.properties.cn_region_name}`.localeCompare(`${b.properties.cn_region_iso}|${b.properties.cn_region_name}`));
-  await mkdir(new URL("../public/data/", import.meta.url), { recursive: true });
-  await writeFile(OUTPUT, `${JSON.stringify({ type: "FeatureCollection", features })}\n`);
-  console.log(`Wrote ${features.length} ADM1 features to ${OUTPUT.pathname}`);
+
+  await mkdir(DATA_DIR, { recursive: true });
+  await mkdir(OUTPUT_DIR, { recursive: true });
+
+  const chunks = [];
+  let chunk = [];
+  let chunkBytes = 0;
+
+  const flush = async () => {
+    if (!chunk.length) return;
+    const index = chunks.length.toString().padStart(3, "0");
+    const fileName = `world-regions-${index}.geojson`;
+    const payload = { type: "FeatureCollection", features: chunk };
+    chunks.push({ fileName, count: chunk.length, bytes: toBytes(payload) });
+    await writeFile(new URL(fileName, OUTPUT_DIR), `${JSON.stringify(payload)}\n`);
+    chunk = [];
+    chunkBytes = 0;
+  };
+
+  for (const feature of features) {
+    const size = toBytes(feature);
+    if (chunk.length && chunkBytes + size > MAX_CHUNK_BYTES) {
+      await flush();
+    }
+    chunk.push(feature);
+    chunkBytes += size;
+  }
+  await flush();
+
+  const manifest = { files: chunks.map(({ fileName, count }) => ({ fileName, count })) };
+  await writeFile(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  console.log(`Wrote ${features.length} ADM1 features across ${chunks.length} file(s) to ${OUTPUT_DIR.pathname}`);
+  console.log(`Manifest: ${MANIFEST_PATH.pathname}`);
 }
 
 main().catch((error) => {
