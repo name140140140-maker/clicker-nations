@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
+import { buffer, kinks, rewind, unkinkPolygon } from "@turf/turf";
 import { cnSfx, getRegionData } from "./App";
 
 /* --- Реальні межі областей для ВСІХ країн ---
@@ -57,6 +58,85 @@ function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
   return null;
 }
 
+function ringArea(ring) {
+  let area = 0;
+  for (let i = 0; i < ring.length - 1; i += 1) {
+    area += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+  }
+  return area / 2;
+}
+
+/* Розбиває самоперетинне кільце на валідні полігони, відкидаючи
+  дегенеративні залишки. Rewind з reverse:true дає зовнішній контур
+   за годинниковою стрілкою у [lon, lat], як очікує MapLibre. */
+function cleanRegionRing(points) {
+  const polygon = {
+    type: "Feature",
+    properties: {},
+    geometry: { type: "Polygon", coordinates: [points] },
+  };
+  let candidates = [];
+
+  try {
+    candidates = kinks(polygon).features.length ? unkinkPolygon(polygon).features : [polygon];
+  } catch {
+    candidates = [];
+  }
+
+  if (!candidates.length) {
+    try {
+      const repaired = buffer(polygon, 0, { units: "kilometers" });
+      if (repaired?.geometry?.type === "Polygon") candidates = [repaired];
+      if (repaired?.geometry?.type === "MultiPolygon") {
+        candidates = repaired.geometry.coordinates.map((coordinates) => ({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "Polygon", coordinates },
+        }));
+      }
+    } catch {
+      candidates = [];
+    }
+  }
+
+  const cleaned = [];
+  for (const candidate of candidates) {
+    const outer = candidate.geometry?.coordinates?.[0];
+    if (!outer || outer.length < 4 || Math.abs(ringArea(outer)) < 1e-10) continue;
+    try {
+      const rewound = rewind(candidate, { reverse: true });
+      if (kinks(rewound).features.length === 0) cleaned.push(rewound.geometry.coordinates);
+    } catch {
+      /* Невалідний залишок не повинен потрапити у GeoJSON карти. */
+    }
+  }
+  if (cleaned.length) return cleaned;
+
+  try {
+    const repaired = buffer(polygon, 0, { units: "kilometers" });
+    const repairedPolygons =
+      repaired?.geometry?.type === "Polygon"
+        ? [repaired.geometry.coordinates]
+        : repaired?.geometry?.type === "MultiPolygon"
+          ? repaired.geometry.coordinates
+          : [];
+    return repairedPolygons.filter((coordinates) => {
+      const outer = coordinates[0];
+      return outer?.length >= 4 && Math.abs(ringArea(outer)) >= 1e-10 && kinks({
+        type: "Feature",
+        properties: {},
+        geometry: { type: "Polygon", coordinates },
+      }).features.length === 0;
+    }).map((coordinates) => rewind({
+      type: "Feature",
+      properties: {},
+      geometry: { type: "Polygon", coordinates },
+    }, { reverse: true }).geometry.coordinates);
+  } catch {
+    return [];
+  }
+}
+
 /* Розпаковує world.json (packed-формат: цілі координати, поділені на
    spatial scale, регіони — масив рядків замість об'єктів) у звичайний
    GeoJSON FeatureCollection. Кожен регіон може мати кілька окремих
@@ -81,9 +161,10 @@ function unpackWorldToGeoJSON(raw) {
         const first = pts[0];
         const last = pts[pts.length - 1];
         if (first[0] !== last[0] || first[1] !== last[1]) pts.push(first);
-        return [pts];
+        return cleanRegionRing(pts);
       })
-      .filter(Boolean);
+      .flat()
+      .filter((polygon) => polygon.length);
     if (!polygons.length) continue;
     features.push({
       type: "Feature",
@@ -415,6 +496,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           if (Object.keys(unmatchedByCountry).length) {
             console.warn("WorldMap3D: не знайдено відповідність для областей:", unmatchedByCountry);
           }
+
+          const countryCodesWithRegions = [...new Set(
+            matchedFeatures.map((feature) => feature.properties.cn_region_iso).filter(Boolean),
+          )];
+          geo.features.forEach((feature) => {
+            const code = feature.properties.cn_code;
+            feature.properties.cn_has_regions = countryCodesWithRegions.includes(code) ? 1 : 0;
+          });
+          map.getSource("cn-countries")?.setData(geo);
+          map.setFilter("cn-countries-outline", [
+            "!",
+            ["in", ["get", "cn_code"], ["literal", countryCodesWithRegions]],
+          ]);
 
           regionFeaturesRef.current = matchedFeatures;
           prevCityControlRef.current = { ...(cityControlRef.current || {}) };
