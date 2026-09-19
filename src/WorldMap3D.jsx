@@ -3,18 +3,22 @@ import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
 import { cnSfx, getRegionData } from "./App";
 
-/* --- ПІЛОТНА ЗОНА: тест реальних меж областей на прикладі України ---
-   Поки що тільки для цієї країни ми маємо реальні геополігони областей
-   (geoBoundaries, публічна ліцензія CC-BY), звірені з іменами регіонів
-   гри. Якщо тест підтвердить, що це працює добре — розширимо на інші
-   країни тим самим підходом. */
-const PILOT_REGION_COUNTRY = "UA";
-const PILOT_REGIONS_GEOJSON_URL =
-  "https://github.com/wmgeolab/geoBoundaries/raw/9469f09/releaseData/gbOpen/UKR/ADM1/geoBoundaries-UKR-ADM1_simplified.geojson";
+/* --- Реальні межі областей для ВСІХ країн ---
+   Раніше тут була "пілотна зона" лише для України (окремий remote
+   geoBoundaries-фетч). Тепер це один локальний файл `world.json`
+   (усі країни, ~3400 областей/провінцій), який ми розпаковуємо тут же
+   і зіставляємо з іменами регіонів гри так само, як раніше робилося
+   тільки для України. */
+const WORLD_REGIONS_URL = "/data/world.json";
 
 /* Відомі розбіжності назв між грою та реальним геонабором даних
-   (перейменування областей, старі/нові назви тощо). */
-const PILOT_NAME_ALIASES = {
+   (перейменування областей, старі/нові назви тощо). Ключі — нормалізовані
+   назви з боку гри; значення — можливі варіанти назв у world.json.
+   Наразі перевірено детально тільки для України; для інших країн
+   збіги йдуть за прямим нормалізованим порівнянням назв і можуть
+   потребувати доповнення цього списку з часом (незбіги просто
+   пропускаються, не ламаючи решту карти). */
+const REGION_NAME_ALIASES = {
   kirovohrad: ["kropyvnytskyi", "kirovograd"],
   transcarpathia: ["zakarpattia", "zakarpatska", "zakarpattya"],
   lviv: ["lvivska", "lvov"],
@@ -23,34 +27,78 @@ const PILOT_NAME_ALIASES = {
   kyivcity: ["kyiv city", "misto kyiv", "kyivcity"],
 };
 
-function normalizePilotName(s) {
+function normalizeRegionName(s) {
   return (s || "")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/['’‘]/g, "")
-    .replace(/\b(oblast|region|province|city|autonomous republic of|republic of)\b/g, "")
+    .replace(/\b(oblast|region|province|city|autonomous republic of|republic of|county|department|district)\b/g, "")
     .replace(/[^a-z]/g, "")
     .trim();
 }
 
-/* Зіставляє назву області гри з реальним об'єктом геоданих за
-   нормалізованою назвою або відомим аліасом; повертає null, якщо
-   впевненого збігу не знайдено (тоді ця область просто не бере
-   участі в новому шарі — не ламає решту карти). */
+/* Зіставляє назву області гри з реальним об'єктом геоданих (в межах
+   однієї країни) за нормалізованою назвою або відомим аліасом;
+   повертає null, якщо впевненого збігу не знайдено (тоді ця область
+   просто не бере участі в шарі — не ламає решту карти). */
 function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
-  const norm = normalizePilotName(gameRegionName);
+  const norm = normalizeRegionName(gameRegionName);
   if (featuresByNormName[norm]) return featuresByNormName[norm];
-  for (const [key, aliases] of Object.entries(PILOT_NAME_ALIASES)) {
-    if (key === norm || aliases.some((a) => normalizePilotName(a) === norm)) {
+  for (const [key, aliases] of Object.entries(REGION_NAME_ALIASES)) {
+    if (key === norm || aliases.some((a) => normalizeRegionName(a) === norm)) {
       if (featuresByNormName[key]) return featuresByNormName[key];
       for (const a of aliases) {
-        const an = normalizePilotName(a);
+        const an = normalizeRegionName(a);
         if (featuresByNormName[an]) return featuresByNormName[an];
       }
     }
   }
   return null;
+}
+
+/* Розпаковує world.json (packed-формат: цілі координати, поділені на
+   spatial scale, регіони — масив рядків замість об'єктів) у звичайний
+   GeoJSON FeatureCollection. Кожен регіон може мати кілька окремих
+   кілець (острови/анклави) — рендеримо їх як MultiPolygon без дірок,
+   так само, як їх обходить hit-test у вихідному world.ts. */
+function unpackWorldToGeoJSON(raw) {
+  const scale = raw.s;
+  const countries = raw.countries;
+  const features = [];
+  for (const row of raw.regions) {
+    const [name, countryIndex, , , , , , , , rings] = row;
+    const country = countries[countryIndex];
+    if (!country || !rings || !rings.length) continue;
+    const polygons = rings
+      .map((ring) => {
+        if (!ring || ring.length < 6) return null;
+        const pts = [];
+        for (let i = 0; i < ring.length; i += 2) {
+          pts.push([ring[i] / scale, ring[i + 1] / scale]);
+        }
+        // GeoJSON лінійні кільця мають бути замкнені (перша точка == остання)
+        const first = pts[0];
+        const last = pts[pts.length - 1];
+        if (first[0] !== last[0] || first[1] !== last[1]) pts.push(first);
+        return [pts];
+      })
+      .filter(Boolean);
+    if (!polygons.length) continue;
+    features.push({
+      type: "Feature",
+      properties: {
+        cn_region_name: name,
+        cn_region_iso: country.iso,
+        cn_region_adm0: country.adm0,
+      },
+      geometry:
+        polygons.length === 1
+          ? { type: "Polygon", coordinates: polygons[0] }
+          : { type: "MultiPolygon", coordinates: polygons },
+    });
+  }
+  return { type: "FeatureCollection", features };
 }
 
 /* Публічні, безкоштовні джерела даних — без API-ключів:
@@ -321,35 +369,51 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
         addRegionsAndCityLabels(map);
 
-        /* --- Пілотний шар: реальні області України, кольор залежить
+        /* --- Шар реальних областей для всіх країн, кольор залежить
            від того, хто зараз контролює область у грі --- */
         try {
-          const regionsRes = await fetch(PILOT_REGIONS_GEOJSON_URL);
-          const regionsGeo = await regionsRes.json();
-          const featuresByNormName = {};
-          regionsGeo.features.forEach((f) => {
-            const shapeName = f.properties.shapeName || f.properties.shapename || "";
-            featuresByNormName[normalizePilotName(shapeName)] = f;
+          const regionsRes = await fetch(WORLD_REGIONS_URL);
+          const rawWorld = await regionsRes.json();
+          const worldGeo = unpackWorldToGeoJSON(rawWorld);
+
+          /* Групуємо фічі world.json по країні (ISO) і нормалізованій назві,
+             щоб зіставити їх з іменами регіонів гри окремо для кожної країни. */
+          const featuresByIsoAndNormName = {};
+          worldGeo.features.forEach((f) => {
+            const iso = f.properties.cn_region_iso;
+            if (!iso) return;
+            if (!featuresByIsoAndNormName[iso]) featuresByIsoAndNormName[iso] = {};
+            featuresByIsoAndNormName[iso][normalizeRegionName(f.properties.cn_region_name)] = f;
           });
 
-          const gameRegions = (getRegionData()[PILOT_REGION_COUNTRY]?.regions || []).map((r) => r.name);
+          const allRegionData = getRegionData();
           const matchedFeatures = [];
-          const unmatched = [];
-          gameRegions.forEach((name) => {
-            const f = matchGameRegionToFeature(name, featuresByNormName);
-            if (f) {
-              const copy = JSON.parse(JSON.stringify(f));
-              const owner = cityControlRef.current?.[PILOT_REGION_COUNTRY + "|" + name] || PILOT_REGION_COUNTRY;
-              copy.properties.cn_region_name = name;
-              copy.properties.cn_region_owner = owner;
-              copy.properties.cn_region_mine = owner === myCountryCodeRef.current ? 1 : 0;
-              matchedFeatures.push(copy);
-            } else {
-              unmatched.push(name);
-            }
+          const unmatchedByCountry = {};
+
+          Object.keys(allRegionData).forEach((countryCode) => {
+            const featuresByNormName = featuresByIsoAndNormName[countryCode];
+            if (!featuresByNormName) return; // немає геоданих для цієї країни у world.json — пропускаємо
+            const gameRegions = (allRegionData[countryCode]?.regions || []).map((r) => r.name);
+            gameRegions.forEach((name) => {
+              const f = matchGameRegionToFeature(name, featuresByNormName);
+              if (f) {
+                const copy = JSON.parse(JSON.stringify(f));
+                const key = countryCode + "|" + name;
+                const owner = cityControlRef.current?.[key] || countryCode;
+                copy.properties.cn_region_name = name;
+                copy.properties.cn_region_iso = countryCode;
+                copy.properties.cn_region_key = key;
+                copy.properties.cn_region_owner = owner;
+                copy.properties.cn_region_mine = owner === myCountryCodeRef.current ? 1 : 0;
+                matchedFeatures.push(copy);
+              } else {
+                (unmatchedByCountry[countryCode] = unmatchedByCountry[countryCode] || []).push(name);
+              }
+            });
           });
-          if (unmatched.length) {
-            console.warn("WorldMap3D (пілот UA): не знайдено відповідність для областей:", unmatched);
+
+          if (Object.keys(unmatchedByCountry).length) {
+            console.warn("WorldMap3D: не знайдено відповідність для областей:", unmatchedByCountry);
           }
 
           regionFeaturesRef.current = matchedFeatures;
@@ -383,16 +447,16 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           });
 
           /* "Спалах" при щойному захопленні території — кероване через
-             filter/paint напряму з JS (див. triggerCaptureFlash нижче) */
+             filter/paint напряму з JS (див. ефект нижче) */
           map.addLayer({
             id: "cn-pilot-regions-flash",
             type: "line",
             source: "cn-pilot-regions",
-            filter: ["==", ["get", "cn_region_name"], "___none___"],
+            filter: ["==", ["get", "cn_region_key"], "___none___"],
             paint: { "line-color": "#ffffff", "line-width": 3.5, "line-opacity": 1, "line-blur": 1.5 },
           });
         } catch (err) {
-          console.warn("WorldMap3D: пілотний шар областей України не завантажився:", err?.message || err);
+          console.warn("WorldMap3D: шар областей не завантажився:", err?.message || err);
         }
 
         readyRef.current = true;
@@ -428,11 +492,11 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     };
   }, [myCountryCode]);
 
-  /* Перефарбувати пілотний шар областей України, коли змінюється хто
-     контролює область (наприклад після завершення війни) або коли
-     гравець змінив свою країну. Якщо власник конкретної області
-     змінився — показуємо короткий "спалах" на її кордоні та повідомляємо
-     батьківський компонент (для сповіщення "Територію захоплено"). */
+  /* Перефарбувати шар областей, коли змінюється хто контролює область
+     (наприклад після завершення війни) або коли гравець змінив свою
+     країну. Якщо власник конкретної області змінився — показуємо
+     короткий "спалах" на її кордоні та повідомляємо батьківський
+     компонент (для сповіщення "Територію захоплено"). */
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
@@ -440,15 +504,16 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     if (!src) return;
 
     const prevControl = prevCityControlRef.current;
-    let capturedRegionName = null;
+    let capturedRegionKey = null;
     let captureEvent = null;
 
     const updated = regionFeaturesRef.current.map((f) => {
-      const key = PILOT_REGION_COUNTRY + "|" + f.properties.cn_region_name;
-      const newOwner = cityControl?.[key] || PILOT_REGION_COUNTRY;
-      const oldOwner = prevControl ? prevControl[key] || PILOT_REGION_COUNTRY : newOwner;
+      const key = f.properties.cn_region_key;
+      const countryCode = f.properties.cn_region_iso;
+      const newOwner = cityControl?.[key] || countryCode;
+      const oldOwner = prevControl ? prevControl[key] || countryCode : newOwner;
       if (prevControl && newOwner !== oldOwner) {
-        capturedRegionName = f.properties.cn_region_name;
+        capturedRegionKey = key;
         captureEvent = {
           name: f.properties.cn_region_name,
           previousOwner: oldOwner,
@@ -469,13 +534,13 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     prevCityControlRef.current = { ...(cityControl || {}) };
     src.setData({ type: "FeatureCollection", features: updated });
 
-    if (capturedRegionName && map.getLayer("cn-pilot-regions-flash")) {
+    if (capturedRegionKey && map.getLayer("cn-pilot-regions-flash")) {
       cnSfx.purchase();
-      map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_name"], capturedRegionName]);
+      map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_key"], capturedRegionKey]);
       map.setPaintProperty("cn-pilot-regions-flash", "line-opacity", 1);
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
       flashTimerRef.current = setTimeout(() => {
-        map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_name"], "___none___"]);
+        map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_key"], "___none___"]);
       }, 2200);
     }
     if (captureEvent && onCapture) onCapture(captureEvent);
