@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
+import { featureCollection, union } from "@turf/turf";
 import { cnSfx, getRegionData } from "./App";
 
 /* --- Реальні межі областей для ВСІХ країн ---
@@ -53,6 +54,26 @@ function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
     }
   }
   return null;
+}
+
+function ownerForRegion(cityControl, key, countryCode) {
+  return Object.prototype.hasOwnProperty.call(cityControl || {}, key)
+    ? cityControl[key]
+    : countryCode;
+}
+
+function selectedTerritoryFeature(selected, regionFeatures) {
+  const selectedFeatures = regionFeatures.filter(
+    (feature) => feature.properties.cn_region_owner === selected,
+  );
+  if (!selectedFeatures.length) return null;
+  if (selectedFeatures.length === 1) return selectedFeatures[0];
+  try {
+    const merged = union(featureCollection(selectedFeatures));
+    return merged && merged.geometry ? merged : null;
+  } catch {
+    return null;
+  }
 }
 
 /* Публічні, безкоштовні джерела даних — без API-ключів:
@@ -309,6 +330,16 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           filter: ["==", ["get", "cn_code"], "___none___"],
           paint: { "line-color": "#ffffff", "line-width": 2.2, "line-opacity": 0.9 },
         });
+        map.addSource("cn-selected-territory-outline", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+        map.addLayer({
+          id: "cn-selected-territory-outline",
+          type: "line",
+          source: "cn-selected-territory-outline",
+          paint: { "line-color": "#ffffff", "line-width": 2.2, "line-opacity": 0.9 },
+        });
 
         map.on("click", "cn-countries-fill", (e) => {
           const code = e.features?.[0]?.properties?.cn_code;
@@ -352,7 +383,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
               if (f) {
                 const copy = JSON.parse(JSON.stringify(f));
                 const key = countryCode + "|" + name;
-                const owner = cityControlRef.current?.[key] || countryCode;
+                const owner = ownerForRegion(cityControlRef.current, key, countryCode);
                 copy.properties.cn_region_name = name;
                 copy.properties.cn_region_iso = countryCode;
                 copy.properties.cn_region_key = key;
@@ -476,8 +507,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const updated = regionFeaturesRef.current.map((f) => {
       const key = f.properties.cn_region_key;
       const countryCode = f.properties.cn_region_iso;
-      const newOwner = cityControl?.[key] || countryCode;
-      const oldOwner = prevControl ? prevControl[key] || countryCode : newOwner;
+      const hasExplicitOwner = Object.prototype.hasOwnProperty.call(cityControl || {}, key);
+      const newOwner = hasExplicitOwner ? cityControl[key] : countryCode;
+      const hadPrevOwner = prevControl && Object.prototype.hasOwnProperty.call(prevControl, key);
+      const oldOwner = hadPrevOwner ? prevControl[key] : countryCode;
       if (prevControl && newOwner !== oldOwner) {
         capturedRegionKey = key;
         captureEvent = {
@@ -516,8 +549,27 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
      і назад до огляду світу при знятті виділення. Плюс звук. */
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current || !map.getLayer("cn-countries-selected")) return;
-    map.setFilter("cn-countries-selected", ["==", ["get", "cn_code"], selected || "___none___"]);
+    if (!map || !readyRef.current) return;
+
+    const territorySource = map.getSource("cn-selected-territory-outline");
+    const territoryFeature = selected && regionFeaturesRef.current.length
+      ? selectedTerritoryFeature(selected, regionFeaturesRef.current)
+      : null;
+
+    if (territorySource && typeof territorySource.setData === "function") {
+      territorySource.setData({
+        type: "FeatureCollection",
+        features: territoryFeature ? [territoryFeature] : [],
+      });
+    }
+
+    if (map.getLayer("cn-countries-selected")) {
+      if (territoryFeature) {
+        map.setFilter("cn-countries-selected", ["==", ["get", "cn_code"], "___none___"]);
+      } else {
+        map.setFilter("cn-countries-selected", ["==", ["get", "cn_code"], selected || "___none___"]);
+      }
+    }
 
     if (selected && selected !== prevSelectedRef.current) {
       cnSfx.modalOpen();
@@ -541,7 +593,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       map.flyTo({ ...WORLD_VIEW, duration: 1200, essential: true });
     }
     prevSelectedRef.current = selected;
-  }, [selected]);
+  }, [selected, cityControl]);
 
   const zoomBy = (delta) => {
     const map = mapRef.current;
