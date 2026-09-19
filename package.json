@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "fetch:regions": "node scripts/fetch-regions.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
-    "@turf/turf": "^7.4.0",
     "lucide-react": "^0.383.0",
     "maplibre-gl": "^4.7.1",
     "react": "^18.3.1",

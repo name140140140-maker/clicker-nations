@@ -1,20 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
-import { buffer, kinks, rewind, unkinkPolygon } from "@turf/turf";
 import { cnSfx, getRegionData } from "./App";
 
 /* --- Реальні межі областей для ВСІХ країн ---
    Раніше тут була "пілотна зона" лише для України (окремий remote
-   geoBoundaries-фетч). Тепер це один локальний файл `world.json`
-   (усі країни, ~3400 областей/провінцій), який ми розпаковуємо тут же
-   і зіставляємо з іменами регіонів гри так само, як раніше робилося
-   тільки для України. */
-const WORLD_REGIONS_URL = "/data/world.json";
+  geoBoundaries-фетч). Тепер це один локальний файл ADM1 GeoJSON,
+  зібраний build-скриптом з geoBoundaries для всіх доступних країн. */
+const WORLD_REGIONS_URL = "/data/world-regions.geojson";
 
 /* Відомі розбіжності назв між грою та реальним геонабором даних
    (перейменування областей, старі/нові назви тощо). Ключі — нормалізовані
-   назви з боку гри; значення — можливі варіанти назв у world.json.
+  назви з боку гри; значення — можливі варіанти назв у geoBoundaries.
    Наразі перевірено детально тільки для України; для інших країн
    збіги йдуть за прямим нормалізованим порівнянням назв і можуть
    потребувати доповнення цього списку з часом (незбіги просто
@@ -37,7 +34,7 @@ function normalizeRegionName(s) {
     .replace(/\b(oblast|region|province|city|autonomous republic of|republic of|county|department|district)\b/g, "")
     .replace(/[^a-z]/g, "")
     .trim();
-}
+  }
 
 /* Зіставляє назву області гри з реальним об'єктом геоданих (в межах
    однієї країни) за нормалізованою назвою або відомим аліасом;
@@ -56,130 +53,6 @@ function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
     }
   }
   return null;
-}
-
-function ringArea(ring) {
-  let area = 0;
-  for (let i = 0; i < ring.length - 1; i += 1) {
-    area += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
-  }
-  return area / 2;
-}
-
-/* Розбиває самоперетинне кільце на валідні полігони, відкидаючи
-  дегенеративні залишки. Rewind з reverse:true дає зовнішній контур
-   за годинниковою стрілкою у [lon, lat], як очікує MapLibre. */
-function cleanRegionRing(points) {
-  const polygon = {
-    type: "Feature",
-    properties: {},
-    geometry: { type: "Polygon", coordinates: [points] },
-  };
-  let candidates = [];
-
-  try {
-    candidates = kinks(polygon).features.length ? unkinkPolygon(polygon).features : [polygon];
-  } catch {
-    candidates = [];
-  }
-
-  if (!candidates.length) {
-    try {
-      const repaired = buffer(polygon, 0, { units: "kilometers" });
-      if (repaired?.geometry?.type === "Polygon") candidates = [repaired];
-      if (repaired?.geometry?.type === "MultiPolygon") {
-        candidates = repaired.geometry.coordinates.map((coordinates) => ({
-          type: "Feature",
-          properties: {},
-          geometry: { type: "Polygon", coordinates },
-        }));
-      }
-    } catch {
-      candidates = [];
-    }
-  }
-
-  const cleaned = [];
-  for (const candidate of candidates) {
-    const outer = candidate.geometry?.coordinates?.[0];
-    if (!outer || outer.length < 4 || Math.abs(ringArea(outer)) < 1e-10) continue;
-    try {
-      const rewound = rewind(candidate, { reverse: true });
-      if (kinks(rewound).features.length === 0) cleaned.push(rewound.geometry.coordinates);
-    } catch {
-      /* Невалідний залишок не повинен потрапити у GeoJSON карти. */
-    }
-  }
-  if (cleaned.length) return cleaned;
-
-  try {
-    const repaired = buffer(polygon, 0, { units: "kilometers" });
-    const repairedPolygons =
-      repaired?.geometry?.type === "Polygon"
-        ? [repaired.geometry.coordinates]
-        : repaired?.geometry?.type === "MultiPolygon"
-          ? repaired.geometry.coordinates
-          : [];
-    return repairedPolygons.filter((coordinates) => {
-      const outer = coordinates[0];
-      return outer?.length >= 4 && Math.abs(ringArea(outer)) >= 1e-10 && kinks({
-        type: "Feature",
-        properties: {},
-        geometry: { type: "Polygon", coordinates },
-      }).features.length === 0;
-    }).map((coordinates) => rewind({
-      type: "Feature",
-      properties: {},
-      geometry: { type: "Polygon", coordinates },
-    }, { reverse: true }).geometry.coordinates);
-  } catch {
-    return [];
-  }
-}
-
-/* Розпаковує world.json (packed-формат: цілі координати, поділені на
-   spatial scale, регіони — масив рядків замість об'єктів) у звичайний
-   GeoJSON FeatureCollection. Кожен регіон може мати кілька окремих
-   кілець (острови/анклави) — рендеримо їх як MultiPolygon без дірок,
-   так само, як їх обходить hit-test у вихідному world.ts. */
-function unpackWorldToGeoJSON(raw) {
-  const scale = raw.s;
-  const countries = raw.countries;
-  const features = [];
-  for (const row of raw.regions) {
-    const [name, countryIndex, , , , , , , , rings] = row;
-    const country = countries[countryIndex];
-    if (!country || !rings || !rings.length) continue;
-    const polygons = rings
-      .map((ring) => {
-        if (!ring || ring.length < 6) return null;
-        const pts = [];
-        for (let i = 0; i < ring.length; i += 2) {
-          pts.push([ring[i] / scale, ring[i + 1] / scale]);
-        }
-        // GeoJSON лінійні кільця мають бути замкнені (перша точка == остання)
-        const first = pts[0];
-        const last = pts[pts.length - 1];
-        if (first[0] !== last[0] || first[1] !== last[1]) pts.push(first);
-        return cleanRegionRing(pts);
-      })
-      .flat()
-      .filter((polygon) => polygon.length);
-    if (!polygons.length) continue;
-    features.push({
-      type: "Feature",
-      properties: {
-        cn_region_name: name,
-        cn_region_iso: country.iso,
-        cn_region_adm0: country.adm0,
-      },
-      geometry:
-        polygons.length === 1
-          ? { type: "Polygon", coordinates: polygons[0] }
-          : { type: "MultiPolygon", coordinates: polygons },
-    });
-  }
-  return { type: "FeatureCollection", features };
 }
 
 /* Публічні, безкоштовні джерела даних — без API-ключів:
@@ -454,10 +327,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
            від того, хто зараз контролює область у грі --- */
         try {
           const regionsRes = await fetch(WORLD_REGIONS_URL);
-          const rawWorld = await regionsRes.json();
-          const worldGeo = unpackWorldToGeoJSON(rawWorld);
+          const worldGeo = await regionsRes.json();
 
-          /* Групуємо фічі world.json по країні (ISO) і нормалізованій назві,
+          /* Групуємо geoBoundaries-фічі по ISO2 країни та нормалізованій назві,
              щоб зіставити їх з іменами регіонів гри окремо для кожної країни. */
           const featuresByIsoAndNormName = {};
           worldGeo.features.forEach((f) => {
@@ -473,7 +345,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
           Object.keys(allRegionData).forEach((countryCode) => {
             const featuresByNormName = featuresByIsoAndNormName[countryCode];
-            if (!featuresByNormName) return; // немає геоданих для цієї країни у world.json — пропускаємо
+            if (!featuresByNormName) return; // для країни немає ADM1-даних — пропускаємо
             const gameRegions = (allRegionData[countryCode]?.regions || []).map((r) => r.name);
             gameRegions.forEach((name) => {
               const f = matchGameRegionToFeature(name, featuresByNormName);
