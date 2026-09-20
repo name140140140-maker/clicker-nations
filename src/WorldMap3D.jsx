@@ -428,43 +428,109 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           ctx.restore();
         }
 
-        // кордони: тонкі всередині країни, чіткі яскраві між різними
-        // країнами — і це рахується щокадру одним порівнянням власників,
-        // тому кордон "рухається" миттєво в момент захоплення території.
+        /*
+         * КОРДОНИ — стилізовані як у референсі:
+         * яскраві біло-cyan межі між різними власниками,
+         * тонкі світлі межі між областями,
+         * окремий контур узбережжя.
+         *
+         * Заливки, прапори, геометрія, zoom та механіка захоплення
+         * залишаються без змін.
+         */
+
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+
+        // М'який neon-glow тільки для кордонів між різними власниками.
+        ctx.save();
+        ctx.shadowColor = "rgba(60, 180, 255, 0.72)";
+        ctx.shadowBlur = 5.5 / k;
+        ctx.strokeStyle = "rgba(85, 190, 255, 0.58)";
+        ctx.lineWidth = Math.max(1.8 / k, 0.055);
+
         for (const bd of borders) {
-          if (bd.b === null) continue; // берегові арки тут не малюємо, лише для контуру виділення нижче
-          const oa = owners[bd.a];
-          const ob = owners[bd.b];
-          const same = oa === ob;
-          if (same && k < 3.4) continue;
+          if (bd.b === null) continue;
+          if (owners[bd.a] === owners[bd.b]) continue;
+
           ctx.beginPath();
-          bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
-          ctx.lineJoin = "round";
-          if (same) {
-            ctx.strokeStyle = "rgba(8,16,26,0.22)";
-            ctx.lineWidth = Math.max(0.28 / k, 0.012);
-          } else {
-            ctx.strokeStyle = "rgba(210,224,245,0.6)";
-            ctx.lineWidth = Math.max(1.0 / k, 0.035);
-          }
+          bd.line.forEach(([lx, ly], i) =>
+            i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
+          );
           ctx.stroke();
         }
+        ctx.restore();
 
-        // виділена країна — тепер обводимо ЛИШЕ зовнішній контур її живої
-        // території (кордон із сусідом-іншим-власником або з океаном),
-        // а не кожну внутрішню лінію між власними областями.
+        // Основні лінії кордонів.
+        for (const bd of borders) {
+          // Зовнішній контур суші / берегова лінія.
+          if (bd.b === null) {
+            ctx.beginPath();
+            bd.line.forEach(([lx, ly], i) =>
+              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
+            );
+            ctx.strokeStyle = "rgba(105, 195, 240, 0.68)";
+            ctx.lineWidth = Math.max(0.85 / k, 0.025);
+            ctx.stroke();
+            continue;
+          }
+
+          const sameOwner = owners[bd.a] === owners[bd.b];
+
+          // Внутрішні межі областей одного власника.
+          if (sameOwner) {
+            if (k < 1.25) continue;
+
+            ctx.beginPath();
+            bd.line.forEach(([lx, ly], i) =>
+              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
+            );
+            ctx.strokeStyle = k >= 2.0
+              ? "rgba(230, 242, 255, 0.76)"
+              : "rgba(185, 215, 240, 0.48)";
+            ctx.lineWidth = Math.max((k >= 2.0 ? 0.78 : 0.62) / k, 0.020);
+            ctx.stroke();
+            continue;
+          }
+
+          // Кордон між різними власниками — яскравий і чіткий.
+          ctx.save();
+          ctx.shadowColor = "rgba(70, 185, 255, 0.60)";
+          ctx.shadowBlur = 2.4 / k;
+
+          ctx.beginPath();
+          bd.line.forEach(([lx, ly], i) =>
+            i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
+          );
+          ctx.strokeStyle = "rgba(240, 249, 255, 0.97)";
+          ctx.lineWidth = Math.max(1.35 / k, 0.042);
+          ctx.stroke();
+
+          ctx.restore();
+        }
+
+        // Виділена країна: яскравий зовнішній контур поверх звичайних
+        // кордонів, але без зміни її заливки.
         if (sel) {
-          ctx.strokeStyle = "rgba(255,255,255,0.85)";
-          ctx.lineWidth = Math.max(1.3 / k, 0.045);
+          ctx.save();
+          ctx.shadowColor = "rgba(80, 200, 255, 0.85)";
+          ctx.shadowBlur = 4 / k;
+          ctx.strokeStyle = "rgba(255,255,255,0.92)";
+          ctx.lineWidth = Math.max(1.45 / k, 0.048);
           ctx.lineJoin = "round";
+          ctx.lineCap = "round";
+
           for (const bd of borders) {
             const aIsSel = owners[bd.a] === sel;
             const bIsSel = bd.b !== null && owners[bd.b] === sel;
-            if (aIsSel === bIsSel) continue; // обидві сторони "моя" або обидві "чужі" — не зовнішній контур
+            if (aIsSel === bIsSel) continue;
+
             ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+            bd.line.forEach(([lx, ly], i) =>
+              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
+            );
             ctx.stroke();
           }
+          ctx.restore();
         }
 
         // спалах при щойному захопленні конкретної області
