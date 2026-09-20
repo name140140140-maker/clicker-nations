@@ -154,7 +154,15 @@ function buildWorldFromTopology(topology) {
     }
   });
 
-  return { regions, borders };
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  regions.forEach((r) => {
+    if (r.bbox[0] < minX) minX = r.bbox[0];
+    if (r.bbox[1] < minY) minY = r.bbox[1];
+    if (r.bbox[2] > maxX) maxX = r.bbox[2];
+    if (r.bbox[3] > maxY) maxY = r.bbox[3];
+  });
+
+  return { regions, borders, bounds: [minX, minY, maxX, maxY] };
 }
 
 function pointInRing(x, y, ring) {
@@ -222,9 +230,50 @@ function fitCamera(w, h) {
   return { k, x: w / 2 - ((lon0 + lon1) / 2) * k, y: h / 2 - ((lat0 + lat1) / 2) * k };
 }
 
+const BAKE_MAX_SIDE = 4096;
+
+function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleForLines, onFlagReady) {
+  const { regions, borders } = world;
+
+  ctx.fillStyle = "#213244";
+  for (let i = 0; i < regions.length; i++) ctx.fill(regions[i].path);
+
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    const [minX, minY, maxX, maxY] = r.bbox;
+    const owner = owners[i];
+    const bb = ownerBBoxes[owner];
+    const flag = getFlagImage(flagCache, owner, onFlagReady);
+    ctx.save();
+    ctx.clip(r.path);
+    if (flag && bb) {
+      ctx.drawImage(flag, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1]);
+      if (owner === myCode) {
+        ctx.fillStyle = "rgba(34,211,238,0.14)";
+        ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+      }
+    } else {
+      ctx.fillStyle = owner === myCode ? "#22d3ee" : "#264a63";
+      ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    }
+    ctx.restore();
+  }
+
+  for (const bd of borders) {
+    if (bd.b === null) continue;
+    const same = owners[bd.a] === owners[bd.b];
+    ctx.beginPath();
+    bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = same ? "rgba(8,16,26,0.22)" : "rgba(210,224,245,0.6)";
+    ctx.lineWidth = Math.max((same ? 0.28 : 1.0) / scaleForLines, same ? 0.012 : 0.035);
+    ctx.stroke();
+  }
+}
+
 export default function WorldMap3D({ selected, onSelect, myCountryCode, cityControl, onCapture }) {
   const canvasRef = useRef(null);
-  const worldRef = useRef(null); // { regions, borders }
+  const worldRef = useRef(null); // { regions, borders, bounds }
   const regionOwnerRef = useRef([]); // паралельний regions масив — поточний власник кожної області
   const ownerBBoxRef = useRef({}); // owner -> [minX,minY,maxX,maxY], для розтягування прапора на всю країну
   const prevCityControlRef = useRef(null);
@@ -241,6 +290,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   myCountryCodeRef.current = myCountryCode;
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const bakedRef = useRef(null);
+  const bakeTimerRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
 
   const recomputeOwnersAndBBoxes = (regions, cityControlObj) => {
@@ -262,6 +313,40 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     ownerBBoxRef.current = bboxes;
   };
 
+  const bake = () => {
+    const world = worldRef.current;
+    if (!world) return;
+    const [minX, minY, maxX, maxY] = world.bounds;
+    const spanX = maxX - minX || 1;
+    const spanY = maxY - minY || 1;
+    const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY);
+    const canvas = bakedRef.current?.canvas || document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(spanX * scale));
+    canvas.height = Math.max(1, Math.round(spanY * scale));
+    const bctx = canvas.getContext("2d");
+    bctx.setTransform(scale, 0, 0, scale, -minX * scale, -minY * scale);
+    bctx.clearRect(minX, minY, spanX, spanY);
+    paintWorld(
+      bctx,
+      world,
+      regionOwnerRef.current,
+      ownerBBoxRef.current,
+      myCountryCodeRef.current,
+      flagCacheRef.current,
+      scale,
+      () => scheduleBake(300),
+    );
+    bakedRef.current = { canvas, minX, minY, scale };
+  };
+
+  const scheduleBake = (delay) => {
+    if (bakeTimerRef.current) clearTimeout(bakeTimerRef.current);
+    bakeTimerRef.current = setTimeout(() => {
+      bakeTimerRef.current = null;
+      bake();
+    }, delay);
+  };
+
   /* Завантаження карти — один раз */
   useEffect(() => {
     let cancelled = false;
@@ -269,12 +354,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       try {
         const res = await fetch(WORLD_TOPOLOGY_URL);
         const topology = await res.json();
-        const { regions: rawRegions, borders } = buildWorldFromTopology(topology);
+        const world = buildWorldFromTopology(topology);
 
         /* Зіставляємо назви областей гри з topojson-фічами по країнах —
            та ж логіка, що й раніше, тепер лише проти нових даних. */
         const byIsoAndNorm = {};
-        rawRegions.forEach((r) => {
+        world.regions.forEach((r) => {
           if (!r.iso) return;
           if (!byIsoAndNorm[r.iso]) byIsoAndNorm[r.iso] = {};
           byIsoAndNorm[r.iso][normalizeRegionName(r.name)] = r;
@@ -304,9 +389,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         });
 
         if (cancelled) return;
-        worldRef.current = { regions: rawRegions, borders };
-        recomputeOwnersAndBBoxes(rawRegions, cityControl);
+        worldRef.current = world;
+        recomputeOwnersAndBBoxes(world.regions, cityControl);
         prevCityControlRef.current = { ...(cityControl || {}) };
+        bake();
 
         const canvas = canvasRef.current;
         if (canvas) camRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
@@ -358,7 +444,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       ctx.fillRect(0, 0, w, h);
 
       const world = worldRef.current;
-      if (world) {
+      const baked = bakedRef.current;
+      if (world && baked) {
         // плавний переліт камери до цілі (виділена країна / огляд світу)
         const tgt = targetCamRef.current;
         if (tgt) {
@@ -378,140 +465,21 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         }
 
         const { k, x, y } = camRef.current;
-        const { regions, borders } = world;
         const owners = regionOwnerRef.current;
-        const ownerBBoxes = ownerBBoxRef.current;
-        const mine = myCountryCodeRef.current;
         const sel = selectedRef.current;
 
-        const visMinX = -x / k, visMaxX = (w - x) / k;
-        const visMinY = -y / k, visMaxY = (h - y) / k;
-
-        ctx.save();
-        ctx.transform(k, 0, 0, k, x, y);
-
-        // Суцільна "підкладка" під усіма областями одним проходом — без
-        // неї на стиках сусідніх областей (де кожна малюється й
-        // обрізається окремо) з'являються тонкі чорні щілини через
-        // згладжування країв canvas. Підкладка ховає ці щілини під
-        // нейтральним тоном суходолу замість чорного океану.
-        ctx.fillStyle = "#213244";
-        for (let i = 0; i < regions.length; i++) {
-          const r = regions[i];
-          const [minX, minY, maxX, maxY] = r.bbox;
-          if (maxX < visMinX || minX > visMaxX || maxY < visMinY || minY > visMaxY) continue;
-          ctx.fill(r.path);
-        }
-
-        for (let i = 0; i < regions.length; i++) {
-          const r = regions[i];
-          const [minX, minY, maxX, maxY] = r.bbox;
-          if (maxX < visMinX || minX > visMaxX || maxY < visMinY || minY > visMaxY) continue;
-          const owner = owners[i];
-          const bb = ownerBBoxes[owner];
-          const flag = getFlagImage(flagCacheRef.current, owner, () => {
-            /* прапор довантажився — наступний кадр підхопить сам, окремого
-               forceUpdate не треба, цикл малювання й так триває постійно */
-          });
-          ctx.save();
-          ctx.clip(r.path);
-          if (flag && bb) {
-            ctx.drawImage(flag, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1]);
-            if (owner === mine) {
-              ctx.fillStyle = "rgba(34,211,238,0.14)";
-              ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
-            }
-          } else {
-            ctx.fillStyle = owner === mine ? "#22d3ee" : "#264a63";
-            ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
-          }
-          ctx.restore();
-        }
-
-        /*
-         * КОРДОНИ — стилізовані як у референсі:
-         * яскраві біло-cyan межі між різними власниками,
-         * тонкі світлі межі між областями,
-         * окремий контур узбережжя.
-         *
-         * Заливки, прапори, геометрія, zoom та механіка захоплення
-         * залишаються без змін.
-         */
-
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-
-        // М'який neon-glow тільки для кордонів між різними власниками.
-        ctx.save();
-        ctx.shadowColor = "rgba(60, 180, 255, 0.72)";
-        ctx.shadowBlur = 5.5 / k;
-        ctx.strokeStyle = "rgba(85, 190, 255, 0.58)";
-        ctx.lineWidth = Math.max(1.8 / k, 0.055);
-
-        for (const bd of borders) {
-          if (bd.b === null) continue;
-          if (owners[bd.a] === owners[bd.b]) continue;
-
-          ctx.beginPath();
-          bd.line.forEach(([lx, ly], i) =>
-            i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
-          );
-          ctx.stroke();
-        }
-        ctx.restore();
-
-        // Основні лінії кордонів.
-        for (const bd of borders) {
-          // Зовнішній контур суші / берегова лінія.
-          if (bd.b === null) {
-            ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) =>
-              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
-            );
-            ctx.strokeStyle = "rgba(105, 195, 240, 0.68)";
-            ctx.lineWidth = Math.max(0.85 / k, 0.025);
-            ctx.stroke();
-            continue;
-          }
-
-          const sameOwner = owners[bd.a] === owners[bd.b];
-
-          // Внутрішні межі областей одного власника.
-          if (sameOwner) {
-            if (k < 1.25) continue;
-
-            ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) =>
-              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
-            );
-            ctx.strokeStyle = k >= 2.0
-              ? "rgba(230, 242, 255, 0.76)"
-              : "rgba(185, 215, 240, 0.48)";
-            ctx.lineWidth = Math.max((k >= 2.0 ? 0.78 : 0.62) / k, 0.020);
-            ctx.stroke();
-            continue;
-          }
-
-          // Кордон між різними власниками — яскравий і чіткий.
-          ctx.save();
-          ctx.shadowColor = "rgba(70, 185, 255, 0.60)";
-          ctx.shadowBlur = 2.4 / k;
-
-          ctx.beginPath();
-          bd.line.forEach(([lx, ly], i) =>
-            i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
-          );
-          ctx.strokeStyle = "rgba(240, 249, 255, 0.97)";
-          ctx.lineWidth = Math.max(1.35 / k, 0.042);
-          ctx.stroke();
-
-          ctx.restore();
-        }
+        const bw = baked.canvas.width / baked.scale;
+        const bh = baked.canvas.height / baked.scale;
+        const sx = x + baked.minX * k;
+        const sy = y + baked.minY * k;
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
 
         // Виділена країна: яскравий зовнішній контур поверх звичайних
         // кордонів, але без зміни її заливки.
         if (sel) {
           ctx.save();
+          ctx.transform(k, 0, 0, k, x, y);
           ctx.shadowColor = "rgba(80, 200, 255, 0.85)";
           ctx.shadowBlur = 4 / k;
           ctx.strokeStyle = "rgba(255,255,255,0.92)";
@@ -519,7 +487,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
 
-          for (const bd of borders) {
+          for (const bd of world.borders) {
             const aIsSel = owners[bd.a] === sel;
             const bIsSel = bd.b !== null && owners[bd.b] === sel;
             if (aIsSel === bIsSel) continue;
@@ -535,9 +503,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
         // спалах при щойному захопленні конкретної області
         if (flashRef.current && Date.now() < flashRef.current.until) {
-          const region = regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
+          const region = world.regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
           if (region) {
             ctx.save();
+            ctx.transform(k, 0, 0, k, x, y);
             ctx.shadowColor = "#ffffff";
             ctx.shadowBlur = 8 / k;
             ctx.strokeStyle = "#ffffff";
@@ -547,7 +516,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           }
         }
 
-        ctx.restore();
       }
 
       raf = requestAnimationFrame(draw);
@@ -667,6 +635,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
     recomputeOwnersAndBBoxes(world.regions, cityControl);
     prevCityControlRef.current = { ...(cityControl || {}) };
+    bake();
 
     if (capturedKey) {
       cnSfx.purchase();
@@ -674,6 +643,15 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       if (captureEvent && onCapture) onCapture(captureEvent);
     }
   }, [cityControl, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    scheduleBake(250);
+    return () => {
+      if (bakeTimerRef.current) clearTimeout(bakeTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
 
   /* Переліт камери до реальної живої території обраної країни. */
   useEffect(() => {
