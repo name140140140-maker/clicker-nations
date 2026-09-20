@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { cnSfx, getRegionData } from "./App";
+import { cnSfx, getRegionData, getFlagSvgs } from "./App";
 
 /* --- Дані карти ---
    Один локальний файл topojson (arcs зі спільними кордонами між
@@ -190,16 +190,48 @@ function approxAreaKm2FromRings(rings) {
 
 function getFlagImage(cache, code, onReady) {
   if (!code) return null;
-  const entry = cache[code];
-  if (entry) return entry.failed ? null : entry.complete && entry.naturalWidth ? entry : null;
+
+  const key = code.toLowerCase();
+  const entry = cache[key];
+
+  if (entry) {
+    if (entry.failed) return null;
+    return entry.complete && entry.naturalWidth > 0 ? entry : null;
+  }
+
+  const inner = getFlagSvgs()?.[key];
+
+  // Прапори вже вбудовані в App.jsx. Використовуємо їх напряму,
+  // щоб карта не залежала від зовнішнього flagcdn і не втрачала
+  // прапори через CORS/мережеві помилки.
+  if (inner) {
+    const img = new Image();
+    img.onload = () => {
+      img.__flagReady = true;
+      onReady?.();
+    };
+    img.onerror = () => {
+      cache[key] = { failed: true };
+    };
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${inner}</svg>`;
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    cache[key] = img;
+    return null;
+  }
+
+  // Резервний варіант для кодів, яких немає у вбудованому наборі.
   const img = new Image();
   img.crossOrigin = "anonymous";
-  img.onload = () => onReady();
-  img.onerror = () => {
-    cache[code] = { failed: true };
+  img.onload = () => {
+    img.__flagReady = true;
+    onReady?.();
   };
-  img.src = `https://flagcdn.com/h480/${code.toLowerCase()}.png`;
-  cache[code] = img;
+  img.onerror = () => {
+    cache[key] = { failed: true };
+  };
+  img.src = `https://flagcdn.com/h480/${key}.png`;
+  cache[key] = img;
   return null;
 }
 
@@ -315,7 +347,7 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
       }
       ctx.drawImage(flag, dx, dy, dw, dh);
       if (owner === myCode) {
-        ctx.fillStyle = "rgba(34,211,238,0.14)";
+        ctx.fillStyle = "rgba(34,211,238,0.72)";
         ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
       }
     } else {
@@ -350,6 +382,7 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
     ctx.beginPath();
     bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
     ctx.lineJoin = "round";
+  ctx.lineCap = "round";
     ctx.save();
     ctx.shadowColor = "#5ad2ff";
     ctx.shadowBlur = 6 / scaleForLines;
@@ -511,7 +544,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: true });
+  if (ctx) ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
     let raf = 0;
 
     const resize = () => {
@@ -580,6 +615,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const sx = x + baked.minX * k;
         const sy = y + baked.minY * k;
         ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
         ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
 
         // Внутрішні лінії між областями ОДНІЄЇ країни — живий шар,
@@ -592,10 +628,11 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           const visMinY = -y / k, visMaxY = (h - y) / k;
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
-          ctx.setLineDash([4 / k, 3 / k]);
-          ctx.strokeStyle = "rgba(148,163,184,0.5)";
-          ctx.lineWidth = Math.max(0.9 / k, 0.03);
+          ctx.setLineDash([]);
+          ctx.strokeStyle = "rgba(148,163,184,0.32)";
+          ctx.lineWidth = Math.max(0.48 / k, 0.016);
           ctx.lineJoin = "round";
+  ctx.lineCap = "round";
           for (const bd of world.borders) {
             if (bd.b === null || owners[bd.a] !== owners[bd.b]) continue;
             const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
@@ -619,6 +656,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
             ctx.strokeStyle = "rgba(255,255,255,0.85)";
             ctx.lineWidth = Math.max(1.3 / k, 0.045);
             ctx.lineJoin = "round";
+  ctx.lineCap = "round";
             for (const bd of world.borders) {
               const aIsSel = owners[bd.a] === sel;
               const bIsSel = bd.b !== null && owners[bd.b] === sel;

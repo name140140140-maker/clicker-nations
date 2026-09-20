@@ -90,7 +90,7 @@ const AUTO_CLICKER_TICK_MS = 200;
 const AUTO_CLICKER_DAILY_LIMIT_MS = 12 * 60 * 60 * 1000;
 /* Кулдаун між діями лідера/радника/повстанця (8 годин) */
 const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
-export { cnSfx, getRegionData };
+export { cnSfx, getRegionData, getFlagSvgs };
 
 /* Автоклікер, поки гравець НЕ в грі: коли гра завантажується, рахуємо,
    скільки енергії "накопичилось" за час відсутності (регенерація вже
