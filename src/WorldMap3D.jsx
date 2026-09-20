@@ -209,6 +209,71 @@ function fitCamera(w, h) {
   return { k, x: w / 2 - ((lon0 + lon1) / 2) * k, y: h / 2 - ((lat0 + lat1) / 2) * k };
 }
 
+/* Невеликий тайл випадкового "шуму" для текстури океану — генерується
+   раз, тайлиться через ctx.createPattern, дуже дешево. */
+function makeNoiseTile() {
+  const size = 96;
+  const c = document.createElement("canvas");
+  c.width = size;
+  c.height = size;
+  const nctx = c.getContext("2d");
+  const img = nctx.createImageData(size, size);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 200 + Math.floor(Math.random() * 55);
+    img.data[i] = v;
+    img.data[i + 1] = v;
+    img.data[i + 2] = v;
+    img.data[i + 3] = Math.random() * 255;
+  }
+  nctx.putImageData(img, 0, 0);
+  return c;
+}
+
+/* Приблизні координати підписів океанів — у внутрішніх (lon, -lat). */
+const OCEAN_LABELS = [
+  { text: "АТЛАНТИЧНИЙ ОКЕАН", lon: -35, lat: -0 },
+  { text: "ТИХИЙ ОКЕАН", lon: -150, lat: -10 },
+  { text: "ІНДІЙСЬКИЙ ОКЕАН", lon: 75, lat: 25 },
+  { text: "ПІВНІЧНИЙ ЛЬОДОВИТИЙ ОКЕАН", lon: 10, lat: -75 },
+  { text: "ПІВДЕННИЙ ОКЕАН", lon: 20, lat: 68 },
+];
+
+function drawCompass(ctx, cx, cy, r) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = "rgba(180,220,255,0.55)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(210,235,255,0.9)";
+  ctx.beginPath();
+  ctx.moveTo(0, -r);
+  ctx.lineTo(r * 0.18, 0);
+  ctx.lineTo(0, r * 0.32);
+  ctx.lineTo(-r * 0.18, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(150,190,220,0.6)";
+  ctx.beginPath();
+  ctx.moveTo(0, r);
+  ctx.lineTo(0, r * 0.32);
+  ctx.moveTo(-r, 0);
+  ctx.lineTo(-r * 0.32, 0);
+  ctx.moveTo(r, 0);
+  ctx.lineTo(r * 0.32, 0);
+  ctx.stroke();
+  ctx.font = `${Math.round(r * 0.5)}px sans-serif`;
+  ctx.fillStyle = "rgba(210,235,255,0.85)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("N", 0, -r * 1.35);
+  ctx.fillText("S", 0, r * 1.35);
+  ctx.fillText("W", -r * 1.35, 0);
+  ctx.fillText("E", r * 1.35, 0);
+  ctx.restore();
+}
+
 /* Найбільша сторона "запеченого" растру — компроміс між різкістю при
    наближенні й пам'яттю/швидкістю. Карта перемальовується в цю картинку
    ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
@@ -223,7 +288,7 @@ const BAKE_MAX_SIDE = 4096;
 function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleForLines, onFlagReady) {
   const { regions, borders } = world;
 
-  ctx.fillStyle = "#213244";
+  ctx.fillStyle = "#1a2836";
   for (let i = 0; i < regions.length; i++) ctx.fill(regions[i].path);
 
   for (let i = 0; i < regions.length; i++) {
@@ -235,7 +300,20 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
     ctx.save();
     ctx.clip(r.path);
     if (flag && bb) {
-      ctx.drawImage(flag, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1]);
+      // "cover", а не розтягування 1:1 — зберігає пропорції прапора, як
+      // background-size:cover, замість спотворення на витягнутих країнах.
+      const bw = bb[2] - bb[0], bh = bb[3] - bb[1];
+      const flagAr = flag.naturalWidth / flag.naturalHeight;
+      const boxAr = bw / bh;
+      let dw = bw, dh = bh, dx = bb[0], dy = bb[1];
+      if (flagAr > boxAr) {
+        dw = bh * flagAr;
+        dx = bb[0] - (dw - bw) / 2;
+      } else {
+        dh = bw / flagAr;
+        dy = bb[1] - (dh - bh) / 2;
+      }
+      ctx.drawImage(flag, dx, dy, dw, dh);
       if (owner === myCode) {
         ctx.fillStyle = "rgba(34,211,238,0.14)";
         ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
@@ -245,21 +323,40 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
       ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
     }
     ctx.restore();
+
+    // Легкий "рельєф": темна тінь по нижньо-правому краю контуру й
+    // світліший відблиск по верхньо-лівому — імітує об'єм без справжнього
+    // 3D-рендеру (працює на будь-якій формі, дешево, малюється один раз
+    // при запіканні).
+    ctx.save();
+    ctx.clip(r.path);
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.lineWidth = Math.max(1.4 / scaleForLines, 0.05);
+    ctx.translate(0.5 / scaleForLines, 0.5 / scaleForLines);
+    ctx.stroke(r.path);
+    ctx.translate(-1 / scaleForLines, -1 / scaleForLines);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.stroke(r.path);
+    ctx.restore();
   }
 
-  // Тут малюємо тільки справжні державні кордони (між різними
-  // власниками) — вони частина растру й видно завжди. Внутрішні лінії
-  // між областями ОДНІЄЇ країни сюди більше не входять: їх малює
-  // окремий живий шар нижче, тільки при значному наближенні.
+  // Справжні державні кордони (між різними власниками) — з м'яким
+  // блакитним світінням, частина растру, видно завжди. Внутрішні лінії
+  // між областями ОДНІЄЇ країни сюди більше не входять: їх малює окремий
+  // живий шар нижче, тільки при значному наближенні.
   for (const bd of borders) {
     if (bd.b === null) continue;
     if (owners[bd.a] === owners[bd.b]) continue;
     ctx.beginPath();
     bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
     ctx.lineJoin = "round";
-    ctx.strokeStyle = "rgba(210,224,245,0.6)";
-    ctx.lineWidth = Math.max(1.0 / scaleForLines, 0.035);
+    ctx.save();
+    ctx.shadowColor = "#5ad2ff";
+    ctx.shadowBlur = 6 / scaleForLines;
+    ctx.strokeStyle = "rgba(150,225,255,0.85)";
+    ctx.lineWidth = Math.max(1.15 / scaleForLines, 0.04);
     ctx.stroke();
+    ctx.restore();
   }
 }
 
@@ -284,6 +381,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   onSelectRef.current = onSelect;
   const bakedRef = useRef(null); // { canvas, minX, minY, scale }
   const bakeTimerRef = useRef(null);
+  const noisePatternRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
 
   const recomputeOwnersAndBBoxes = (regions, cityControlObj) => {
@@ -436,11 +534,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const ocean = ctx.createRadialGradient(w / 2, h * 0.42, 0, w / 2, h * 0.42, Math.max(w, h) * 0.85);
-      ocean.addColorStop(0, "#0e2e4d");
-      ocean.addColorStop(0.55, "#081a2e");
-      ocean.addColorStop(1, "#04090f");
+      ocean.addColorStop(0, "#0a2138");
+      ocean.addColorStop(0.55, "#051422");
+      ocean.addColorStop(1, "#02060a");
       ctx.fillStyle = ocean;
       ctx.fillRect(0, 0, w, h);
+      if (!noisePatternRef.current) noisePatternRef.current = ctx.createPattern(makeNoiseTile(), "repeat");
+      if (noisePatternRef.current) {
+        ctx.save();
+        ctx.globalAlpha = 0.05;
+        ctx.fillStyle = noisePatternRef.current;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+      }
 
       const world = worldRef.current;
       const baked = bakedRef.current;
@@ -537,7 +643,31 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           }
           ctx.restore();
         }
+
+        // Підписи океанів — у світових координатах, показуємо тільки коли
+        // потрапляють у видиму область і карта достатньо віддалена (на
+        // близькому зумі це вже не потрібно, там дивляться на країни).
+        if (k < 6) {
+          ctx.save();
+          ctx.font = `${Math.max(11, Math.min(15, 12 * (k / 2)))}px sans-serif`;
+          ctx.fillStyle = "rgba(150,190,220,0.55)";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.letterSpacing = "2px";
+          OCEAN_LABELS.forEach((o) => {
+            const sx = x + o.lon * k;
+            const sy = y + o.lat * k;
+            if (sx < -50 || sx > w + 50 || sy < -20 || sy > h + 20) return;
+            ctx.fillText(o.text, sx, sy);
+          });
+          ctx.restore();
+        }
       }
+
+      // Компас — фіксований декоративний елемент в кутку екрана (без
+      // повороту камери карта завжди "дивиться" на північ, тому компас
+      // завжди в одному положенні — це коректно).
+      drawCompass(ctx, 34, 34, 20);
 
       raf = requestAnimationFrame(draw);
     };
@@ -724,25 +854,87 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   };
 
   return (
-    <div className="cn-map3d-wrap" style={{ position: "relative" }}>
+    <div
+      className="cn-map3d-wrap"
+      style={{
+        position: "relative",
+        borderRadius: 18,
+        overflow: "hidden",
+        border: "1px solid rgba(120,190,255,0.35)",
+        boxShadow: "0 0 0 1px rgba(80,150,220,0.15), 0 0 26px rgba(60,160,255,0.25), inset 0 0 40px rgba(10,30,55,0.6)",
+      }}
+    >
       <canvas
         ref={canvasRef}
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none" }}
       />
+      {/* декоративні кутові акценти — "футуристична рамка" */}
+      {[
+        { top: 6, left: 6, borderWidth: "2px 0 0 2px" },
+        { top: 6, right: 6, borderWidth: "2px 2px 0 0" },
+        { bottom: 6, left: 6, borderWidth: "0 0 2px 2px" },
+        { bottom: 6, right: 6, borderWidth: "0 2px 2px 0" },
+      ].map((pos, i) => (
+        <div
+          key={i}
+          style={{
+            position: "absolute",
+            width: 22,
+            height: 22,
+            borderColor: "rgba(150,210,255,0.75)",
+            borderStyle: "solid",
+            pointerEvents: "none",
+            ...pos,
+          }}
+        />
+      ))}
       {!loaded && (
         <div className="cn-map3d-loading">
           <RefreshCw size={26} className="cn-spin" />
           <div>Завантаження карти світу…</div>
         </div>
       )}
-      <div className="cn-map-toolbar">
-        <button className="cn-map-zoom-btn" type="button" onClick={() => zoomBy(1)} aria-label="Наблизити">
+      <div className="cn-map-toolbar" style={{ gap: 8 }}>
+        <button
+          className="cn-map-zoom-btn"
+          type="button"
+          onClick={() => zoomBy(1)}
+          aria-label="Наблизити"
+          style={{
+            background: "linear-gradient(160deg, rgba(30,50,75,0.9), rgba(10,20,32,0.9))",
+            border: "1px solid rgba(120,190,255,0.4)",
+            boxShadow: "0 0 10px rgba(70,170,255,0.25)",
+            color: "#cfeeff",
+          }}
+        >
           +
         </button>
-        <button className="cn-map-zoom-btn" type="button" onClick={() => zoomBy(-1)} aria-label="Віддалити">
+        <button
+          className="cn-map-zoom-btn"
+          type="button"
+          onClick={() => zoomBy(-1)}
+          aria-label="Віддалити"
+          style={{
+            background: "linear-gradient(160deg, rgba(30,50,75,0.9), rgba(10,20,32,0.9))",
+            border: "1px solid rgba(120,190,255,0.4)",
+            boxShadow: "0 0 10px rgba(70,170,255,0.25)",
+            color: "#cfeeff",
+          }}
+        >
           −
         </button>
-        <button className="cn-map-zoom-btn cn-map-zoom-btn--reset" type="button" onClick={resetView} aria-label="Скинути">
+        <button
+          className="cn-map-zoom-btn cn-map-zoom-btn--reset"
+          type="button"
+          onClick={resetView}
+          aria-label="Скинути"
+          style={{
+            background: "linear-gradient(160deg, rgba(30,50,75,0.9), rgba(10,20,32,0.9))",
+            border: "1px solid rgba(120,190,255,0.4)",
+            boxShadow: "0 0 10px rgba(70,170,255,0.25)",
+            color: "#cfeeff",
+          }}
+        >
           ⟲
         </button>
       </div>
