@@ -138,11 +138,20 @@ function buildWorldFromTopology(topology) {
 
   const borders = [];
   arcOwners.forEach((owners, arcIdx) => {
-    if (owners.size !== 2) return;
-    const [a, b] = [...owners];
+    if (owners.size !== 1 && owners.size !== 2) return;
     if (!arcCache[arcIdx]) arcCache[arcIdx] = decodeArc(topology, arcIdx);
     const line = arcCache[arcIdx].map(([lon, lat]) => [lon, -lat]);
-    borders.push({ a, b, line });
+    if (owners.size === 2) {
+      const [a, b] = [...owners];
+      borders.push({ a, b, line });
+    } else {
+      // "берегова" арка — межує лише з однією областю (з іншого боку
+      // океан). Не малюється як звичайний кордон, але потрібна, щоб
+      // обвести ЗОВНІШНІЙ контур країни при виділенні, не чіпаючи
+      // внутрішні лінії між власними областями.
+      const [a] = [...owners];
+      borders.push({ a, b: null, line });
+    }
   });
 
   return { regions, borders };
@@ -206,8 +215,10 @@ function getFlagImage(cache, code, onReady) {
 }
 
 function fitCamera(w, h) {
+  // "cover", а не "contain": карта завжди заповнює весь canvas без
+  // порожніх країв, навіть якщо це трохи обрізає полюси/океан по краях.
   const lon0 = -172, lon1 = 178, lat0 = -58, lat1 = 82; // тут вже у внутрішніх (lon, -lat) координатах
-  const k = Math.min(w / (lon1 - lon0), h / (lat1 - lat0)) * 0.96;
+  const k = Math.max(w / (lon1 - lon0), h / (lat1 - lat0));
   return { k, x: w / 2 - ((lon0 + lon1) / 2) * k, y: h / 2 - ((lat0 + lat1) / 2) * k };
 }
 
@@ -339,7 +350,11 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#060b16";
+      const ocean = ctx.createRadialGradient(w / 2, h * 0.42, 0, w / 2, h * 0.42, Math.max(w, h) * 0.85);
+      ocean.addColorStop(0, "#0e2e4d");
+      ocean.addColorStop(0.55, "#081a2e");
+      ocean.addColorStop(1, "#04090f");
+      ctx.fillStyle = ocean;
       ctx.fillRect(0, 0, w, h);
 
       const world = worldRef.current;
@@ -375,6 +390,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         ctx.save();
         ctx.transform(k, 0, 0, k, x, y);
 
+        // Суцільна "підкладка" під усіма областями одним проходом — без
+        // неї на стиках сусідніх областей (де кожна малюється й
+        // обрізається окремо) з'являються тонкі чорні щілини через
+        // згладжування країв canvas. Підкладка ховає ці щілини під
+        // нейтральним тоном суходолу замість чорного океану.
+        ctx.fillStyle = "#213244";
+        for (let i = 0; i < regions.length; i++) {
+          const r = regions[i];
+          const [minX, minY, maxX, maxY] = r.bbox;
+          if (maxX < visMinX || minX > visMaxX || maxY < visMinY || minY > visMaxY) continue;
+          ctx.fill(r.path);
+        }
+
         for (let i = 0; i < regions.length; i++) {
           const r = regions[i];
           const [minX, minY, maxX, maxY] = r.bbox;
@@ -404,30 +432,38 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         // країнами — і це рахується щокадру одним порівнянням власників,
         // тому кордон "рухається" миттєво в момент захоплення території.
         for (const bd of borders) {
+          if (bd.b === null) continue; // берегові арки тут не малюємо, лише для контуру виділення нижче
           const oa = owners[bd.a];
           const ob = owners[bd.b];
           const same = oa === ob;
-          if (same && k < 3) continue;
+          if (same && k < 3.4) continue;
           ctx.beginPath();
           bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
           ctx.lineJoin = "round";
           if (same) {
-            ctx.strokeStyle = "rgba(6,12,22,0.45)";
-            ctx.lineWidth = Math.max(0.35 / k, 0.015);
+            ctx.strokeStyle = "rgba(8,16,26,0.22)";
+            ctx.lineWidth = Math.max(0.28 / k, 0.012);
           } else {
-            ctx.strokeStyle = "rgba(220,232,255,0.85)";
-            ctx.lineWidth = Math.max(1.3 / k, 0.05);
+            ctx.strokeStyle = "rgba(210,224,245,0.6)";
+            ctx.lineWidth = Math.max(1.0 / k, 0.035);
           }
           ctx.stroke();
         }
 
-        // виділена країна — обводимо кожну її область (простіше й дешевше
-        // за об'єднання полігонів, візуально нерозрізнимо)
+        // виділена країна — тепер обводимо ЛИШЕ зовнішній контур її живої
+        // території (кордон із сусідом-іншим-власником або з океаном),
+        // а не кожну внутрішню лінію між власними областями.
         if (sel) {
-          ctx.strokeStyle = "#ffffff";
-          ctx.lineWidth = Math.max(1.8 / k, 0.06);
-          for (let i = 0; i < regions.length; i++) {
-            if (owners[i] === sel) ctx.stroke(regions[i].path);
+          ctx.strokeStyle = "rgba(255,255,255,0.85)";
+          ctx.lineWidth = Math.max(1.3 / k, 0.045);
+          ctx.lineJoin = "round";
+          for (const bd of borders) {
+            const aIsSel = owners[bd.a] === sel;
+            const bIsSel = bd.b !== null && owners[bd.b] === sel;
+            if (aIsSel === bIsSel) continue; // обидві сторони "моя" або обидві "чужі" — не зовнішній контур
+            ctx.beginPath();
+            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+            ctx.stroke();
           }
         }
 
