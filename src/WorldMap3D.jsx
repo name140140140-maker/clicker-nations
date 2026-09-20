@@ -198,7 +198,7 @@ function getFlagImage(cache, code, onReady) {
   img.onerror = () => {
     cache[code] = { failed: true };
   };
-  img.src = `https://flagcdn.com/h240/${code.toLowerCase()}.png`;
+  img.src = `https://flagcdn.com/h480/${code.toLowerCase()}.png`;
   cache[code] = img;
   return null;
 }
@@ -279,17 +279,30 @@ function drawCompass(ctx, cx, cy, r) {
    ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
    прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
    поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
-const BAKE_MAX_SIDE = 4096;
+const BAKE_MAX_SIDE = 5120;
 
 /* Малює всю карту (підкладка → прапори → кордони) в довільний 2D-контекст,
    вже налаштований трансформацією world→pixel; scaleForLines — величина
    для нормалізації товщини ліній (та ж роль, що "k" камери). Використовується
-   і для запікання в offscreen canvas, і не використовується щокадру напряму. */
+  і для запікання в offscreen canvas, і не використовується щокадру напряму. */
+/* Малює карту в єдиному стилі:
+  - прапори завантажуються у високій роздільності;
+  - країни мають чистий суцільний контур;
+  - внутрішні області не отримують штрих-пунктирів;
+  - замість "об'ємної рамки" додається дуже легкий процедурний relief,
+    який не змінює геометрію і не створює різких ліній. */
 function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleForLines, onFlagReady) {
   const { regions, borders } = world;
 
-  ctx.fillStyle = "#1a2836";
+  ctx.fillStyle = "#172735";
   for (let i = 0; i < regions.length; i++) ctx.fill(regions[i].path);
+
+  // Дуже легка текстура рельєфу. Вона працює поверх прапора, але з низькою
+  // непрозорістю, щоб прапор залишався головним візуальним шаром.
+  const reliefGradient = ctx.createRadialGradient(-35, -30, 5, 35, 30, 95);
+  reliefGradient.addColorStop(0, "rgba(255,255,255,0.11)");
+  reliefGradient.addColorStop(0.45, "rgba(255,255,255,0.025)");
+  reliefGradient.addColorStop(1, "rgba(0,0,0,0.12)");
 
   for (let i = 0; i < regions.length; i++) {
     const r = regions[i];
@@ -297,15 +310,18 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
     const owner = owners[i];
     const bb = ownerBBoxes[owner];
     const flag = getFlagImage(flagCache, owner, onFlagReady);
+
     ctx.save();
     ctx.clip(r.path);
+
     if (flag && bb) {
-      // "cover", а не розтягування 1:1 — зберігає пропорції прапора, як
-      // background-size:cover, замість спотворення на витягнутих країнах.
-      const bw = bb[2] - bb[0], bh = bb[3] - bb[1];
-      const flagAr = flag.naturalWidth / flag.naturalHeight;
+      const bw = Math.max(bb[2] - bb[0], 0.001);
+      const bh = Math.max(bb[3] - bb[1], 0.001);
+      const flagAr = flag.naturalWidth / Math.max(flag.naturalHeight, 1);
       const boxAr = bw / bh;
       let dw = bw, dh = bh, dx = bb[0], dy = bb[1];
+
+      // cover: прапор не деформується
       if (flagAr > boxAr) {
         dw = bh * flagAr;
         dx = bb[0] - (dw - bw) / 2;
@@ -314,47 +330,42 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
         dy = bb[1] - (dh - bh) / 2;
       }
       ctx.drawImage(flag, dx, dy, dw, dh);
+
+      // М'який рельєф поверх прапора: світло/тінь, але без товстої рамки.
+      ctx.fillStyle = reliefGradient;
+      ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+
       if (owner === myCode) {
-        ctx.fillStyle = "rgba(34,211,238,0.14)";
+        ctx.fillStyle = "rgba(34,211,238,0.10)";
         ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
       }
     } else {
-      ctx.fillStyle = owner === myCode ? "#22d3ee" : "#264a63";
+      ctx.fillStyle = owner === myCode ? "#28cfe8" : "#28506a";
+      ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+      ctx.fillStyle = reliefGradient;
       ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
     }
     ctx.restore();
-
-    // Легкий "рельєф": темна тінь по нижньо-правому краю контуру й
-    // світліший відблиск по верхньо-лівому — імітує об'єм без справжнього
-    // 3D-рендеру (працює на будь-якій формі, дешево, малюється один раз
-    // при запіканні).
-    ctx.save();
-    ctx.clip(r.path);
-    ctx.strokeStyle = "rgba(0,0,0,0.35)";
-    ctx.lineWidth = Math.max(1.4 / scaleForLines, 0.05);
-    ctx.translate(0.5 / scaleForLines, 0.5 / scaleForLines);
-    ctx.stroke(r.path);
-    ctx.translate(-1 / scaleForLines, -1 / scaleForLines);
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
-    ctx.stroke(r.path);
-    ctx.restore();
   }
 
-  // Справжні державні кордони (між різними власниками) — з м'яким
-  // блакитним світінням, частина растру, видно завжди. Внутрішні лінії
-  // між областями ОДНІЄЇ країни сюди більше не входять: їх малює окремий
-  // живий шар нижче, тільки при значному наближенні.
+  // ЄДИНА система державних кордонів: суцільна, тонка, чиста.
+  // Ніяких штрихів/пунктирів і ніяких різних стилів на сусідніх країнах.
   for (const bd of borders) {
     if (bd.b === null) continue;
     if (owners[bd.a] === owners[bd.b]) continue;
+
     ctx.beginPath();
-    bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
-    ctx.lineJoin = "round";
+    bd.line.forEach(([lx, ly], i) => {
+      if (i === 0) ctx.moveTo(lx, ly);
+      else ctx.lineTo(lx, ly);
+    });
     ctx.save();
-    ctx.shadowColor = "#5ad2ff";
-    ctx.shadowBlur = 6 / scaleForLines;
-    ctx.strokeStyle = "rgba(150,225,255,0.85)";
-    ctx.lineWidth = Math.max(1.15 / scaleForLines, 0.04);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "rgba(205,238,255,0.92)";
+    ctx.lineWidth = Math.max(0.72 / scaleForLines, 0.028);
+    ctx.shadowColor = "rgba(70,190,255,0.55)";
+    ctx.shadowBlur = 2.2 / scaleForLines;
     ctx.stroke();
     ctx.restore();
   }
@@ -582,20 +593,18 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
 
-        // Внутрішні лінії між областями ОДНІЄЇ країни — живий шар,
-        // з'являється лише при значному наближенні (як у Google Maps:
-        // тонкі, напівпрозорі, штрихпунктирні), і рахує тільки бордери,
-        // що реально потрапляють у видиму область екрана — тому лишається
-        // дешевим навіть при тисячах бордерів по всьому світу.
-        if (k > 7) {
+        // Внутрішні кордони областей: один чистий суцільний стиль.
+        // Вони з'являються поступово при наближенні й не конкурують
+        // з державними кордонами.
+        if (k > 5) {
           const visMinX = -x / k, visMaxX = (w - x) / k;
           const visMinY = -y / k, visMaxY = (h - y) / k;
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
-          ctx.setLineDash([4 / k, 3 / k]);
-          ctx.strokeStyle = "rgba(148,163,184,0.5)";
-          ctx.lineWidth = Math.max(0.9 / k, 0.03);
+          ctx.strokeStyle = "rgba(185,205,218,0.42)";
+          ctx.lineWidth = Math.max(0.58 / k, 0.022);
           ctx.lineJoin = "round";
+          ctx.lineCap = "round";
           for (const bd of world.borders) {
             if (bd.b === null || owners[bd.a] !== owners[bd.b]) continue;
             const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
@@ -604,7 +613,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
             bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
             ctx.stroke();
           }
-          ctx.setLineDash([]);
           ctx.restore();
         }
 
@@ -617,7 +625,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
           if (sel) {
             ctx.strokeStyle = "rgba(255,255,255,0.85)";
-            ctx.lineWidth = Math.max(1.3 / k, 0.045);
+            ctx.lineWidth = Math.max(0.95 / k, 0.032);
             ctx.lineJoin = "round";
             for (const bd of world.borders) {
               const aIsSel = owners[bd.a] === sel;
@@ -634,9 +642,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
             if (region) {
               ctx.save();
               ctx.shadowColor = "#ffffff";
-              ctx.shadowBlur = 8 / k;
+              ctx.shadowBlur = 5 / k;
               ctx.strokeStyle = "#ffffff";
-              ctx.lineWidth = Math.max(2.4 / k, 0.08);
+              ctx.lineWidth = Math.max(1.6 / k, 0.05);
               ctx.stroke(region.path);
               ctx.restore();
             }
