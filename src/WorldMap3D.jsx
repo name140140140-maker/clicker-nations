@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import maplibregl from "maplibre-gl";
 import { RefreshCw } from "lucide-react";
-import { featureCollection, union } from "@turf/turf";
 import { cnSfx, getRegionData } from "./App";
 
-/* --- Реальні межі областей для ВСІХ країн ---
-   Один локальний файл ADM1 GeoJSON, зібраний build-скриптом з
-   geoBoundaries для всіх доступних країн. */
-const WORLD_REGIONS_URL = "/data/world-regions.geojson";
+/* --- Дані карти ---
+   Один локальний файл topojson (arcs зі спільними кордонами між
+   сусідніми областями, вже прораховані заздалегідь build-скриптом —
+   саме це дозволяє живий кордон рахувати миттєво щокадру, без важких
+   геометричних операцій у браузері). */
+const WORLD_TOPOLOGY_URL = "/data/world-topology.json";
 
-/* Відомі розбіжності назв між грою та реальним геонабором даних. */
 const REGION_NAME_ALIASES = {
   kirovohrad: ["kropyvnytskyi", "kirovograd"],
   transcarpathia: ["zakarpattia", "zakarpatska", "zakarpattya"],
@@ -30,159 +29,167 @@ function normalizeRegionName(s) {
     .trim();
 }
 
-function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
-  const norm = normalizeRegionName(gameRegionName);
-  if (featuresByNormName[norm]) return featuresByNormName[norm];
-  for (const [key, aliases] of Object.entries(REGION_NAME_ALIASES)) {
-    if (key === norm || aliases.some((a) => normalizeRegionName(a) === norm)) {
-      if (featuresByNormName[key]) return featuresByNormName[key];
-      for (const a of aliases) {
-        const an = normalizeRegionName(a);
-        if (featuresByNormName[an]) return featuresByNormName[an];
-      }
-    }
-  }
-  return null;
-}
-
 function ownerForRegion(cityControl, key, countryCode) {
-  return Object.prototype.hasOwnProperty.call(cityControl || {}, key)
-    ? cityControl[key]
-    : countryCode;
+  return Object.prototype.hasOwnProperty.call(cityControl || {}, key) ? cityControl[key] : countryCode;
 }
 
-function polygonPartsOf(geometry) {
-  if (!geometry) return [];
-  if (geometry.type === "Polygon") return [geometry.coordinates];
-  if (geometry.type === "MultiPolygon") return geometry.coordinates;
-  return [];
-}
-
-/* Об'єднує (dissolve) полігони всіх областей одного власника в одну
-   суцільну територію — це основа "живого" державного кордону: коли
-   область переходить іншому власнику, вона переходить з однієї
-   dissolve-групи в іншу, і форма (та її прапор-заливка) сама змінюється
-   для БУДЬ-ЯКОЇ країни світу. */
-function dissolveOwnerTerritory(features) {
-  if (!features.length) return null;
-  let acc = features[0].geometry;
-  for (let i = 1; i < features.length; i++) {
-    const nextGeom = features[i].geometry;
-    try {
-      const merged = union(
-        featureCollection([
-          { type: "Feature", properties: {}, geometry: acc },
-          { type: "Feature", properties: {}, geometry: nextGeom },
-        ]),
-      );
-      if (merged && merged.geometry) {
-        acc = merged.geometry;
-        continue;
-      }
-    } catch {
-      /* впало на цій парі — з'єднуємо нижче без dissolve внутрішнього шва */
-    }
-    acc = { type: "MultiPolygon", coordinates: [...polygonPartsOf(acc), ...polygonPartsOf(nextGeom)] };
+/* Стандартне декодування topojson-арки: якщо є transform — координати
+   закодовані дельтами і масштабовані (квантизація для економії розміру
+   файлу); якщо transform немає — arcs вже містять абсолютні координати.
+   Підтримуємо обидва випадки, щоб не залежати від того, як саме
+   build-скрипт викликав topojson-server. */
+function decodeArc(topology, arcIndex) {
+  const reversed = arcIndex < 0;
+  const idx = reversed ? ~arcIndex : arcIndex;
+  const raw = topology.arcs[idx];
+  const tr = topology.transform;
+  let pts;
+  if (tr) {
+    let x = 0, y = 0;
+    pts = raw.map(([dx, dy]) => {
+      x += dx;
+      y += dy;
+      return [x * tr.scale[0] + tr.translate[0], y * tr.scale[1] + tr.translate[1]];
+    });
+  } else {
+    pts = raw.map(([x, y]) => [x, y]);
   }
-  return acc;
+  return reversed ? pts.slice().reverse() : pts;
 }
 
-function computeTerritories(regionFeatures) {
-  const byOwner = {};
-  regionFeatures.forEach((f) => {
-    const owner = f.properties.cn_region_owner;
-    (byOwner[owner] = byOwner[owner] || []).push(f);
+/* Y = -lat всюди в наших внутрішніх координатах (один раз тут, на етапі
+   декодування) — це прибирає плутанину зі знаком під час трансформації
+   canvas: далі скрізь (шляхи, картинки прапорів, кліки) працюємо з
+   одним і тим самим напрямком осей, без окремого "перевертання". */
+function ringsFromArcRefs(topology, arcRefsPerRing, cache) {
+  return arcRefsPerRing.map((arcRefs) => {
+    const pts = [];
+    arcRefs.forEach((arcIndex, i) => {
+      const idx = arcIndex < 0 ? ~arcIndex : arcIndex;
+      if (!cache[idx]) cache[idx] = decodeArc(topology, idx);
+      const decoded = arcIndex < 0 ? cache[idx].slice().reverse() : cache[idx];
+      const start = i === 0 ? 0 : 1; // уникаємо дублікату спільної точки між арками
+      for (let k = start; k < decoded.length; k++) pts.push(decoded[k]);
+    });
+    return pts.map(([lon, lat]) => [lon, -lat]);
   });
-  return Object.entries(byOwner)
-    .map(([owner, feats]) => {
-      const geometry = dissolveOwnerTerritory(feats);
-      if (!geometry) return null;
-      return { type: "Feature", properties: { cn_owner: owner }, geometry };
-    })
-    .filter(Boolean);
 }
 
-const BASE_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
-const COUNTRIES_GEOJSON_URL =
-  "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
+/* Будує повний список областей (з готовими Path2D) і список кордонів
+   між сусідніми областями (з готовою geometry лінії) з topojson-об'єкта.
+   Кордон між двома різними ОБЛАСТЯМИ рахується як межа між "власниками"
+   щокадру (просто порівняння двох рядків), тому не потребує жодного
+   перерахунку геометрії при захопленні території. */
+function buildWorldFromTopology(topology) {
+  const geoms = topology.objects.regions.geometries;
+  const arcCache = {};
+  const regions = geoms.map((g, i) => {
+    const polys = g.type === "Polygon" ? [g.arcs] : g.arcs; // MultiPolygon: arcs = Polygon[][]
+    const rings = [];
+    polys.forEach((poly) => {
+      ringsFromArcRefs(topology, poly, arcCache).forEach((r) => rings.push(r));
+    });
+    const path = new Path2D();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let sx = 0, sy = 0, sn = 0;
+    rings.forEach((ring) => {
+      ring.forEach(([x, y], j) => {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        sx += x;
+        sy += y;
+        sn++;
+        if (j === 0) path.moveTo(x, y);
+        else path.lineTo(x, y);
+      });
+      path.closePath();
+    });
+    return {
+      index: i,
+      name: g.properties?.name || "",
+      iso: g.properties?.iso || "",
+      rings,
+      path,
+      bbox: [minX, minY, maxX, maxY],
+      cx: sn ? sx / sn : (minX + maxX) / 2,
+      cy: sn ? sy / sn : (minY + maxY) / 2,
+    };
+  });
 
-const WORLD_VIEW = { center: [15, 25], zoom: 1.2, pitch: 0, bearing: 0 };
+  /* Хто якою аркою "володіє" — щоб знайти арки, спільні рівно для ДВОХ
+     різних областей (це і є межа між ними; арка лише з одним власником
+     — це зовнішній/берегова лінія, окремо малювати не треба, море й так
+     контрастує з будь-якою заливкою суші). */
+  const arcOwners = new Map();
+  geoms.forEach((g, i) => {
+    const polys = g.type === "Polygon" ? [g.arcs] : g.arcs;
+    polys.forEach((poly) => {
+      poly.forEach((ring) => {
+        ring.forEach((arcIndex) => {
+          const idx = arcIndex < 0 ? ~arcIndex : arcIndex;
+          if (!arcOwners.has(idx)) arcOwners.set(idx, new Set());
+          arcOwners.get(idx).add(i);
+        });
+      });
+    });
+  });
 
-function applyDarkCinematicTheme(map) {
-  try {
-    if (map.getLayer("background")) {
-      map.setPaintProperty("background", "background-color", "#050810");
-    }
-  } catch {
-    /* ignore */
+  const borders = [];
+  arcOwners.forEach((owners, arcIdx) => {
+    if (owners.size !== 2) return;
+    const [a, b] = [...owners];
+    if (!arcCache[arcIdx]) arcCache[arcIdx] = decodeArc(topology, arcIdx);
+    const line = arcCache[arcIdx].map(([lon, lat]) => [lon, -lat]);
+    borders.push({ a, b, line });
+  });
+
+  return { regions, borders };
+}
+
+function pointInRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + 1e-12) + xi;
+    if (intersect) inside = !inside;
   }
-  const style = map.getStyle();
-  if (!style?.layers) return;
-  for (const layer of style.layers) {
-    try {
-      if (layer.type === "symbol") {
-        map.setLayoutProperty(layer.id, "visibility", "none");
-        continue;
-      }
-      if (layer.type === "fill" && /water/i.test(layer.id)) {
-        map.setPaintProperty(layer.id, "fill-color", "#08101f");
-        continue;
-      }
-      if (layer.type === "fill" && /(landcover|landuse|land\b|park)/i.test(layer.id)) {
-        map.setPaintProperty(layer.id, "fill-color", "#050a13");
-        continue;
-      }
-      if (layer.type === "line") {
-        map.setLayoutProperty(layer.id, "visibility", "none");
-      }
-    } catch {
-      /* якийсь шар стилю несумісний — просто пропускаємо */
+  return inside;
+}
+
+function hitRegion(regions, x, y) {
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const r = regions[i];
+    const [minX, minY, maxX, maxY] = r.bbox;
+    if (x < minX || x > maxX || y < minY || y > maxY) continue;
+    for (const ring of r.rings) {
+      if (pointInRing(x, y, ring)) return i;
     }
   }
+  return -1;
 }
 
-function boundsFromGeometry(geometry) {
-  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
-  const walk = (coords) => {
-    if (typeof coords[0] === "number") {
-      const [lng, lat] = coords;
-      if (lng < minLng) minLng = lng;
-      if (lng > maxLng) maxLng = lng;
-      if (lat < minLat) minLat = lat;
-      if (lat > maxLat) maxLat = lat;
-      return;
-    }
-    coords.forEach(walk);
-  };
-  walk(geometry.coordinates);
-  if (!isFinite(minLng)) return null;
-  return [[minLng, minLat], [maxLng, maxLat]];
-}
-
-function approxAreaKm2(geometry) {
-  const KM_PER_DEG_LAT = 111.32;
-  const ringArea = (ring) => {
-    let sum = 0;
-    const avgLat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-    const kmPerDegLng = KM_PER_DEG_LAT * Math.cos((avgLat * Math.PI) / 180);
-    for (let i = 0; i < ring.length - 1; i++) {
-      const [lng1, lat1] = ring[i];
-      const [lng2, lat2] = ring[i + 1];
-      sum += lng1 * kmPerDegLng * (lat2 * KM_PER_DEG_LAT) - lng2 * kmPerDegLng * (lat1 * KM_PER_DEG_LAT);
-    }
-    return Math.abs(sum / 2);
-  };
+function approxAreaKm2FromRings(rings) {
+  const KM_PER_DEG = 111.32;
   let total = 0;
-  const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
-  polys.forEach((poly) => {
-    if (poly[0]) total += ringArea(poly[0]);
+  rings.forEach((ring) => {
+    const avgY = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+    const kmPerDegX = KM_PER_DEG * Math.cos((avgY * Math.PI) / 180);
+    let sum = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      const [x1, y1] = ring[i];
+      const [x2, y2] = ring[i + 1];
+      sum += x1 * kmPerDegX * (y2 * KM_PER_DEG) - x2 * kmPerDegX * (y1 * KM_PER_DEG);
+    }
+    total += Math.abs(sum / 2);
   });
   return Math.round(total);
 }
 
-/* Прапор для коду країни — публічний безкоштовний CDN, без ключів.
-   Кешується один раз на код; onReady викликається, коли зображення
-   реально завантажилось (щоб перемалювати оверлей саме тоді). */
+/* Прапор для коду країни: публічний безкоштовний CDN, без ключів.
+   Кешується один раз на код. */
 function getFlagImage(cache, code, onReady) {
   if (!code) return null;
   const entry = cache[code];
@@ -198,380 +205,427 @@ function getFlagImage(cache, code, onReady) {
   return null;
 }
 
-/* Проектує геометрію (Polygon/MultiPolygon, лат/лон) в екранні пікселі
-   поточного вигляду карти й одразу повертає готовий Path2D + bbox —
-   саме це дозволяє "заливати" фігуру растровим зображенням (прапором),
-   обрізаним рівно по контуру, синхронно з панорамуванням/зумом/нахилом. */
-function buildScreenPath(map, geometry) {
-  const path = new Path2D();
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
-  polys.forEach((poly) => {
-    poly.forEach((ring) => {
-      const sub = new Path2D();
-      ring.forEach(([lng, lat], i) => {
-        const p = map.project([lng, lat]);
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-        if (i === 0) sub.moveTo(p.x, p.y);
-        else sub.lineTo(p.x, p.y);
-      });
-      sub.closePath();
-      path.addPath(sub);
-    });
-  });
-  if (!isFinite(minX)) return null;
-  return { path, bbox: { minX, minY, maxX, maxY } };
+function fitCamera(w, h) {
+  const lon0 = -172, lon1 = 178, lat0 = -58, lat1 = 82; // тут вже у внутрішніх (lon, -lat) координатах
+  const k = Math.min(w / (lon1 - lon0), h / (lat1 - lat0)) * 0.96;
+  return { k, x: w / 2 - ((lon0 + lon1) / 2) * k, y: h / 2 - ((lat0 + lat1) / 2) * k };
 }
 
 export default function WorldMap3D({ selected, onSelect, myCountryCode, cityControl, onCapture }) {
-  const containerRef = useRef(null);
-  const overlayCanvasRef = useRef(null);
-  const mapRef = useRef(null);
-  const featuresByCodeRef = useRef({});
-  const regionFeaturesRef = useRef([]);
-  const territoriesRef = useRef([]);
-  const flagImagesRef = useRef({});
+  const canvasRef = useRef(null);
+  const worldRef = useRef(null); // { regions, borders }
+  const regionOwnerRef = useRef([]); // паралельний regions масив — поточний власник кожної області
+  const ownerBBoxRef = useRef({}); // owner -> [minX,minY,maxX,maxY], для розтягування прапора на всю країну
   const prevCityControlRef = useRef(null);
+  const flagCacheRef = useRef({});
   const flashRef = useRef(null);
-  const prevSelectedRef = useRef(null);
-  const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
+  const camRef = useRef({ x: 0, y: 0, k: 1 });
+  const targetCamRef = useRef(null);
+  const dragRef = useRef({ active: false, moved: false, x: 0, y: 0, cx: 0, cy: 0 });
+  const pointersRef = useRef(new Map());
+  const pinchRef = useRef(0);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const myCountryCodeRef = useRef(myCountryCode);
   myCountryCodeRef.current = myCountryCode;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
   const [loaded, setLoaded] = useState(false);
 
-  /* Малює весь видимий шар країн/територій — прапор-заливка, кордони,
-     світіння "моєї" країни, білий контур виділення, спалах захоплення.
-     Викликається на кожен рендер карти (map.on("render", ...)) — тобто
-     завжди синхронно з поточним поворотом/нахилом/зумом. */
+  const recomputeOwnersAndBBoxes = (regions, cityControlObj) => {
+    const owners = regions.map((r) => ownerForRegion(cityControlObj, r.iso + "|" + r.name, r.iso));
+    const bboxes = {};
+    regions.forEach((r, i) => {
+      const o = owners[i];
+      const [minX, minY, maxX, maxY] = r.bbox;
+      if (!bboxes[o]) bboxes[o] = [minX, minY, maxX, maxY];
+      else {
+        const b = bboxes[o];
+        if (minX < b[0]) b[0] = minX;
+        if (minY < b[1]) b[1] = minY;
+        if (maxX > b[2]) b[2] = maxX;
+        if (maxY > b[3]) b[3] = maxY;
+      }
+    });
+    regionOwnerRef.current = owners;
+    ownerBBoxRef.current = bboxes;
+  };
+
+  /* Завантаження карти — один раз */
   useEffect(() => {
-    const drawOverlay = () => {
-      const map = mapRef.current;
-      const canvas = overlayCanvasRef.current;
-      if (!map || !canvas) return;
-      const ctx = canvas.getContext("2d");
-      const dpr = window.devicePixelRatio || 1;
-      const cssW = canvas.clientWidth;
-      const cssH = canvas.clientHeight;
-      if (!cssW || !cssH) return;
-      const targetW = Math.round(cssW * dpr);
-      const targetH = Math.round(cssH * dpr);
-      if (canvas.width !== targetW || canvas.height !== targetH) {
-        canvas.width = targetW;
-        canvas.height = targetH;
-      }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, cssW, cssH);
-
-      const drawables = territoriesRef.current.map((t) => ({
-        code: t.properties.cn_owner,
-        geometry: t.geometry,
-      }));
-      const covered = new Set(drawables.map((d) => d.code));
-      Object.values(featuresByCodeRef.current).forEach((f) => {
-        const code = f.properties.cn_code;
-        if (!code || covered.has(code)) return;
-        drawables.push({ code, geometry: f.geometry });
-      });
-
-      drawables.forEach(({ code, geometry }) => {
-        const built = buildScreenPath(map, geometry);
-        if (!built) return;
-        const { path, bbox } = built;
-        const mine = code === myCountryCodeRef.current;
-        const img = getFlagImage(flagImagesRef.current, code, () => map.triggerRepaint());
-
-        ctx.save();
-        ctx.clip(path);
-        if (img) {
-          ctx.drawImage(img, bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
-          if (mine) {
-            ctx.fillStyle = "rgba(34,211,238,0.16)";
-            ctx.fillRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
-          }
-        } else {
-          ctx.fillStyle = mine ? "#22d3ee" : "#1c4f7a";
-          ctx.fillRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
-        }
-        ctx.restore();
-
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#0a1626";
-        ctx.stroke(path);
-
-        if (mine) {
-          ctx.save();
-          ctx.shadowColor = "#7cf0ff";
-          ctx.shadowBlur = 14;
-          ctx.strokeStyle = "#baf6ff";
-          ctx.lineWidth = 2;
-          ctx.stroke(path);
-          ctx.restore();
-        }
-
-        if (selectedRef.current && code === selectedRef.current) {
-          ctx.save();
-          ctx.shadowColor = "#ffffff";
-          ctx.shadowBlur = 10;
-          ctx.strokeStyle = "#ffffff";
-          ctx.lineWidth = 2.6;
-          ctx.stroke(path);
-          ctx.restore();
-        }
-      });
-
-      // тонкі внутрішні лінії поділу на області — однакові завжди,
-      // не позначають державний кордон (той малюється вище, по контуру
-      // dissolve-території кожного власника).
-      ctx.lineWidth = 0.5;
-      ctx.strokeStyle = "rgba(10,22,38,0.55)";
-      regionFeaturesRef.current.forEach((f) => {
-        const built = buildScreenPath(map, f.geometry);
-        if (built) ctx.stroke(built.path);
-      });
-
-      if (flashRef.current && Date.now() < flashRef.current.until) {
-        const region = regionFeaturesRef.current.find((f) => f.properties.cn_region_key === flashRef.current.key);
-        if (region) {
-          const built = buildScreenPath(map, region.geometry);
-          if (built) {
-            ctx.save();
-            ctx.shadowColor = "#ffffff";
-            ctx.shadowBlur = 10;
-            ctx.strokeStyle = "#ffffff";
-            ctx.lineWidth = 3;
-            ctx.stroke(built.path);
-            ctx.restore();
-          }
-        }
-        map.triggerRepaint();
-      }
-    };
-
-    if (!containerRef.current || mapRef.current) return;
-
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: BASE_STYLE_URL,
-      center: WORLD_VIEW.center,
-      zoom: WORLD_VIEW.zoom,
-      pitch: WORLD_VIEW.pitch,
-      minZoom: 0.8,
-      maxZoom: 8,
-      maxPitch: 55,
-      attributionControl: false,
-      dragRotate: true,
-      touchPitch: true,
-    });
-    mapRef.current = map;
-    map.addControl(new maplibregl.AttributionControl({ compact: true }));
-    map.on("render", drawOverlay);
-
-    const resizeObserver = new ResizeObserver(() => {
-      map.resize();
-    });
-    resizeObserver.observe(containerRef.current);
-
-    map.on("load", async () => {
-      applyDarkCinematicTheme(map);
-
+    let cancelled = false;
+    (async () => {
       try {
-        const res = await fetch(COUNTRIES_GEOJSON_URL);
-        const geo = await res.json();
+        const res = await fetch(WORLD_TOPOLOGY_URL);
+        const topology = await res.json();
+        const { regions: rawRegions, borders } = buildWorldFromTopology(topology);
 
-        geo.features.forEach((f) => {
-          const code = f.properties.ISO_A2 || f.properties.iso_a2 || f.properties.ISO_A2_EH || "";
-          f.properties.cn_code = code;
-          if (code) featuresByCodeRef.current[code] = f;
+        /* Зіставляємо назви областей гри з topojson-фічами по країнах —
+           та ж логіка, що й раніше, тепер лише проти нових даних. */
+        const byIsoAndNorm = {};
+        rawRegions.forEach((r) => {
+          if (!r.iso) return;
+          if (!byIsoAndNorm[r.iso]) byIsoAndNorm[r.iso] = {};
+          byIsoAndNorm[r.iso][normalizeRegionName(r.name)] = r;
         });
-
-        map.addSource("cn-countries", { type: "geojson", data: geo });
-
-        /* Невидимий шар — потрібен лише для визначення кліку по країні
-           (весь видимий вигляд малює overlay-канвас поверх). */
-        map.addLayer({
-          id: "cn-countries-fill",
-          type: "fill",
-          source: "cn-countries",
-          paint: { "fill-color": "#000000", "fill-opacity": 0 },
-        });
-
-        map.on("click", "cn-countries-fill", (e) => {
-          const code = e.features?.[0]?.properties?.cn_code;
-          if (code && onSelectRef.current) onSelectRef.current(code);
-        });
-        map.on("mouseenter", "cn-countries-fill", () => {
-          map.getCanvas().style.cursor = "pointer";
-        });
-        map.on("mouseleave", "cn-countries-fill", () => {
-          map.getCanvas().style.cursor = "";
-        });
-
-        try {
-          const regionsRes = await fetch(WORLD_REGIONS_URL);
-          const worldGeo = await regionsRes.json();
-
-          const featuresByIsoAndNormName = {};
-          worldGeo.features.forEach((f) => {
-            const iso = f.properties.cn_region_iso;
-            if (!iso) return;
-            if (!featuresByIsoAndNormName[iso]) featuresByIsoAndNormName[iso] = {};
-            featuresByIsoAndNormName[iso][normalizeRegionName(f.properties.cn_region_name)] = f;
-          });
-
-          const allRegionData = getRegionData();
-          const matchedFeatures = [];
-          const unmatchedByCountry = {};
-
-          Object.keys(allRegionData).forEach((countryCode) => {
-            const featuresByNormName = featuresByIsoAndNormName[countryCode];
-            if (!featuresByNormName) return;
-            const gameRegions = (allRegionData[countryCode]?.regions || []).map((r) => r.name);
-            gameRegions.forEach((name) => {
-              const f = matchGameRegionToFeature(name, featuresByNormName);
-              if (f) {
-                const copy = JSON.parse(JSON.stringify(f));
-                const key = countryCode + "|" + name;
-                const owner = ownerForRegion(cityControl, key, countryCode);
-                copy.properties.cn_region_name = name;
-                copy.properties.cn_region_iso = countryCode;
-                copy.properties.cn_region_key = key;
-                copy.properties.cn_region_owner = owner;
-                matchedFeatures.push(copy);
-              } else {
-                (unmatchedByCountry[countryCode] = unmatchedByCountry[countryCode] || []).push(name);
+        const matchName = (gameRegionName, byNorm) => {
+          const norm = normalizeRegionName(gameRegionName);
+          if (byNorm[norm]) return byNorm[norm];
+          for (const [key, aliases] of Object.entries(REGION_NAME_ALIASES)) {
+            if (key === norm || aliases.some((a) => normalizeRegionName(a) === norm)) {
+              if (byNorm[key]) return byNorm[key];
+              for (const a of aliases) {
+                const an = normalizeRegionName(a);
+                if (byNorm[an]) return byNorm[an];
               }
-            });
-          });
-
-          if (Object.keys(unmatchedByCountry).length) {
-            console.warn("WorldMap3D: не знайдено відповідність для областей:", unmatchedByCountry);
+            }
           }
+          return null;
+        };
+        const allRegionData = getRegionData();
+        Object.keys(allRegionData).forEach((countryCode) => {
+          const byNorm = byIsoAndNorm[countryCode];
+          if (!byNorm) return;
+          (allRegionData[countryCode]?.regions || []).forEach(({ name }) => {
+            const f = matchName(name, byNorm);
+            if (f) f.name = name; // приводимо назву до тієї, що використовує гра (для cityControl-ключів)
+          });
+        });
 
-          regionFeaturesRef.current = matchedFeatures;
-          prevCityControlRef.current = { ...(cityControl || {}) };
-          territoriesRef.current = computeTerritories(matchedFeatures);
-          map.triggerRepaint();
-        } catch (err) {
-          console.warn("WorldMap3D: шар областей не завантажився:", err?.message || err);
-        }
+        if (cancelled) return;
+        worldRef.current = { regions: rawRegions, borders };
+        recomputeOwnersAndBBoxes(rawRegions, cityControl);
+        prevCityControlRef.current = { ...(cityControl || {}) };
+
+        const canvas = canvasRef.current;
+        if (canvas) camRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
+        setLoaded(true);
       } catch (err) {
-        console.warn("WorldMap3D: не вдалося завантажити межі країн:", err?.message || err);
+        console.warn("WorldMap3D: не вдалося завантажити карту:", err?.message || err);
+        setLoaded(true);
       }
-      setLoaded(true);
-      map.triggerRepaint();
-    });
-
+    })();
     return () => {
-      resizeObserver.disconnect();
-      map.off("render", drawOverlay);
-      map.remove();
-      mapRef.current = null;
+      cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Тільки перемальовка (жодних setData) — "моя країна" рахується live
-     прямо в drawOverlay з myCountryCodeRef, тож ніякого застарілого
-     прапорця десь у даних просто не існує — ця ціла категорія багів
-     (стара країна лишається підсвіченою) структурно неможлива тепер. */
+  /* Основний цикл малювання + обробка вводу — окремий ефект, живе, поки
+     живий canvas; дані (worldRef/regionOwnerRef/...) читаються "наживо"
+     з ref'ів, тож не треба перезапускати цей ефект при кожній зміні гри. */
   useEffect(() => {
-    mapRef.current?.triggerRepaint();
-  }, [myCountryCode]);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    let raf = 0;
 
-  /* Перерахувати "живу" територію кожної країни при зміні cityControl —
-     єдине місце, де справді потрібна повторна dissolve-геометрія. */
-  useEffect(() => {
-    if (!loaded) return;
-    const prevControl = prevCityControlRef.current;
-    let capturedRegionKey = null;
-    let captureEvent = null;
+    const resize = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      canvas.width = Math.max(1, Math.floor(w * dpr));
+      canvas.height = Math.max(1, Math.floor(h * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (!camRef.current.k || camRef.current.k < 0.1) camRef.current = fitCamera(w, h);
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
 
-    const updatedRegions = regionFeaturesRef.current.map((f) => {
-      const key = f.properties.cn_region_key;
-      const countryCode = f.properties.cn_region_iso;
-      const newOwner = ownerForRegion(cityControl, key, countryCode);
-      const oldOwner = prevControl ? ownerForRegion(prevControl, key, countryCode) : newOwner;
-      if (prevControl && newOwner !== oldOwner) {
-        capturedRegionKey = key;
-        captureEvent = {
-          name: f.properties.cn_region_name,
-          previousOwner: oldOwner,
-          newOwner,
-          areaKm2: approxAreaKm2(f.geometry),
-        };
-      }
-      return { ...f, properties: { ...f.properties, cn_region_owner: newOwner } };
-    });
-    regionFeaturesRef.current = updatedRegions;
-    prevCityControlRef.current = { ...(cityControl || {}) };
-    territoriesRef.current = computeTerritories(updatedRegions);
+    const draw = () => {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = "#060b16";
+      ctx.fillRect(0, 0, w, h);
 
-    if (capturedRegionKey) {
-      cnSfx.purchase();
-      flashRef.current = { key: capturedRegionKey, until: Date.now() + 2200 };
-      if (captureEvent && onCapture) onCapture(captureEvent);
-    }
-    mapRef.current?.triggerRepaint();
-  }, [cityControl, loaded]);
-
-  /* Виділення + переліт камери до реальної (живої) території країни. */
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !loaded) return;
-
-    if (selected && selected !== prevSelectedRef.current) {
-      cnSfx.modalOpen();
-      const territory = territoriesRef.current.find((t) => t.properties.cn_owner === selected);
-      const geometryForBounds = territory ? territory.geometry : featuresByCodeRef.current[selected]?.geometry;
-      const bounds = geometryForBounds ? boundsFromGeometry(geometryForBounds) : null;
-      if (bounds) {
-        try {
-          const cam = map.cameraForBounds(bounds, { padding: 60, pitch: 42, bearing: 0, maxZoom: 6 });
-          if (cam) {
-            map.flyTo({ ...cam, duration: 1500, curve: 1.3, essential: true });
+      const world = worldRef.current;
+      if (world) {
+        // плавний переліт камери до цілі (виділена країна / огляд світу)
+        const tgt = targetCamRef.current;
+        if (tgt) {
+          const dx = tgt.x - camRef.current.x;
+          const dy = tgt.y - camRef.current.y;
+          const dk = tgt.k - camRef.current.k;
+          if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(dk) < 0.002) {
+            camRef.current = { ...tgt };
+            targetCamRef.current = null;
           } else {
-            const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
-            map.flyTo({ center, zoom: 4, pitch: 42, duration: 1500, essential: true });
+            camRef.current = {
+              x: camRef.current.x + dx * 0.18,
+              y: camRef.current.y + dy * 0.18,
+              k: camRef.current.k + dk * 0.18,
+            };
           }
-        } catch {
-          /* ignore camera errors on odd geometries */
+        }
+
+        const { k, x, y } = camRef.current;
+        const { regions, borders } = world;
+        const owners = regionOwnerRef.current;
+        const ownerBBoxes = ownerBBoxRef.current;
+        const mine = myCountryCodeRef.current;
+        const sel = selectedRef.current;
+
+        const visMinX = -x / k, visMaxX = (w - x) / k;
+        const visMinY = -y / k, visMaxY = (h - y) / k;
+
+        ctx.save();
+        ctx.transform(k, 0, 0, k, x, y);
+
+        for (let i = 0; i < regions.length; i++) {
+          const r = regions[i];
+          const [minX, minY, maxX, maxY] = r.bbox;
+          if (maxX < visMinX || minX > visMaxX || maxY < visMinY || minY > visMaxY) continue;
+          const owner = owners[i];
+          const bb = ownerBBoxes[owner];
+          const flag = getFlagImage(flagCacheRef.current, owner, () => {
+            /* прапор довантажився — наступний кадр підхопить сам, окремого
+               forceUpdate не треба, цикл малювання й так триває постійно */
+          });
+          ctx.save();
+          ctx.clip(r.path);
+          if (flag && bb) {
+            ctx.drawImage(flag, bb[0], bb[1], bb[2] - bb[0], bb[3] - bb[1]);
+            if (owner === mine) {
+              ctx.fillStyle = "rgba(34,211,238,0.14)";
+              ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+            }
+          } else {
+            ctx.fillStyle = owner === mine ? "#22d3ee" : "#264a63";
+            ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+          }
+          ctx.restore();
+        }
+
+        // кордони: тонкі всередині країни, чіткі яскраві між різними
+        // країнами — і це рахується щокадру одним порівнянням власників,
+        // тому кордон "рухається" миттєво в момент захоплення території.
+        for (const bd of borders) {
+          const oa = owners[bd.a];
+          const ob = owners[bd.b];
+          const same = oa === ob;
+          if (same && k < 3) continue;
+          ctx.beginPath();
+          bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+          ctx.lineJoin = "round";
+          if (same) {
+            ctx.strokeStyle = "rgba(6,12,22,0.45)";
+            ctx.lineWidth = Math.max(0.35 / k, 0.015);
+          } else {
+            ctx.strokeStyle = "rgba(220,232,255,0.85)";
+            ctx.lineWidth = Math.max(1.3 / k, 0.05);
+          }
+          ctx.stroke();
+        }
+
+        // виділена країна — обводимо кожну її область (простіше й дешевше
+        // за об'єднання полігонів, візуально нерозрізнимо)
+        if (sel) {
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = Math.max(1.8 / k, 0.06);
+          for (let i = 0; i < regions.length; i++) {
+            if (owners[i] === sel) ctx.stroke(regions[i].path);
+          }
+        }
+
+        // спалах при щойному захопленні конкретної області
+        if (flashRef.current && Date.now() < flashRef.current.until) {
+          const region = regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
+          if (region) {
+            ctx.save();
+            ctx.shadowColor = "#ffffff";
+            ctx.shadowBlur = 8 / k;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = Math.max(2.4 / k, 0.08);
+            ctx.stroke(region.path);
+            ctx.restore();
+          }
+        }
+
+        ctx.restore();
+      }
+
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+
+    const posOf = (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    };
+    const screenToWorld = (px, py) => {
+      const { k, x, y } = camRef.current;
+      return { x: (px - x) / k, y: (py - y) / k };
+    };
+    const zoomAt = (mx, my, factor) => {
+      const { k, x, y } = camRef.current;
+      const next = Math.min(40, Math.max(0.6, k * factor));
+      const wx = (mx - x) / k;
+      const wy = (my - y) / k;
+      targetCamRef.current = null;
+      camRef.current = { k: next, x: mx - wx * next, y: my - wy * next };
+    };
+
+    const onDown = (ev) => {
+      canvas.setPointerCapture(ev.pointerId);
+      const p = posOf(ev);
+      pointersRef.current.set(ev.pointerId, p);
+      if (pointersRef.current.size === 1) {
+        targetCamRef.current = null;
+        dragRef.current = { active: true, moved: false, x: p.x, y: p.y, cx: camRef.current.x, cy: camRef.current.y };
+      } else if (pointersRef.current.size === 2) {
+        const [a, b] = [...pointersRef.current.values()];
+        pinchRef.current = Math.hypot(a.x - b.x, a.y - b.y);
+      }
+    };
+    const onMove = (ev) => {
+      const p = posOf(ev);
+      if (pointersRef.current.has(ev.pointerId)) pointersRef.current.set(ev.pointerId, p);
+      if (pointersRef.current.size === 2) {
+        const [a, b] = [...pointersRef.current.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchRef.current > 0 && d > 0) {
+          const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+          zoomAt(mid.x, mid.y, d / pinchRef.current);
+          pinchRef.current = d;
+        }
+        return;
+      }
+      if (dragRef.current.active) {
+        const dx = p.x - dragRef.current.x;
+        const dy = p.y - dragRef.current.y;
+        if (Math.hypot(dx, dy) > 4) dragRef.current.moved = true;
+        camRef.current = { ...camRef.current, x: dragRef.current.cx + dx, y: dragRef.current.cy + dy };
+      }
+    };
+    const onUp = (ev) => {
+      const p = posOf(ev);
+      pointersRef.current.delete(ev.pointerId);
+      if (!dragRef.current.moved && pointersRef.current.size === 0 && worldRef.current) {
+        const wp = screenToWorld(p.x, p.y);
+        const idx = hitRegion(worldRef.current.regions, wp.x, wp.y);
+        if (idx >= 0) {
+          const code = regionOwnerRef.current[idx];
+          if (code && onSelectRef.current) onSelectRef.current(code);
         }
       }
-    } else if (!selected && prevSelectedRef.current) {
-      cnSfx.modalClose();
-      map.flyTo({ ...WORLD_VIEW, duration: 1200, essential: true });
+      if (pointersRef.current.size === 0) dragRef.current.active = false;
+      pinchRef.current = 0;
+    };
+    const onWheel = (ev) => {
+      ev.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const factor = ev.deltaY > 0 ? 0.9 : 1.11;
+      zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, factor);
+    };
+
+    canvas.addEventListener("pointerdown", onDown);
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerup", onUp);
+    canvas.addEventListener("pointercancel", onUp);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerup", onUp);
+      canvas.removeEventListener("pointercancel", onUp);
+      canvas.removeEventListener("wheel", onWheel);
+    };
+  }, [loaded]);
+
+  /* Перерахунок власників областей при зміні cityControl — лише масив
+     рядків + bbox-агрегація (жодної геометрії), тому миттєво й дешево. */
+  useEffect(() => {
+    const world = worldRef.current;
+    if (!world || !loaded) return;
+    const prevControl = prevCityControlRef.current;
+    let capturedKey = null;
+    let captureEvent = null;
+
+    world.regions.forEach((r) => {
+      const key = r.iso + "|" + r.name;
+      const newOwner = ownerForRegion(cityControl, key, r.iso);
+      const oldOwner = prevControl ? ownerForRegion(prevControl, key, r.iso) : newOwner;
+      if (prevControl && newOwner !== oldOwner) {
+        capturedKey = key;
+        captureEvent = {
+          name: r.name,
+          previousOwner: oldOwner,
+          newOwner,
+          areaKm2: approxAreaKm2FromRings(r.rings),
+        };
+      }
+    });
+
+    recomputeOwnersAndBBoxes(world.regions, cityControl);
+    prevCityControlRef.current = { ...(cityControl || {}) };
+
+    if (capturedKey) {
+      cnSfx.purchase();
+      flashRef.current = { key: capturedKey, until: Date.now() + 2200 };
+      if (captureEvent && onCapture) onCapture(captureEvent);
     }
-    prevSelectedRef.current = selected;
-    map.triggerRepaint();
-  }, [selected, cityControl, loaded]);
+  }, [cityControl, loaded]);
+
+  /* Переліт камери до реальної живої території обраної країни. */
+  useEffect(() => {
+    const world = worldRef.current;
+    const canvas = canvasRef.current;
+    if (!world || !canvas || !loaded) return;
+    if (!selected) {
+      targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
+      return;
+    }
+    cnSfx.modalOpen();
+    const owners = regionOwnerRef.current;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    world.regions.forEach((r, i) => {
+      if (owners[i] !== selected) return;
+      const [a, b, c, d] = r.bbox;
+      if (a < minX) minX = a;
+      if (b < minY) minY = b;
+      if (c > maxX) maxX = c;
+      if (d > maxY) maxY = d;
+    });
+    if (!isFinite(minX)) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const pad = 0.25;
+    const spanX = (maxX - minX) * (1 + pad) || 4;
+    const spanY = (maxY - minY) * (1 + pad) || 4;
+    const k = Math.min(40, Math.max(0.6, Math.min(w / spanX, h / spanY)));
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    targetCamRef.current = { k, x: w / 2 - cx * k, y: h / 2 - cy * k };
+  }, [selected, loaded]);
 
   const zoomBy = (delta) => {
-    const map = mapRef.current;
-    if (map) {
-      cnSfx.toggle();
-      map.easeTo({ zoom: map.getZoom() + delta, duration: 250 });
-    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    cnSfx.toggle();
+    const { k, x, y } = camRef.current;
+    const next = Math.min(40, Math.max(0.6, k * (delta > 0 ? 1.35 : 1 / 1.35)));
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const wx = (w / 2 - x) / k, wy = (h / 2 - y) / k;
+    targetCamRef.current = null;
+    camRef.current = { k: next, x: w / 2 - wx * next, y: h / 2 - wy * next };
   };
   const resetView = () => {
-    const map = mapRef.current;
-    if (map) {
-      cnSfx.toggle();
-      map.flyTo({ ...WORLD_VIEW, duration: 900 });
-    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    cnSfx.toggle();
+    targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
   };
 
   return (
     <div className="cn-map3d-wrap" style={{ position: "relative" }}>
-      <div ref={containerRef} className="cn-map3d-canvas" style={{ position: "absolute", inset: 0 }} />
       <canvas
-        ref={overlayCanvasRef}
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+        ref={canvasRef}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none" }}
       />
       {!loaded && (
         <div className="cn-map3d-loading">
