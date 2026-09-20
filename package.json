@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "repair:regions": "node --max-old-space-size=4096 scripts/repair-regions.mjs",
     "build:topology": "node --max-old-space-size=4096 scripts/build-topology.mjs",
     "fetch:regions": "node scripts/fetch-regions.mjs",
     "preview": "vite preview"
