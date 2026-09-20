@@ -5,18 +5,11 @@ import { featureCollection, union } from "@turf/turf";
 import { cnSfx, getRegionData } from "./App";
 
 /* --- Реальні межі областей для ВСІХ країн ---
-   Раніше тут була "пілотна зона" лише для України (окремий remote
-  geoBoundaries-фетч). Тепер це один локальний файл ADM1 GeoJSON,
-  зібраний build-скриптом з geoBoundaries для всіх доступних країн. */
+   Один локальний файл ADM1 GeoJSON, зібраний build-скриптом з
+   geoBoundaries для всіх доступних країн. */
 const WORLD_REGIONS_URL = "/data/world-regions.geojson";
 
-/* Відомі розбіжності назв між грою та реальним геонабором даних
-   (перейменування областей, старі/нові назви тощо). Ключі — нормалізовані
-  назви з боку гри; значення — можливі варіанти назв у geoBoundaries.
-   Наразі перевірено детально тільки для України; для інших країн
-   збіги йдуть за прямим нормалізованим порівнянням назв і можуть
-   потребувати доповнення цього списку з часом (незбіги просто
-   пропускаються, не ламаючи решту карти). */
+/* Відомі розбіжності назв між грою та реальним геонабором даних. */
 const REGION_NAME_ALIASES = {
   kirovohrad: ["kropyvnytskyi", "kirovograd"],
   transcarpathia: ["zakarpattia", "zakarpatska", "zakarpattya"],
@@ -35,12 +28,8 @@ function normalizeRegionName(s) {
     .replace(/\b(oblast|region|province|city|autonomous republic of|republic of|county|department|district)\b/g, "")
     .replace(/[^a-z]/g, "")
     .trim();
-  }
+}
 
-/* Зіставляє назву області гри з реальним об'єктом геоданих (в межах
-   однієї країни) за нормалізованою назвою або відомим аліасом;
-   повертає null, якщо впевненого збігу не знайдено (тоді ця область
-   просто не бере участі в шарі — не ламає решту карти). */
 function matchGameRegionToFeature(gameRegionName, featuresByNormName) {
   const norm = normalizeRegionName(gameRegionName);
   if (featuresByNormName[norm]) return featuresByNormName[norm];
@@ -62,32 +51,63 @@ function ownerForRegion(cityControl, key, countryCode) {
     : countryCode;
 }
 
-function selectedTerritoryFeature(selected, regionFeatures) {
-  const selectedFeatures = regionFeatures.filter(
-    (feature) => feature.properties.cn_region_owner === selected,
-  );
-  if (!selectedFeatures.length) return null;
-  if (selectedFeatures.length === 1) return selectedFeatures[0];
-  try {
-    const merged = union(featureCollection(selectedFeatures));
-    return merged && merged.geometry ? merged : null;
-  } catch {
-    return null;
-  }
+function polygonPartsOf(geometry) {
+  if (!geometry) return [];
+  if (geometry.type === "Polygon") return [geometry.coordinates];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates;
+  return [];
 }
 
-/* Публічні, безкоштовні джерела даних — без API-ключів:
-   - базова "підложка" карти (океан/суша) від OpenFreeMap
-   - реальні межі країн від Natural Earth (публічний домен) */
+/* Об'єднує (dissolve) полігони всіх областей одного власника в одну
+   суцільну територію — це основа "живого" державного кордону: коли
+   область переходить іншому власнику, вона переходить з однієї
+   dissolve-групи в іншу, і форма (та її прапор-заливка) сама змінюється
+   для БУДЬ-ЯКОЇ країни світу. */
+function dissolveOwnerTerritory(features) {
+  if (!features.length) return null;
+  let acc = features[0].geometry;
+  for (let i = 1; i < features.length; i++) {
+    const nextGeom = features[i].geometry;
+    try {
+      const merged = union(
+        featureCollection([
+          { type: "Feature", properties: {}, geometry: acc },
+          { type: "Feature", properties: {}, geometry: nextGeom },
+        ]),
+      );
+      if (merged && merged.geometry) {
+        acc = merged.geometry;
+        continue;
+      }
+    } catch {
+      /* впало на цій парі — з'єднуємо нижче без dissolve внутрішнього шва */
+    }
+    acc = { type: "MultiPolygon", coordinates: [...polygonPartsOf(acc), ...polygonPartsOf(nextGeom)] };
+  }
+  return acc;
+}
+
+function computeTerritories(regionFeatures) {
+  const byOwner = {};
+  regionFeatures.forEach((f) => {
+    const owner = f.properties.cn_region_owner;
+    (byOwner[owner] = byOwner[owner] || []).push(f);
+  });
+  return Object.entries(byOwner)
+    .map(([owner, feats]) => {
+      const geometry = dissolveOwnerTerritory(feats);
+      if (!geometry) return null;
+      return { type: "Feature", properties: { cn_owner: owner }, geometry };
+    })
+    .filter(Boolean);
+}
+
 const BASE_STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const COUNTRIES_GEOJSON_URL =
   "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
 
 const WORLD_VIEW = { center: [15, 25], zoom: 1.2, pitch: 0, bearing: 0 };
 
-/* Насичена, "кінематографічна" темна палітра замість типової блідої
-   карти — глибокий океан, майже чорна суша-підложка (самі країни
-   малюються окремим яскравим шаром поверх), без зайвих підписів. */
 function applyDarkCinematicTheme(map) {
   try {
     if (map.getLayer("background")) {
@@ -113,8 +133,6 @@ function applyDarkCinematicTheme(map) {
         continue;
       }
       if (layer.type === "line") {
-        // прибираємо всі лінії базової карти (дороги, річки, стандартні
-        // кордони) — наш власний шар країн малює власні чіткі кордони.
         map.setLayoutProperty(layer.id, "visibility", "none");
       }
     } catch {
@@ -123,8 +141,6 @@ function applyDarkCinematicTheme(map) {
   }
 }
 
-/* Проходить довільно вкладену структуру координат GeoJSON
-   (Polygon/MultiPolygon) і повертає межі [[minLng,minLat],[maxLng,maxLat]] */
 function boundsFromGeometry(geometry) {
   let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
   const walk = (coords) => {
@@ -143,9 +159,6 @@ function boundsFromGeometry(geometry) {
   return [[minLng, minLat], [maxLng, maxLat]];
 }
 
-/* Приблизна площа полігону в км² (формула Гаусса/шнурівки з поправкою
-   на широту). Достатньо точно для показу орієнтовного розміру території
-   у сповіщенні — не для точних географічних вимірювань. */
 function approxAreaKm2(geometry) {
   const KM_PER_DEG_LAT = 111.32;
   const ringArea = (ring) => {
@@ -162,98 +175,184 @@ function approxAreaKm2(geometry) {
   let total = 0;
   const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
   polys.forEach((poly) => {
-    if (poly[0]) total += ringArea(poly[0]); // зовнішній контур; діри не враховуємо — достатньо для орієнтовної оцінки
+    if (poly[0]) total += ringArea(poly[0]);
   });
   return Math.round(total);
 }
 
-/* Знаходить id джерела вектор-тайлів, яке містить вказаний source-layer
-   (напр. "boundary" чи "place") — без здогадок про конкретну назву,
-   читаємо її напряму зі стилю, що вже завантажений. */
-function findVectorSourceId(style, sourceLayerName) {
-  const layer = style.layers?.find((l) => l["source-layer"] === sourceLayerName);
-  return layer ? layer.source : null;
+/* Прапор для коду країни — публічний безкоштовний CDN, без ключів.
+   Кешується один раз на код; onReady викликається, коли зображення
+   реально завантажилось (щоб перемалювати оверлей саме тоді). */
+function getFlagImage(cache, code, onReady) {
+  if (!code) return null;
+  const entry = cache[code];
+  if (entry) return entry.failed ? null : entry.complete && entry.naturalWidth ? entry : null;
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.onload = () => onReady();
+  img.onerror = () => {
+    cache[code] = { failed: true };
+  };
+  img.src = `https://flagcdn.com/h240/${code.toLowerCase()}.png`;
+  cache[code] = img;
+  return null;
 }
 
-/* Додає кордони областей (тонкі пунктирні лінії) та назви міст —
-   з'являються лише при наближенні, дані беремо з тієї самої базової
-   карти (OpenFreeMap), нічого додатково завантажувати не треба. */
-function addRegionsAndCityLabels(map) {
-  const style = map.getStyle();
-  const boundarySourceId = findVectorSourceId(style, "boundary");
-  const placeSourceId = findVectorSourceId(style, "place");
-  const textFont =
-    style.layers?.find((l) => l.type === "symbol" && l.layout?.["text-font"])?.layout?.["text-font"] ||
-    ["Noto Sans Regular"];
-
-  if (boundarySourceId) {
-    try {
-      map.addLayer({
-        id: "cn-admin-regions",
-        type: "line",
-        source: boundarySourceId,
-        "source-layer": "boundary",
-        filter: ["all", ["==", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], true]],
-        minzoom: 3.2,
-        paint: {
-          "line-color": "#4d7fac",
-          "line-width": 1,
-          "line-dasharray": [2, 2],
-          "line-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4.5, 0.75],
-        },
+/* Проектує геометрію (Polygon/MultiPolygon, лат/лон) в екранні пікселі
+   поточного вигляду карти й одразу повертає готовий Path2D + bbox —
+   саме це дозволяє "заливати" фігуру растровим зображенням (прапором),
+   обрізаним рівно по контуру, синхронно з панорамуванням/зумом/нахилом. */
+function buildScreenPath(map, geometry) {
+  const path = new Path2D();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const polys = geometry.type === "MultiPolygon" ? geometry.coordinates : [geometry.coordinates];
+  polys.forEach((poly) => {
+    poly.forEach((ring) => {
+      const sub = new Path2D();
+      ring.forEach(([lng, lat], i) => {
+        const p = map.project([lng, lat]);
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+        if (i === 0) sub.moveTo(p.x, p.y);
+        else sub.lineTo(p.x, p.y);
       });
-    } catch {
-      /* базова карта може не мати цього джерела — пропускаємо без помилки */
-    }
-  }
-
-  if (placeSourceId) {
-    try {
-      map.addLayer({
-        id: "cn-place-cities",
-        type: "symbol",
-        source: placeSourceId,
-        "source-layer": "place",
-        filter: ["in", ["get", "class"], ["literal", ["city", "town"]]],
-        minzoom: 4,
-        layout: {
-          "text-field": ["get", "name"],
-          "text-font": textFont,
-          "text-size": ["interpolate", ["linear"], ["zoom"], 4, 9, 8, 13],
-          "text-anchor": "top",
-          "text-offset": [0, 0.3],
-        },
-        paint: {
-          "text-color": "#dbe9ff",
-          "text-halo-color": "#050810",
-          "text-halo-width": 1.2,
-        },
-      });
-    } catch {
-      /* немає шару міст у цій базовій карті — пропускаємо без помилки */
-    }
-  }
+      sub.closePath();
+      path.addPath(sub);
+    });
+  });
+  if (!isFinite(minX)) return null;
+  return { path, bbox: { minX, minY, maxX, maxY } };
 }
 
 export default function WorldMap3D({ selected, onSelect, myCountryCode, cityControl, onCapture }) {
   const containerRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
   const mapRef = useRef(null);
-  const readyRef = useRef(false);
   const featuresByCodeRef = useRef({});
   const regionFeaturesRef = useRef([]);
+  const territoriesRef = useRef([]);
+  const flagImagesRef = useRef({});
   const prevCityControlRef = useRef(null);
-  const flashTimerRef = useRef(null);
+  const flashRef = useRef(null);
   const prevSelectedRef = useRef(null);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
-  const cityControlRef = useRef(cityControl);
-  cityControlRef.current = cityControl;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const myCountryCodeRef = useRef(myCountryCode);
   myCountryCodeRef.current = myCountryCode;
   const [loaded, setLoaded] = useState(false);
 
-  /* Ініціалізація карти — один раз */
+  /* Малює весь видимий шар країн/територій — прапор-заливка, кордони,
+     світіння "моєї" країни, білий контур виділення, спалах захоплення.
+     Викликається на кожен рендер карти (map.on("render", ...)) — тобто
+     завжди синхронно з поточним поворотом/нахилом/зумом. */
   useEffect(() => {
+    const drawOverlay = () => {
+      const map = mapRef.current;
+      const canvas = overlayCanvasRef.current;
+      if (!map || !canvas) return;
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      if (!cssW || !cssH) return;
+      const targetW = Math.round(cssW * dpr);
+      const targetH = Math.round(cssH * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
+
+      const drawables = territoriesRef.current.map((t) => ({
+        code: t.properties.cn_owner,
+        geometry: t.geometry,
+      }));
+      const covered = new Set(drawables.map((d) => d.code));
+      Object.values(featuresByCodeRef.current).forEach((f) => {
+        const code = f.properties.cn_code;
+        if (!code || covered.has(code)) return;
+        drawables.push({ code, geometry: f.geometry });
+      });
+
+      drawables.forEach(({ code, geometry }) => {
+        const built = buildScreenPath(map, geometry);
+        if (!built) return;
+        const { path, bbox } = built;
+        const mine = code === myCountryCodeRef.current;
+        const img = getFlagImage(flagImagesRef.current, code, () => map.triggerRepaint());
+
+        ctx.save();
+        ctx.clip(path);
+        if (img) {
+          ctx.drawImage(img, bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
+          if (mine) {
+            ctx.fillStyle = "rgba(34,211,238,0.16)";
+            ctx.fillRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
+          }
+        } else {
+          ctx.fillStyle = mine ? "#22d3ee" : "#1c4f7a";
+          ctx.fillRect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
+        }
+        ctx.restore();
+
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#0a1626";
+        ctx.stroke(path);
+
+        if (mine) {
+          ctx.save();
+          ctx.shadowColor = "#7cf0ff";
+          ctx.shadowBlur = 14;
+          ctx.strokeStyle = "#baf6ff";
+          ctx.lineWidth = 2;
+          ctx.stroke(path);
+          ctx.restore();
+        }
+
+        if (selectedRef.current && code === selectedRef.current) {
+          ctx.save();
+          ctx.shadowColor = "#ffffff";
+          ctx.shadowBlur = 10;
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2.6;
+          ctx.stroke(path);
+          ctx.restore();
+        }
+      });
+
+      // тонкі внутрішні лінії поділу на області — однакові завжди,
+      // не позначають державний кордон (той малюється вище, по контуру
+      // dissolve-території кожного власника).
+      ctx.lineWidth = 0.5;
+      ctx.strokeStyle = "rgba(10,22,38,0.55)";
+      regionFeaturesRef.current.forEach((f) => {
+        const built = buildScreenPath(map, f.geometry);
+        if (built) ctx.stroke(built.path);
+      });
+
+      if (flashRef.current && Date.now() < flashRef.current.until) {
+        const region = regionFeaturesRef.current.find((f) => f.properties.cn_region_key === flashRef.current.key);
+        if (region) {
+          const built = buildScreenPath(map, region.geometry);
+          if (built) {
+            ctx.save();
+            ctx.shadowColor = "#ffffff";
+            ctx.shadowBlur = 10;
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 3;
+            ctx.stroke(built.path);
+            ctx.restore();
+          }
+        }
+        map.triggerRepaint();
+      }
+    };
+
     if (!containerRef.current || mapRef.current) return;
 
     const map = new maplibregl.Map({
@@ -271,6 +370,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     });
     mapRef.current = map;
     map.addControl(new maplibregl.AttributionControl({ compact: true }));
+    map.on("render", drawOverlay);
+
+    const resizeObserver = new ResizeObserver(() => {
+      map.resize();
+    });
+    resizeObserver.observe(containerRef.current);
 
     map.on("load", async () => {
       applyDarkCinematicTheme(map);
@@ -282,63 +387,18 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         geo.features.forEach((f) => {
           const code = f.properties.ISO_A2 || f.properties.iso_a2 || f.properties.ISO_A2_EH || "";
           f.properties.cn_code = code;
-          f.properties.cn_mine = code === myCountryCode ? 1 : 0;
           if (code) featuresByCodeRef.current[code] = f;
         });
 
         map.addSource("cn-countries", { type: "geojson", data: geo });
 
-        /* Усі країни — однаковий насичений синій. Лише країна гравця
-           світиться яскравіше (окремий шар + два шари світіння лінією). */
+        /* Невидимий шар — потрібен лише для визначення кліку по країні
+           (весь видимий вигляд малює overlay-канвас поверх). */
         map.addLayer({
           id: "cn-countries-fill",
           type: "fill",
           source: "cn-countries",
-          paint: {
-            "fill-color": ["case", ["==", ["get", "cn_mine"], 1], "#22d3ee", "#1c4f7a"],
-            "fill-opacity": ["case", ["==", ["get", "cn_mine"], 1], 0.55, 0.72],
-          },
-        });
-
-        map.addLayer({
-          id: "cn-countries-outline",
-          type: "line",
-          source: "cn-countries",
-          paint: { "line-color": "#0a1626", "line-width": 0.6 },
-        });
-
-        /* Зовнішнє "світіння" навколо країни гравця */
-        map.addLayer({
-          id: "cn-mine-glow-outer",
-          type: "line",
-          source: "cn-countries",
-          filter: ["==", ["get", "cn_mine"], 1],
-          paint: { "line-color": "#7cf0ff", "line-width": 7, "line-opacity": 0.22, "line-blur": 3 },
-        });
-        map.addLayer({
-          id: "cn-mine-glow-inner",
-          type: "line",
-          source: "cn-countries",
-          filter: ["==", ["get", "cn_mine"], 1],
-          paint: { "line-color": "#baf6ff", "line-width": 1.8, "line-opacity": 0.95 },
-        });
-
-        map.addLayer({
-          id: "cn-countries-selected",
-          type: "line",
-          source: "cn-countries",
-          filter: ["==", ["get", "cn_code"], "___none___"],
-          paint: { "line-color": "#ffffff", "line-width": 2.2, "line-opacity": 0.9 },
-        });
-        map.addSource("cn-selected-territory-outline", {
-          type: "geojson",
-          data: { type: "FeatureCollection", features: [] },
-        });
-        map.addLayer({
-          id: "cn-selected-territory-outline",
-          type: "line",
-          source: "cn-selected-territory-outline",
-          paint: { "line-color": "#ffffff", "line-width": 2.2, "line-opacity": 0.9 },
+          paint: { "fill-color": "#000000", "fill-opacity": 0 },
         });
 
         map.on("click", "cn-countries-fill", (e) => {
@@ -352,16 +412,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           map.getCanvas().style.cursor = "";
         });
 
-        addRegionsAndCityLabels(map);
-
-        /* --- Шар реальних областей для всіх країн, кольор залежить
-           від того, хто зараз контролює область у грі --- */
         try {
           const regionsRes = await fetch(WORLD_REGIONS_URL);
           const worldGeo = await regionsRes.json();
 
-          /* Групуємо geoBoundaries-фічі по ISO2 країни та нормалізованій назві,
-             щоб зіставити їх з іменами регіонів гри окремо для кожної країни. */
           const featuresByIsoAndNormName = {};
           worldGeo.features.forEach((f) => {
             const iso = f.properties.cn_region_iso;
@@ -376,19 +430,18 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
           Object.keys(allRegionData).forEach((countryCode) => {
             const featuresByNormName = featuresByIsoAndNormName[countryCode];
-            if (!featuresByNormName) return; // для країни немає ADM1-даних — пропускаємо
+            if (!featuresByNormName) return;
             const gameRegions = (allRegionData[countryCode]?.regions || []).map((r) => r.name);
             gameRegions.forEach((name) => {
               const f = matchGameRegionToFeature(name, featuresByNormName);
               if (f) {
                 const copy = JSON.parse(JSON.stringify(f));
                 const key = countryCode + "|" + name;
-                const owner = ownerForRegion(cityControlRef.current, key, countryCode);
+                const owner = ownerForRegion(cityControl, key, countryCode);
                 copy.properties.cn_region_name = name;
                 copy.properties.cn_region_iso = countryCode;
                 copy.properties.cn_region_key = key;
                 copy.properties.cn_region_owner = owner;
-                copy.properties.cn_region_mine = owner === myCountryCodeRef.current ? 1 : 0;
                 matchedFeatures.push(copy);
               } else {
                 (unmatchedByCountry[countryCode] = unmatchedByCountry[countryCode] || []).push(name);
@@ -400,117 +453,50 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
             console.warn("WorldMap3D: не знайдено відповідність для областей:", unmatchedByCountry);
           }
 
-          const countryCodesWithRegions = [...new Set(
-            matchedFeatures.map((feature) => feature.properties.cn_region_iso).filter(Boolean),
-          )];
-          geo.features.forEach((feature) => {
-            const code = feature.properties.cn_code;
-            feature.properties.cn_has_regions = countryCodesWithRegions.includes(code) ? 1 : 0;
-          });
-          map.getSource("cn-countries")?.setData(geo);
-          map.setFilter("cn-countries-outline", [
-            "!",
-            ["in", ["get", "cn_code"], ["literal", countryCodesWithRegions]],
-          ]);
-
           regionFeaturesRef.current = matchedFeatures;
-          prevCityControlRef.current = { ...(cityControlRef.current || {}) };
-
-          map.addSource("cn-pilot-regions", {
-            type: "geojson",
-            data: { type: "FeatureCollection", features: matchedFeatures },
-          });
-
-          map.addLayer({
-            id: "cn-pilot-regions-fill",
-            type: "fill",
-            source: "cn-pilot-regions",
-            minzoom: 3.2,
-            paint: {
-              "fill-color": ["case", ["==", ["get", "cn_region_mine"], 1], "#22d3ee", "#1c4f7a"],
-              "fill-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4, 0.78],
-            },
-          });
-          map.addLayer({
-            id: "cn-pilot-regions-outline",
-            type: "line",
-            source: "cn-pilot-regions",
-            minzoom: 3.2,
-            paint: {
-              "line-color": "#0a1626",
-              "line-width": 0.7,
-              "line-opacity": ["interpolate", ["linear"], ["zoom"], 3.2, 0, 4, 1],
-            },
-          });
-
-          /* "Спалах" при щойному захопленні території — кероване через
-             filter/paint напряму з JS (див. ефект нижче) */
-          map.addLayer({
-            id: "cn-pilot-regions-flash",
-            type: "line",
-            source: "cn-pilot-regions",
-            filter: ["==", ["get", "cn_region_key"], "___none___"],
-            paint: { "line-color": "#ffffff", "line-width": 3.5, "line-opacity": 1, "line-blur": 1.5 },
-          });
+          prevCityControlRef.current = { ...(cityControl || {}) };
+          territoriesRef.current = computeTerritories(matchedFeatures);
+          map.triggerRepaint();
         } catch (err) {
           console.warn("WorldMap3D: шар областей не завантажився:", err?.message || err);
         }
-
-        readyRef.current = true;
       } catch (err) {
         console.warn("WorldMap3D: не вдалося завантажити межі країн:", err?.message || err);
       }
       setLoaded(true);
+      map.triggerRepaint();
     });
 
     return () => {
-      readyRef.current = false;
+      resizeObserver.disconnect();
+      map.off("render", drawOverlay);
       map.remove();
       mapRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Перефарбувати "свою" країну, якщо гравець змінив країну */
+  /* Тільки перемальовка (жодних setData) — "моя країна" рахується live
+     прямо в drawOverlay з myCountryCodeRef, тож ніякого застарілого
+     прапорця десь у даних просто не існує — ця ціла категорія багів
+     (стара країна лишається підсвіченою) структурно неможлива тепер. */
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !readyRef.current) return;
-    const src = map.getSource("cn-countries");
-    if (!src || typeof src.getData !== "function") return;
-    let cancelled = false;
-    src.getData().then((data) => {
-      if (cancelled || !data) return;
-      data.features.forEach((f) => {
-        f.properties.cn_mine = f.properties.cn_code === myCountryCode ? 1 : 0;
-      });
-      src.setData(data);
-    });
-    return () => {
-      cancelled = true;
-    };
+    mapRef.current?.triggerRepaint();
   }, [myCountryCode]);
 
-  /* Перефарбувати шар областей, коли змінюється хто контролює область
-     (наприклад після завершення війни) або коли гравець змінив свою
-     країну. Якщо власник конкретної області змінився — показуємо
-     короткий "спалах" на її кордоні та повідомляємо батьківський
-     компонент (для сповіщення "Територію захоплено"). */
+  /* Перерахувати "живу" територію кожної країни при зміні cityControl —
+     єдине місце, де справді потрібна повторна dissolve-геометрія. */
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !readyRef.current) return;
-    const src = map.getSource("cn-pilot-regions");
-    if (!src) return;
-
+    if (!loaded) return;
     const prevControl = prevCityControlRef.current;
     let capturedRegionKey = null;
     let captureEvent = null;
 
-    const updated = regionFeaturesRef.current.map((f) => {
+    const updatedRegions = regionFeaturesRef.current.map((f) => {
       const key = f.properties.cn_region_key;
       const countryCode = f.properties.cn_region_iso;
-      const hasExplicitOwner = Object.prototype.hasOwnProperty.call(cityControl || {}, key);
-      const newOwner = hasExplicitOwner ? cityControl[key] : countryCode;
-      const hadPrevOwner = prevControl && Object.prototype.hasOwnProperty.call(prevControl, key);
-      const oldOwner = hadPrevOwner ? prevControl[key] : countryCode;
+      const newOwner = ownerForRegion(cityControl, key, countryCode);
+      const oldOwner = prevControl ? ownerForRegion(prevControl, key, countryCode) : newOwner;
       if (prevControl && newOwner !== oldOwner) {
         capturedRegionKey = key;
         captureEvent = {
@@ -520,61 +506,30 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           areaKm2: approxAreaKm2(f.geometry),
         };
       }
-      return {
-        ...f,
-        properties: {
-          ...f.properties,
-          cn_region_owner: newOwner,
-          cn_region_mine: newOwner === myCountryCode ? 1 : 0,
-        },
-      };
+      return { ...f, properties: { ...f.properties, cn_region_owner: newOwner } };
     });
-    regionFeaturesRef.current = updated;
+    regionFeaturesRef.current = updatedRegions;
     prevCityControlRef.current = { ...(cityControl || {}) };
-    src.setData({ type: "FeatureCollection", features: updated });
+    territoriesRef.current = computeTerritories(updatedRegions);
 
-    if (capturedRegionKey && map.getLayer("cn-pilot-regions-flash")) {
+    if (capturedRegionKey) {
       cnSfx.purchase();
-      map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_key"], capturedRegionKey]);
-      map.setPaintProperty("cn-pilot-regions-flash", "line-opacity", 1);
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      flashTimerRef.current = setTimeout(() => {
-        map.setFilter("cn-pilot-regions-flash", ["==", ["get", "cn_region_key"], "___none___"]);
-      }, 2200);
+      flashRef.current = { key: capturedRegionKey, until: Date.now() + 2200 };
+      if (captureEvent && onCapture) onCapture(captureEvent);
     }
-    if (captureEvent && onCapture) onCapture(captureEvent);
-  }, [cityControl, myCountryCode]);
+    mapRef.current?.triggerRepaint();
+  }, [cityControl, loaded]);
 
-  /* Підсвітка обраної країни + кінематографічний переліт камери до неї,
-     і назад до огляду світу при знятті виділення. Плюс звук. */
+  /* Виділення + переліт камери до реальної (живої) території країни. */
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
-
-    const territorySource = map.getSource("cn-selected-territory-outline");
-    const territoryFeature = selected && regionFeaturesRef.current.length
-      ? selectedTerritoryFeature(selected, regionFeaturesRef.current)
-      : null;
-
-    if (territorySource && typeof territorySource.setData === "function") {
-      territorySource.setData({
-        type: "FeatureCollection",
-        features: territoryFeature ? [territoryFeature] : [],
-      });
-    }
-
-    if (map.getLayer("cn-countries-selected")) {
-      if (territoryFeature) {
-        map.setFilter("cn-countries-selected", ["==", ["get", "cn_code"], "___none___"]);
-      } else {
-        map.setFilter("cn-countries-selected", ["==", ["get", "cn_code"], selected || "___none___"]);
-      }
-    }
+    if (!map || !loaded) return;
 
     if (selected && selected !== prevSelectedRef.current) {
       cnSfx.modalOpen();
-      const feature = featuresByCodeRef.current[selected];
-      const bounds = feature ? boundsFromGeometry(feature.geometry) : null;
+      const territory = territoriesRef.current.find((t) => t.properties.cn_owner === selected);
+      const geometryForBounds = territory ? territory.geometry : featuresByCodeRef.current[selected]?.geometry;
+      const bounds = geometryForBounds ? boundsFromGeometry(geometryForBounds) : null;
       if (bounds) {
         try {
           const cam = map.cameraForBounds(bounds, { padding: 60, pitch: 42, bearing: 0, maxZoom: 6 });
@@ -593,7 +548,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       map.flyTo({ ...WORLD_VIEW, duration: 1200, essential: true });
     }
     prevSelectedRef.current = selected;
-  }, [selected, cityControl]);
+    map.triggerRepaint();
+  }, [selected, cityControl, loaded]);
 
   const zoomBy = (delta) => {
     const map = mapRef.current;
@@ -611,8 +567,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   };
 
   return (
-    <div className="cn-map3d-wrap">
-      <div ref={containerRef} className="cn-map3d-canvas" />
+    <div className="cn-map3d-wrap" style={{ position: "relative" }}>
+      <div ref={containerRef} className="cn-map3d-canvas" style={{ position: "absolute", inset: 0 }} />
+      <canvas
+        ref={overlayCanvasRef}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+      />
       {!loaded && (
         <div className="cn-map3d-loading">
           <RefreshCw size={26} className="cn-spin" />
