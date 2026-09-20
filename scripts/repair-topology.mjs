@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { buffer } from "@turf/turf";
+import { buffer, simplify } from "@turf/turf";
 import { topology } from "topojson-server";
 
 const REGIONS_PATH = new URL("../public/data/world-regions.geojson", import.meta.url);
@@ -31,10 +31,25 @@ function hasValidGeometry(feature) {
   return Boolean(feature?.geometry?.type && Array.isArray(feature.geometry.coordinates));
 }
 
+function coordinateCount(geometry) {
+  if (!geometry?.coordinates) return 0;
+  const count = (coordinates) => {
+    if (typeof coordinates[0] === "number") return 1;
+    return coordinates.reduce((total, value) => total + count(value), 0);
+  };
+  return count(geometry.coordinates);
+}
+
 function repairFeature(feature) {
   try {
     const repaired = buffer(feature, 0);
-    return hasValidGeometry(repaired) ? { ...feature, geometry: repaired.geometry } : feature;
+    if (!hasValidGeometry(repaired)) return feature;
+    const simplified = simplify({ ...feature, geometry: repaired.geometry }, {
+      tolerance: 0.02,
+      highQuality: false,
+      mutate: false,
+    });
+    return hasValidGeometry(simplified) ? { ...feature, geometry: simplified.geometry } : feature;
   } catch {
     return feature;
   }
@@ -47,6 +62,7 @@ async function main() {
   }
 
   const total = regions.features.length;
+  const pointsBefore = regions.features.reduce((totalPoints, feature) => totalPoints + coordinateCount(feature.geometry), 0);
   const repairedFeatures = regions.features.map((feature, index) => {
     const repaired = repairFeature(feature);
     const processed = index + 1;
@@ -55,6 +71,7 @@ async function main() {
     }
     return repaired;
   });
+  const pointsAfter = repairedFeatures.reduce((totalPoints, feature) => totalPoints + coordinateCount(feature.geometry), 0);
   const repairedRegions = { ...regions, features: repairedFeatures };
 
   if (regions.features.length > 0 && !(await fileExists(REGIONS_PATH))) {
@@ -80,6 +97,8 @@ async function main() {
   const result = topology({ regions: { ...repairedRegions, features: topologyFeatures } }, QUANTIZATION);
   const output = `${JSON.stringify(result)}\n`;
   await writeFile(TOPOLOGY_PATH, output);
+  console.log(`Координатних точок до ремонту: ${pointsBefore}`);
+  console.log(`Координатних точок після ремонту і спрощення: ${pointsAfter}`);
   console.log(`Всього оброблено: ${total}`);
   console.log(`Wrote ${TOPOLOGY_PATH.pathname} (${(Buffer.byteLength(output) / (1024 * 1024)).toFixed(2)} MB)`);
 }
