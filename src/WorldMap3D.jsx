@@ -35,9 +35,7 @@ function ownerForRegion(cityControl, key, countryCode) {
 
 /* Стандартне декодування topojson-арки: якщо є transform — координати
    закодовані дельтами і масштабовані (квантизація для економії розміру
-   файлу); якщо transform немає — arcs вже містять абсолютні координати.
-   Підтримуємо обидва випадки, щоб не залежати від того, як саме
-   build-скрипт викликав topojson-server. */
+   файлу); якщо transform немає — arcs вже містять абсолютні координати. */
 function decodeArc(topology, arcIndex) {
   const reversed = arcIndex < 0;
   const idx = reversed ? ~arcIndex : arcIndex;
@@ -57,10 +55,6 @@ function decodeArc(topology, arcIndex) {
   return reversed ? pts.slice().reverse() : pts;
 }
 
-/* Y = -lat всюди в наших внутрішніх координатах (один раз тут, на етапі
-   декодування) — це прибирає плутанину зі знаком під час трансформації
-   canvas: далі скрізь (шляхи, картинки прапорів, кліки) працюємо з
-   одним і тим самим напрямком осей, без окремого "перевертання". */
 function ringsFromArcRefs(topology, arcRefsPerRing, cache) {
   return arcRefsPerRing.map((arcRefs) => {
     const pts = [];
@@ -75,32 +69,23 @@ function ringsFromArcRefs(topology, arcRefsPerRing, cache) {
   });
 }
 
-/* Будує повний список областей (з готовими Path2D) і список кордонів
-   між сусідніми областями (з готовою geometry лінії) з topojson-об'єкта.
-   Кордон між двома різними ОБЛАСТЯМИ рахується як межа між "власниками"
-   щокадру (просто порівняння двох рядків), тому не потребує жодного
-   перерахунку геометрії при захопленні території. */
 function buildWorldFromTopology(topology) {
   const geoms = topology.objects.regions.geometries;
   const arcCache = {};
   const regions = geoms.map((g, i) => {
-    const polys = g.type === "Polygon" ? [g.arcs] : g.arcs; // MultiPolygon: arcs = Polygon[][]
+    const polys = g.type === "Polygon" ? [g.arcs] : g.arcs;
     const rings = [];
     polys.forEach((poly) => {
       ringsFromArcRefs(topology, poly, arcCache).forEach((r) => rings.push(r));
     });
     const path = new Path2D();
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    let sx = 0, sy = 0, sn = 0;
     rings.forEach((ring) => {
       ring.forEach(([x, y], j) => {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
-        sx += x;
-        sy += y;
-        sn++;
         if (j === 0) path.moveTo(x, y);
         else path.lineTo(x, y);
       });
@@ -113,15 +98,9 @@ function buildWorldFromTopology(topology) {
       rings,
       path,
       bbox: [minX, minY, maxX, maxY],
-      cx: sn ? sx / sn : (minX + maxX) / 2,
-      cy: sn ? sy / sn : (minY + maxY) / 2,
     };
   });
 
-  /* Хто якою аркою "володіє" — щоб знайти арки, спільні рівно для ДВОХ
-     різних областей (це і є межа між ними; арка лише з одним власником
-     — це зовнішній/берегова лінія, окремо малювати не треба, море й так
-     контрастує з будь-якою заливкою суші). */
   const arcOwners = new Map();
   geoms.forEach((g, i) => {
     const polys = g.type === "Polygon" ? [g.arcs] : g.arcs;
@@ -141,16 +120,20 @@ function buildWorldFromTopology(topology) {
     if (owners.size !== 1 && owners.size !== 2) return;
     if (!arcCache[arcIdx]) arcCache[arcIdx] = decodeArc(topology, arcIdx);
     const line = arcCache[arcIdx].map(([lon, lat]) => [lon, -lat]);
+    let bMinX = Infinity, bMinY = Infinity, bMaxX = -Infinity, bMaxY = -Infinity;
+    line.forEach(([lx, ly]) => {
+      if (lx < bMinX) bMinX = lx;
+      if (lx > bMaxX) bMaxX = lx;
+      if (ly < bMinY) bMinY = ly;
+      if (ly > bMaxY) bMaxY = ly;
+    });
+    const bbox = [bMinX, bMinY, bMaxX, bMaxY];
     if (owners.size === 2) {
       const [a, b] = [...owners];
-      borders.push({ a, b, line });
+      borders.push({ a, b, line, bbox });
     } else {
-      // "берегова" арка — межує лише з однією областю (з іншого боку
-      // океан). Не малюється як звичайний кордон, але потрібна, щоб
-      // обвести ЗОВНІШНІЙ контур країни при виділенні, не чіпаючи
-      // внутрішні лінії між власними областями.
       const [a] = [...owners];
-      borders.push({ a, b: null, line });
+      borders.push({ a, b: null, line, bbox });
     }
   });
 
@@ -205,8 +188,6 @@ function approxAreaKm2FromRings(rings) {
   return Math.round(total);
 }
 
-/* Прапор для коду країни: публічний безкоштовний CDN, без ключів.
-   Кешується один раз на код. */
 function getFlagImage(cache, code, onReady) {
   if (!code) return null;
   const entry = cache[code];
@@ -223,15 +204,22 @@ function getFlagImage(cache, code, onReady) {
 }
 
 function fitCamera(w, h) {
-  // "cover", а не "contain": карта завжди заповнює весь canvas без
-  // порожніх країв, навіть якщо це трохи обрізає полюси/океан по краях.
-  const lon0 = -172, lon1 = 178, lat0 = -58, lat1 = 82; // тут вже у внутрішніх (lon, -lat) координатах
+  const lon0 = -172, lon1 = 178, lat0 = -58, lat1 = 82;
   const k = Math.max(w / (lon1 - lon0), h / (lat1 - lat0));
   return { k, x: w / 2 - ((lon0 + lon1) / 2) * k, y: h / 2 - ((lat0 + lat1) / 2) * k };
 }
 
+/* Найбільша сторона "запеченого" растру — компроміс між різкістю при
+   наближенні й пам'яттю/швидкістю. Карта перемальовується в цю картинку
+   ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
+   прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
+   поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
 const BAKE_MAX_SIDE = 4096;
 
+/* Малює всю карту (підкладка → прапори → кордони) в довільний 2D-контекст,
+   вже налаштований трансформацією world→pixel; scaleForLines — величина
+   для нормалізації товщини ліній (та ж роль, що "k" камери). Використовується
+   і для запікання в offscreen canvas, і не використовується щокадру напряму. */
 function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleForLines, onFlagReady) {
   const { regions, borders } = world;
 
@@ -259,14 +247,18 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
     ctx.restore();
   }
 
+  // Тут малюємо тільки справжні державні кордони (між різними
+  // власниками) — вони частина растру й видно завжди. Внутрішні лінії
+  // між областями ОДНІЄЇ країни сюди більше не входять: їх малює
+  // окремий живий шар нижче, тільки при значному наближенні.
   for (const bd of borders) {
     if (bd.b === null) continue;
-    const same = owners[bd.a] === owners[bd.b];
+    if (owners[bd.a] === owners[bd.b]) continue;
     ctx.beginPath();
     bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
     ctx.lineJoin = "round";
-    ctx.strokeStyle = same ? "rgba(8,16,26,0.22)" : "rgba(210,224,245,0.6)";
-    ctx.lineWidth = Math.max((same ? 0.28 : 1.0) / scaleForLines, same ? 0.012 : 0.035);
+    ctx.strokeStyle = "rgba(210,224,245,0.6)";
+    ctx.lineWidth = Math.max(1.0 / scaleForLines, 0.035);
     ctx.stroke();
   }
 }
@@ -274,8 +266,8 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
 export default function WorldMap3D({ selected, onSelect, myCountryCode, cityControl, onCapture }) {
   const canvasRef = useRef(null);
   const worldRef = useRef(null); // { regions, borders, bounds }
-  const regionOwnerRef = useRef([]); // паралельний regions масив — поточний власник кожної області
-  const ownerBBoxRef = useRef({}); // owner -> [minX,minY,maxX,maxY], для розтягування прапора на всю країну
+  const regionOwnerRef = useRef([]);
+  const ownerBBoxRef = useRef({});
   const prevCityControlRef = useRef(null);
   const flagCacheRef = useRef({});
   const flashRef = useRef(null);
@@ -290,7 +282,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   myCountryCodeRef.current = myCountryCode;
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
-  const bakedRef = useRef(null);
+  const bakedRef = useRef(null); // { canvas, minX, minY, scale }
   const bakeTimerRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -313,6 +305,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     ownerBBoxRef.current = bboxes;
   };
 
+  /* Перемальовує всю карту ОДИН РАЗ у фоновий canvas. Викликається лише
+     при завантаженні, зміні власника території чи довантаженні прапора —
+     ніколи щокадру. */
   const bake = () => {
     const world = worldRef.current;
     if (!world) return;
@@ -320,7 +315,11 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const spanX = maxX - minX || 1;
     const spanY = maxY - minY || 1;
     const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY);
-    const canvas = bakedRef.current?.canvas || document.createElement("canvas");
+
+    let canvas = bakedRef.current?.canvas;
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+    }
     canvas.width = Math.max(1, Math.round(spanX * scale));
     canvas.height = Math.max(1, Math.round(spanY * scale));
     const bctx = canvas.getContext("2d");
@@ -334,8 +333,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       myCountryCodeRef.current,
       flagCacheRef.current,
       scale,
-      () => scheduleBake(300),
+      () => scheduleBake(300), // прапор довантажився вже ПІСЛЯ цього запікання — перезапечемо ще раз
     );
+
     bakedRef.current = { canvas, minX, minY, scale };
   };
 
@@ -356,8 +356,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const topology = await res.json();
         const world = buildWorldFromTopology(topology);
 
-        /* Зіставляємо назви областей гри з topojson-фічами по країнах —
-           та ж логіка, що й раніше, тепер лише проти нових даних. */
         const byIsoAndNorm = {};
         world.regions.forEach((r) => {
           if (!r.iso) return;
@@ -384,7 +382,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           if (!byNorm) return;
           (allRegionData[countryCode]?.regions || []).forEach(({ name }) => {
             const f = matchName(name, byNorm);
-            if (f) f.name = name; // приводимо назву до тієї, що використовує гра (для cityControl-ключів)
+            if (f) f.name = name;
           });
         });
 
@@ -408,9 +406,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Основний цикл малювання + обробка вводу — окремий ефект, живе, поки
-     живий canvas; дані (worldRef/regionOwnerRef/...) читаються "наживо"
-     з ref'ів, тож не треба перезапускати цей ефект при кожній зміні гри. */
+  /* Основний цикл малювання: щокадру лише показує вже готовий "запечений"
+     растр під поточний зум/панораму (дешево) + малює тонким вектором
+     тільки те, що дійсно змінюється щокадру: біле виділення й спалах
+     захоплення. */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -433,9 +432,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const draw = () => {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
       const ocean = ctx.createRadialGradient(w / 2, h * 0.42, 0, w / 2, h * 0.42, Math.max(w, h) * 0.85);
       ocean.addColorStop(0, "#0e2e4d");
       ocean.addColorStop(0.55, "#081a2e");
@@ -446,7 +445,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       const world = worldRef.current;
       const baked = bakedRef.current;
       if (world && baked) {
-        // плавний переліт камери до цілі (виділена країна / огляд світу)
         const tgt = targetCamRef.current;
         if (tgt) {
           const dx = tgt.x - camRef.current.x;
@@ -468,6 +466,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const owners = regionOwnerRef.current;
         const sel = selectedRef.current;
 
+        // Один-єдиний drawImage замість перемальовування тисяч областей —
+        // це і прибирає лаги. Готовий растр просто розтягується під
+        // поточний зум/панораму.
         const bw = baked.canvas.width / baked.scale;
         const bh = baked.canvas.height / baked.scale;
         const sx = x + baked.minX * k;
@@ -475,47 +476,67 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
 
-        // Виділена країна: яскравий зовнішній контур поверх звичайних
-        // кордонів, але без зміни її заливки.
-        if (sel) {
+        // Внутрішні лінії між областями ОДНІЄЇ країни — живий шар,
+        // з'являється лише при значному наближенні (як у Google Maps:
+        // тонкі, напівпрозорі, штрихпунктирні), і рахує тільки бордери,
+        // що реально потрапляють у видиму область екрана — тому лишається
+        // дешевим навіть при тисячах бордерів по всьому світу.
+        if (k > 7) {
+          const visMinX = -x / k, visMaxX = (w - x) / k;
+          const visMinY = -y / k, visMaxY = (h - y) / k;
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
-          ctx.shadowColor = "rgba(80, 200, 255, 0.85)";
-          ctx.shadowBlur = 4 / k;
-          ctx.strokeStyle = "rgba(255,255,255,0.92)";
-          ctx.lineWidth = Math.max(1.45 / k, 0.048);
+          ctx.setLineDash([4 / k, 3 / k]);
+          ctx.strokeStyle = "rgba(148,163,184,0.5)";
+          ctx.lineWidth = Math.max(0.9 / k, 0.03);
           ctx.lineJoin = "round";
-          ctx.lineCap = "round";
-
           for (const bd of world.borders) {
-            const aIsSel = owners[bd.a] === sel;
-            const bIsSel = bd.b !== null && owners[bd.b] === sel;
-            if (aIsSel === bIsSel) continue;
-
+            if (bd.b === null || owners[bd.a] !== owners[bd.b]) continue;
+            const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
+            if (bMaxX < visMinX || bMinX > visMaxX || bMaxY < visMinY || bMinY > visMaxY) continue;
             ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) =>
-              i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)
-            );
+            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
             ctx.stroke();
           }
+          ctx.setLineDash([]);
           ctx.restore();
         }
 
-        // спалах при щойному захопленні конкретної області
-        if (flashRef.current && Date.now() < flashRef.current.until) {
-          const region = world.regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
-          if (region) {
-            ctx.save();
-            ctx.transform(k, 0, 0, k, x, y);
-            ctx.shadowColor = "#ffffff";
-            ctx.shadowBlur = 8 / k;
-            ctx.strokeStyle = "#ffffff";
-            ctx.lineWidth = Math.max(2.4 / k, 0.08);
-            ctx.stroke(region.path);
-            ctx.restore();
-          }
-        }
+        // Біле виділення (лише зовнішній контур живої території) і спалах
+        // захоплення — це малі, дешеві вектори, тому їх можна перемальовувати
+        // щокадру без проблем із продуктивністю.
+        if (sel || (flashRef.current && Date.now() < flashRef.current.until)) {
+          ctx.save();
+          ctx.transform(k, 0, 0, k, x, y);
 
+          if (sel) {
+            ctx.strokeStyle = "rgba(255,255,255,0.85)";
+            ctx.lineWidth = Math.max(1.3 / k, 0.045);
+            ctx.lineJoin = "round";
+            for (const bd of world.borders) {
+              const aIsSel = owners[bd.a] === sel;
+              const bIsSel = bd.b !== null && owners[bd.b] === sel;
+              if (aIsSel === bIsSel) continue;
+              ctx.beginPath();
+              bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+              ctx.stroke();
+            }
+          }
+
+          if (flashRef.current && Date.now() < flashRef.current.until) {
+            const region = world.regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
+            if (region) {
+              ctx.save();
+              ctx.shadowColor = "#ffffff";
+              ctx.shadowBlur = 8 / k;
+              ctx.strokeStyle = "#ffffff";
+              ctx.lineWidth = Math.max(2.4 / k, 0.08);
+              ctx.stroke(region.path);
+              ctx.restore();
+            }
+          }
+          ctx.restore();
+        }
       }
 
       raf = requestAnimationFrame(draw);
@@ -609,8 +630,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     };
   }, [loaded]);
 
-  /* Перерахунок власників областей при зміні cityControl — лише масив
-     рядків + bbox-агрегація (жодної геометрії), тому миттєво й дешево. */
+  /* Перерахунок власників областей при зміні cityControl + перезапікання
+     растру (тут, і тільки тут, а не щокадру). */
   useEffect(() => {
     const world = worldRef.current;
     if (!world || !loaded) return;
@@ -642,14 +663,15 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       flashRef.current = { key: capturedKey, until: Date.now() + 2200 };
       if (captureEvent && onCapture) onCapture(captureEvent);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cityControl, loaded]);
 
+  /* Довантаження прапорів триває довше за одну секунду на старті (десятки
+     паралельних запитів) — перезапікаємо растр з невеликою затримкою
+     після кожного нового прапора, а не при кожному окремому onload. */
   useEffect(() => {
     if (!loaded) return;
     scheduleBake(250);
-    return () => {
-      if (bakeTimerRef.current) clearTimeout(bakeTimerRef.current);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
