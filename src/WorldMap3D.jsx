@@ -311,7 +311,7 @@ function drawCompass(ctx, cx, cy, r) {
    ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
    прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
    поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
-const BAKE_MAX_SIDE = 5120;
+const BAKE_MAX_SIDE = 6144;
 
 /* Малює всю карту (підкладка → прапори → кордони) в довільний 2D-контекст,
    вже налаштований трансформацією world→pixel; scaleForLines — величина
@@ -550,7 +550,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     let raf = 0;
 
     const resize = () => {
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
       canvas.width = Math.max(1, Math.floor(w * dpr));
@@ -565,7 +565,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const draw = () => {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const ocean = ctx.createRadialGradient(w / 2, h * 0.42, 0, w / 2, h * 0.42, Math.max(w, h) * 0.85);
@@ -617,6 +617,34 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
         ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
+
+        // Векторний шар кордонів країн:
+        // при medium/high zoom не масштабуємо растрову лінію, а малюємо
+        // оригінальні TopoJSON-дуги безпосередньо в поточний canvas.
+        // Це прибирає "мило" та пікселізацію кордонів при наближенні.
+        if (k > 3.5) {
+          const visMinX = -x / k, visMaxX = (w - x) / k;
+          const visMinY = -y / k, visMaxY = (h - y) / k;
+          ctx.save();
+          ctx.transform(k, 0, 0, k, x, y);
+          ctx.setLineDash([]);
+          ctx.lineJoin = "round";
+          ctx.lineCap = "round";
+          for (const bd of world.borders) {
+            if (bd.b === null || owners[bd.a] === owners[bd.b]) continue;
+            const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
+            if (bMaxX < visMinX || bMinX > visMaxX || bMaxY < visMinY || bMinY > visMaxY) continue;
+            ctx.beginPath();
+            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
+            const width = k > 14 ? 0.42 / k : k > 7 ? 0.52 / k : 0.68 / k;
+            ctx.strokeStyle = "rgba(103,232,249,0.88)";
+            ctx.lineWidth = width;
+            ctx.shadowColor = "rgba(90,210,255,0.28)";
+            ctx.shadowBlur = k > 7 ? 1.8 / k : 1.2 / k;
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
 
         // Внутрішні лінії між областями ОДНІЄЇ країни — живий шар,
         // з'являється лише при значному наближенні (як у Google Maps:
