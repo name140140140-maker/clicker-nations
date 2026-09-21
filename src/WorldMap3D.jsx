@@ -305,10 +305,11 @@ function drawCompass(ctx, cx, cy, r) {
    ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
    прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
    поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
-const BAKE_MAX_SIDE = 6144;
+const BAKE_MAX_SIDE = 8192;
 const ADAPTIVE_BAKE_ZOOM = 6;
 const ADAPTIVE_BAKE_DELAY = 200;
-const OWNER_CLUSTER_DISTANCE = 18;
+const INTERNAL_BORDER_FADE_START = 7;
+const INTERNAL_BORDER_FADE_END = 11;
 
 /* Малює всю карту (підкладка → прапори → кордони) в довільний 2D-контекст,
    вже налаштований трансформацією world→pixel; scaleForLines — величина
@@ -412,6 +413,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
   const bakedRef = useRef(null); // { canvas, minX, minY, scale }
+  const globalBakeRef = useRef(null); // stable low-zoom fallback under adaptive bake
   const bakeTimerRef = useRef(null);
   const bakeIdleRef = useRef(null);
   const noisePatternRef = useRef(null);
@@ -435,16 +437,29 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const clusters = {};
     const regionClusterIndexes = Array(regions.length).fill(0);
     Object.entries(grouped).forEach(([owner, entries]) => {
-      const remaining = entries.slice();
+      const byIndex = new Map(entries.map((entry) => [entry.index, entry]));
+      const adjacent = new Map(entries.map((entry) => [entry.index, []]));
+      worldRef.current?.borders.forEach((border) => {
+        if (border.b === null || owners[border.a] !== owner || owners[border.b] !== owner) return;
+        adjacent.get(border.a)?.push(border.b);
+        adjacent.get(border.b)?.push(border.a);
+      });
+
+      const remaining = new Set(entries.map((entry) => entry.index));
       const ownerClusters = [];
-      while (remaining.length) {
-        remaining.sort((a, b) => b.area - a.area);
-        const anchor = remaining.shift();
-        const cluster = [anchor];
-        for (let i = remaining.length - 1; i >= 0; i--) {
-          const candidate = remaining[i];
-          const distance = Math.hypot(candidate.center[0] - anchor.center[0], candidate.center[1] - anchor.center[1]);
-          if (distance <= OWNER_CLUSTER_DISTANCE) cluster.push(remaining.splice(i, 1)[0]);
+      while (remaining.size) {
+        const anchorIndex = [...remaining].sort((a, b) => byIndex.get(b).area - byIndex.get(a).area)[0];
+        const cluster = [];
+        const queue = [anchorIndex];
+        remaining.delete(anchorIndex);
+        while (queue.length) {
+          const index = queue.shift();
+          cluster.push(byIndex.get(index));
+          for (const adjacentIndex of adjacent.get(index) || []) {
+            if (!remaining.has(adjacentIndex)) continue;
+            remaining.delete(adjacentIndex);
+            queue.push(adjacentIndex);
+          }
         }
         const bbox = cluster.reduce(
           (box, item) => [
@@ -470,12 +485,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   /* Перемальовує всю карту ОДИН РАЗ у фоновий canvas. Викликається лише
      при завантаженні, зміні власника території чи довантаженні прапора —
      ніколи щокадру. */
-  const bake = () => {
+  const bake = (forceGlobal = false) => {
     const world = worldRef.current;
     if (!world) return;
     const canvasElement = canvasRef.current;
     const camera = camRef.current;
-    const adaptive = camera.k > ADAPTIVE_BAKE_ZOOM && canvasElement;
+    const adaptive = !forceGlobal && camera.k > ADAPTIVE_BAKE_ZOOM && canvasElement;
     const width = canvasElement?.clientWidth || 1;
     const height = canvasElement?.clientHeight || 1;
     let [minX, minY, maxX, maxY] = world.bounds;
@@ -512,7 +527,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       () => scheduleBake(300),
     );
 
-    bakedRef.current = { canvas, minX, minY, scale, adaptive };
+    const baked = { canvas, minX, minY, scale, adaptive };
+    bakedRef.current = baked;
+    if (!adaptive) globalBakeRef.current = baked;
     console.timeEnd("WorldMap3D bake");
     console.info("WorldMap3D bake result", { adaptive, zoom: camera.k, width: canvas.width, height: canvas.height, ms: Math.round(performance.now() - startedAt) });
   };
@@ -641,7 +658,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
       const world = worldRef.current;
       const baked = bakedRef.current;
-      if (world && baked) {
+      const globalBake = globalBakeRef.current;
+      if (world && (baked || globalBake)) {
         const tgt = targetCamRef.current;
         if (tgt) {
           const dx = tgt.x - camRef.current.x;
@@ -667,13 +685,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         // Один-єдиний drawImage замість перемальовування тисяч областей —
         // це і прибирає лаги. Готовий растр просто розтягується під
         // поточний зум/панораму.
-        const bw = baked.canvas.width / baked.scale;
-        const bh = baked.canvas.height / baked.scale;
-        const sx = x + baked.minX * k;
-        const sy = y + baked.minY * k;
-        ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(baked.canvas, sx, sy, bw * k, bh * k);
+        const drawBake = (entry) => {
+          if (!entry) return;
+          const bw = entry.canvas.width / entry.scale;
+          const bh = entry.canvas.height / entry.scale;
+          const sx = x + entry.minX * k;
+          const sy = y + entry.minY * k;
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(entry.canvas, sx, sy, bw * k, bh * k);
+        };
+        // Keep the complete world visible while an adaptive bake is pending.
+        drawBake(globalBake);
+        if (baked !== globalBake) drawBake(baked);
 
         // Векторний шар кордонів країн:
         // при medium/high zoom не масштабуємо растрову лінію, а малюємо
@@ -708,13 +732,17 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         // тонкі, напівпрозорі, суцільні), і рахує тільки бордери,
         // що реально потрапляють у видиму область екрана — тому лишається
         // дешевим навіть при тисячах бордерів по всьому світу.
-        if (k > 7) {
+        const internalBorderOpacity = Math.max(
+          0,
+          Math.min(1, (k - INTERNAL_BORDER_FADE_START) / (INTERNAL_BORDER_FADE_END - INTERNAL_BORDER_FADE_START))
+        );
+        if (internalBorderOpacity > 0) {
           const visMinX = -x / k, visMaxX = (w - x) / k;
           const visMinY = -y / k, visMaxY = (h - y) / k;
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
           ctx.setLineDash([]);
-          ctx.strokeStyle = "rgba(148,163,184,0.32)";
+          ctx.strokeStyle = `rgba(148,163,184,${0.32 * internalBorderOpacity})`;
           ctx.lineWidth = Math.max(0.48 / k, 0.016);
           ctx.lineJoin = "round";
   ctx.lineCap = "round";
@@ -919,7 +947,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
     recomputeOwnersAndBBoxes(world.regions, cityControl);
     prevCityControlRef.current = { ...(cityControl || {}) };
-    bake();
+    bake(true);
+    scheduleBake(ADAPTIVE_BAKE_DELAY);
 
     if (capturedKey) {
       cnSfx.purchase();
