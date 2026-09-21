@@ -269,9 +269,6 @@ function getFlagImage(cache, code, onReady) {
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   };
   const url = `https://flagcdn.com/w2560/${key}.png`;
-  if (normalizedCode === "UA") {
-    console.info("WorldMap3D: UA flag request", { code: normalizedCode, url, expected: "https://flagcdn.com/w2560/ua.png" });
-  }
   img.src = url;
   cache[cacheKey] = img;
   return null;
@@ -311,6 +308,79 @@ const OCEAN_LABELS = [
   { text: "ПІВНІЧНИЙ ЛЬОДОВИТИЙ ОКЕАН", lon: 10, lat: -75 },
   { text: "ПІВДЕННИЙ ОКЕАН", lon: 20, lat: 68 },
 ];
+
+function determineDeviceTier() {
+  const cores = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency || 4) : 4;
+  const isWeak = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(max-width: 430px)").matches;
+  if (cores <= 4 || isWeak) return "weak";
+  if (cores <= 8) return "mid";
+  return "powerful";
+}
+
+function getMapRenderProfile(k, width, height, deviceTier = "mid") {
+  const deviceScale = Math.min(1.85, Math.max(0.8, (Math.min(width, height) || 360) / 360));
+  const scaledZoom = k * deviceScale;
+  const isWeak = deviceTier === "weak";
+  const isPowerful = deviceTier === "powerful";
+
+  if (scaledZoom < (isWeak ? 1.15 : 1.35)) {
+    return {
+      mode: "world",
+      drawFlags: false,
+      drawTerrain: false,
+      drawInternalBorders: false,
+      borderOpacity: 0.28,
+      useSimpleFill: true,
+      labelAlpha: 0.52,
+      shadowAlpha: 0.12,
+    };
+  }
+  if (scaledZoom < (isWeak ? 2.8 : isPowerful ? 4.4 : 3.8)) {
+    return {
+      mode: "continent",
+      drawFlags: true,
+      drawTerrain: !isWeak,
+      drawInternalBorders: false,
+      borderOpacity: 0.46,
+      useSimpleFill: false,
+      labelAlpha: 0.7,
+      shadowAlpha: 0.16,
+    };
+  }
+  if (scaledZoom < (isWeak ? 9 : isPowerful ? 13 : 11)) {
+    return {
+      mode: "country",
+      drawFlags: true,
+      drawTerrain: true,
+      drawInternalBorders: !isWeak,
+      borderOpacity: 0.72,
+      useSimpleFill: false,
+      labelAlpha: 0.8,
+      shadowAlpha: 0.2,
+    };
+  }
+  return {
+    mode: "local",
+    drawFlags: true,
+    drawTerrain: true,
+    drawInternalBorders: true,
+    borderOpacity: 1,
+    useSimpleFill: false,
+    labelAlpha: 0.9,
+    shadowAlpha: 0.28,
+  };
+}
+
+function makeTileKey(viewMinX, viewMaxX, viewMinY, viewMaxY, zoom) {
+  const span = Math.max(12, 28 / Math.max(1, Math.log2(Math.max(1, zoom + 1))));
+  return [
+    Math.round(viewMinX / span),
+    Math.round(viewMinY / span),
+    Math.round(viewMaxX / span),
+    Math.round(viewMaxY / span),
+    Math.round(zoom * 10),
+  ].join(":");
+}
 
 function drawCompass(ctx, cx, cy, r) {
   ctx.save();
@@ -464,6 +534,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   const globalBakeRef = useRef(null); // { canvas, minX, minY, scale }
   const bakeTimerRef = useRef(null);
   const noisePatternRef = useRef(null);
+  const tileCacheRef = useRef(new Map());
+  const deviceTierRef = useRef(determineDeviceTier());
   const [loaded, setLoaded] = useState(false);
 
   const recomputeOwnersAndBBoxes = (regions, cityControlObj) => {
@@ -539,8 +611,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const spanY = maxY - minY || 1;
     const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY);
 
-    const startedAt = performance.now();
-    console.time("WorldMap3D bake");
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(spanX * scale));
     canvas.height = Math.max(1, Math.round(spanY * scale));
@@ -560,8 +630,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     );
 
     globalBakeRef.current = { canvas, minX, minY, scale };
-    console.timeEnd("WorldMap3D bake");
-    console.info("WorldMap3D global bake result", { width: canvas.width, height: canvas.height, ms: Math.round(performance.now() - startedAt) });
   };
 
   const scheduleBake = (delay) => {
@@ -577,11 +645,26 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const viewMaxX = (width - x) / k;
     const viewMinY = -y / k;
     const viewMaxY = (height - y) / k;
-    const visibleRegionIndexes = querySpatialIndex(world.regionSpatialIndex, world.regions, viewMinX, viewMinY, viewMaxX, viewMaxY);
-    const visibleBorderIndexes = querySpatialIndex(world.borderSpatialIndex, world.borders, viewMinX, viewMinY, viewMaxX, viewMaxY);
+    const tileKey = makeTileKey(viewMinX, viewMaxX, viewMinY, viewMaxY, k);
+    const tileCache = tileCacheRef.current;
+    const cached = tileCache.get(tileKey);
+
+    const visibleRegionIndexes = cached?.regions || querySpatialIndex(world.regionSpatialIndex, world.regions, viewMinX, viewMinY, viewMaxX, viewMaxY);
+    const visibleBorderIndexes = cached?.borders || querySpatialIndex(world.borderSpatialIndex, world.borders, viewMinX, viewMinY, viewMaxX, viewMaxY);
+    const quality = getMapRenderProfile(k, width, height, deviceTierRef.current);
+
+    tileCache.set(tileKey, { regions: visibleRegionIndexes, borders: visibleBorderIndexes, ts: Date.now() });
+    while (tileCache.size > 48) {
+      const oldestKey = tileCache.keys().next().value;
+      if (oldestKey !== undefined) tileCache.delete(oldestKey);
+    }
 
     ctx.save();
+    const tilt = Math.max(-0.12, Math.min(0.12, (k - 3) * 0.014));
     ctx.transform(k, 0, 0, k, x, y);
+    if (quality.mode !== "world") {
+      ctx.transform(1, tilt, 0, 1, 0, 0);
+    }
     ctx.fillStyle = "#1a2836";
     for (const regionIndex of visibleRegionIndexes) ctx.fill(world.regions[regionIndex].path);
 
@@ -593,10 +676,17 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       const owner = owners[regionIndex];
       const clusters = ownerClustersRef.current[owner];
       const cluster = clusters?.[regionClusterIndexesRef.current[regionIndex]];
-      const flag = getFlagImage(flagCacheRef.current, owner, () => scheduleBake(300));
+      const flag = quality.drawFlags ? getFlagImage(flagCacheRef.current, owner, () => scheduleBake(300)) : null;
       ctx.save();
       ctx.clip(region.path);
-      if (flag && cluster) {
+
+      if (quality.useSimpleFill || !flag || !cluster) {
+        const baseFill = owner === myCodeRef.current ? "#22d3ee" : "#264a63";
+        ctx.fillStyle = quality.mode === "world" ? "#142737" : baseFill;
+        ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+      }
+
+      if (flag && cluster && quality.drawFlags) {
         const [clusterMinX, clusterMinY, clusterMaxX, clusterMaxY] = cluster.bbox;
         const clusterWidth = clusterMaxX - clusterMinX;
         const clusterHeight = clusterMaxY - clusterMinY;
@@ -618,8 +708,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           ctx.fillStyle = "rgba(34,211,238,0.72)";
           ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
         }
-      } else {
-        ctx.fillStyle = owner === myCodeRef.current ? "#22d3ee" : "#264a63";
+      }
+
+      if (quality.drawTerrain && quality.mode !== "world") {
+        ctx.fillStyle = "rgba(9,15,28,0.18)";
         ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
       }
       ctx.restore();
@@ -633,14 +725,14 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       if (border.b === null || owners[border.a] === owners[border.b]) continue;
       ctx.beginPath();
       border.line.forEach(([lineX, lineY], index) => (index === 0 ? ctx.moveTo(lineX, lineY) : ctx.lineTo(lineX, lineY)));
-      ctx.strokeStyle = "rgba(103,232,249,0.88)";
+      ctx.strokeStyle = `rgba(103,232,249,${quality.borderOpacity})`;
       ctx.lineWidth = k > 14 ? 0.42 / k : k > 7 ? 0.52 / k : 0.68 / k;
       ctx.shadowColor = "rgba(90,210,255,0.28)";
-      ctx.shadowBlur = k > 7 ? 1.8 / k : 1.2 / k;
+      ctx.shadowBlur = 1.2 / Math.max(1, k * 0.7);
       ctx.stroke();
     }
 
-    const internalOpacity = Math.max(0, Math.min(1, (k - INTERNAL_BORDER_FADE_START) / (INTERNAL_BORDER_FADE_END - INTERNAL_BORDER_FADE_START)));
+    const internalOpacity = quality.drawInternalBorders ? Math.max(0, Math.min(1, (k - INTERNAL_BORDER_FADE_START) / (INTERNAL_BORDER_FADE_END - INTERNAL_BORDER_FADE_START))) : 0;
     if (internalOpacity > 0) {
       ctx.shadowBlur = 0;
       ctx.strokeStyle = `rgba(148,163,184,${0.32 * internalOpacity})`;
@@ -704,8 +796,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const canvas = canvasRef.current;
         if (canvas) camRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
         setLoaded(true);
-      } catch (err) {
-        console.warn("WorldMap3D: не вдалося завантажити карту:", err?.message || err);
+      } catch {
         setLoaded(true);
       }
     })();
@@ -766,6 +857,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       const world = worldRef.current;
       const globalBake = globalBakeRef.current;
       if (world) {
+        const quality = getMapRenderProfile(camRef.current.k, w, h, deviceTierRef.current);
         const tgt = targetCamRef.current;
         if (tgt) {
           const dx = tgt.x - camRef.current.x;
@@ -781,6 +873,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
               k: camRef.current.k + dk * 0.18,
             };
           }
+        }
+
+        const drag = dragRef.current;
+        if (!drag.active && (Math.abs(drag.vx || 0) > 0.05 || Math.abs(drag.vy || 0) > 0.05)) {
+          camRef.current = {
+            ...camRef.current,
+            x: camRef.current.x + drag.vx,
+            y: camRef.current.y + drag.vy,
+          };
+          drag.vx *= 0.84;
+          drag.vy *= 0.84;
+          if (Math.abs(drag.vx) < 0.03) drag.vx = 0;
+          if (Math.abs(drag.vy) < 0.03) drag.vy = 0;
         }
 
         const { k, x, y } = camRef.current;
@@ -801,7 +906,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           ctx.imageSmoothingQuality = "high";
           ctx.drawImage(entry.canvas, sx, sy, bw * k, bh * k);
         };
-        const bakeAlpha = Math.max(0, Math.min(1, (MODE_FADE_END - k) / (MODE_FADE_END - MODE_FADE_START)));
+        const bakeAlpha = quality.mode === "world" ? 0.75 : Math.max(0, Math.min(1, (MODE_FADE_END - k) / (MODE_FADE_END - MODE_FADE_START)));
         const liveAlpha = 1 - bakeAlpha;
         const visibleBorderIndexes = liveAlpha > 0 || sel
           ? querySpatialIndex(world.borderSpatialIndex, world.borders, viewMinX, viewMinY, viewMaxX, viewMaxY)
@@ -914,7 +1019,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       pointersRef.current.set(ev.pointerId, p);
       if (pointersRef.current.size === 1) {
         targetCamRef.current = null;
-        dragRef.current = { active: true, moved: false, x: p.x, y: p.y, cx: camRef.current.x, cy: camRef.current.y };
+        dragRef.current = {
+          active: true,
+          moved: false,
+          x: p.x,
+          y: p.y,
+          cx: camRef.current.x,
+          cy: camRef.current.y,
+          vx: 0,
+          vy: 0,
+          lastX: p.x,
+          lastY: p.y,
+          lastTs: performance.now(),
+        };
       } else if (pointersRef.current.size === 2) {
         const [a, b] = [...pointersRef.current.values()];
         pinchRef.current = Math.hypot(a.x - b.x, a.y - b.y);
@@ -934,9 +1051,18 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         return;
       }
       if (dragRef.current.active) {
+        const now = performance.now();
+        const dt = Math.max(16, now - (dragRef.current.lastTs || now));
         const dx = p.x - dragRef.current.x;
         const dy = p.y - dragRef.current.y;
         if (Math.hypot(dx, dy) > 4) dragRef.current.moved = true;
+        const prevX = dragRef.current.lastX ?? p.x;
+        const prevY = dragRef.current.lastY ?? p.y;
+        dragRef.current.vx = ((p.x - prevX) / dt) * 16;
+        dragRef.current.vy = ((p.y - prevY) / dt) * 16;
+        dragRef.current.lastX = p.x;
+        dragRef.current.lastY = p.y;
+        dragRef.current.lastTs = now;
         camRef.current = { ...camRef.current, x: dragRef.current.cx + dx, y: dragRef.current.cy + dy };
       }
     };
@@ -951,7 +1077,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           if (code && onSelectRef.current) onSelectRef.current(code);
         }
       }
-      if (pointersRef.current.size === 0) dragRef.current.active = false;
+      if (pointersRef.current.size === 0) {
+        dragRef.current.active = false;
+        dragRef.current.moved = false;
+      }
       pinchRef.current = 0;
     };
     const onWheel = (ev) => {
