@@ -145,7 +145,14 @@ function buildWorldFromTopology(topology) {
     if (r.bbox[3] > maxY) maxY = r.bbox[3];
   });
 
-  return { regions, borders, bounds: [minX, minY, maxX, maxY] };
+  const bounds = [minX, minY, maxX, maxY];
+  return {
+    regions,
+    borders,
+    bounds,
+    regionSpatialIndex: buildSpatialIndex(regions, [minX, minY]),
+    borderSpatialIndex: buildSpatialIndex(borders, [minX, minY]),
+  };
 }
 
 function pointInRing(x, y, ring) {
@@ -169,6 +176,47 @@ function hitRegion(regions, x, y) {
     }
   }
   return -1;
+}
+
+function buildSpatialIndex(items, bounds, cellSize = 8) {
+  const [minX, minY] = bounds;
+  const cells = new Map();
+  items.forEach((item, itemIndex) => {
+    const [itemMinX, itemMinY, itemMaxX, itemMaxY] = item.bbox;
+    const startX = Math.floor((itemMinX - minX) / cellSize);
+    const endX = Math.floor((itemMaxX - minX) / cellSize);
+    const startY = Math.floor((itemMinY - minY) / cellSize);
+    const endY = Math.floor((itemMaxY - minY) / cellSize);
+    for (let cellX = startX; cellX <= endX; cellX++) {
+      for (let cellY = startY; cellY <= endY; cellY++) {
+        const key = `${cellX}:${cellY}`;
+        let cell = cells.get(key);
+        if (!cell) {
+          cell = [];
+          cells.set(key, cell);
+        }
+        cell.push(itemIndex);
+      }
+    }
+  });
+  return { minX, minY, cellSize, cells };
+}
+
+function querySpatialIndex(index, items, viewMinX, viewMinY, viewMaxX, viewMaxY) {
+  const startX = Math.floor((viewMinX - index.minX) / index.cellSize);
+  const endX = Math.floor((viewMaxX - index.minX) / index.cellSize);
+  const startY = Math.floor((viewMinY - index.minY) / index.cellSize);
+  const endY = Math.floor((viewMaxY - index.minY) / index.cellSize);
+  const candidates = new Set();
+  for (let cellX = startX; cellX <= endX; cellX++) {
+    for (let cellY = startY; cellY <= endY; cellY++) {
+      for (const itemIndex of index.cells.get(`${cellX}:${cellY}`) || []) candidates.add(itemIndex);
+    }
+  }
+  return [...candidates].filter((itemIndex) => {
+    const [minX, minY, maxX, maxY] = items[itemIndex].bbox;
+    return maxX >= viewMinX && minX <= viewMaxX && maxY >= viewMinY && minY <= viewMaxY;
+  });
 }
 
 function approxAreaKm2FromRings(rings) {
@@ -525,31 +573,26 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   };
 
   const drawLiveWorld = (ctx, world, owners, k, x, y, width, height) => {
-    const visible = (bbox) => {
-      const [minX, minY, maxX, maxY] = bbox;
-      const viewMinX = -x / k;
-      const viewMaxX = (width - x) / k;
-      const viewMinY = -y / k;
-      const viewMaxY = (height - y) / k;
-      return !(maxX < viewMinX || minX > viewMaxX || maxY < viewMinY || minY > viewMaxY);
-    };
+    const viewMinX = -x / k;
+    const viewMaxX = (width - x) / k;
+    const viewMinY = -y / k;
+    const viewMaxY = (height - y) / k;
+    const visibleRegionIndexes = querySpatialIndex(world.regionSpatialIndex, world.regions, viewMinX, viewMinY, viewMaxX, viewMaxY);
+    const visibleBorderIndexes = querySpatialIndex(world.borderSpatialIndex, world.borders, viewMinX, viewMinY, viewMaxX, viewMaxY);
 
     ctx.save();
     ctx.transform(k, 0, 0, k, x, y);
     ctx.fillStyle = "#1a2836";
-    for (const region of world.regions) {
-      if (visible(region.bbox)) ctx.fill(region.path);
-    }
+    for (const regionIndex of visibleRegionIndexes) ctx.fill(world.regions[regionIndex].path);
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    for (let i = 0; i < world.regions.length; i++) {
-      const region = world.regions[i];
-      if (!visible(region.bbox)) continue;
+    for (const regionIndex of visibleRegionIndexes) {
+      const region = world.regions[regionIndex];
       const [minX, minY, maxX, maxY] = region.bbox;
-      const owner = owners[i];
+      const owner = owners[regionIndex];
       const clusters = ownerClustersRef.current[owner];
-      const cluster = clusters?.[regionClusterIndexesRef.current[i]];
+      const cluster = clusters?.[regionClusterIndexesRef.current[regionIndex]];
       const flag = getFlagImage(flagCacheRef.current, owner, () => scheduleBake(300));
       ctx.save();
       ctx.clip(region.path);
@@ -585,8 +628,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     ctx.setLineDash([]);
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    for (const border of world.borders) {
-      if (border.b === null || owners[border.a] === owners[border.b] || !visible(border.bbox)) continue;
+    for (const borderIndex of visibleBorderIndexes) {
+      const border = world.borders[borderIndex];
+      if (border.b === null || owners[border.a] === owners[border.b]) continue;
       ctx.beginPath();
       border.line.forEach(([lineX, lineY], index) => (index === 0 ? ctx.moveTo(lineX, lineY) : ctx.lineTo(lineX, lineY)));
       ctx.strokeStyle = "rgba(103,232,249,0.88)";
@@ -601,8 +645,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       ctx.shadowBlur = 0;
       ctx.strokeStyle = `rgba(148,163,184,${0.32 * internalOpacity})`;
       ctx.lineWidth = Math.max(0.48 / k, 0.016);
-      for (const border of world.borders) {
-        if (border.b === null || owners[border.a] !== owners[border.b] || !visible(border.bbox)) continue;
+      for (const borderIndex of visibleBorderIndexes) {
+        const border = world.borders[borderIndex];
+        if (border.b === null || owners[border.a] !== owners[border.b]) continue;
         ctx.beginPath();
         border.line.forEach(([lineX, lineY], index) => (index === 0 ? ctx.moveTo(lineX, lineY) : ctx.lineTo(lineX, lineY)));
         ctx.stroke();
@@ -741,6 +786,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const { k, x, y } = camRef.current;
         const owners = regionOwnerRef.current;
         const sel = selectedRef.current;
+        const viewMinX = -x / k;
+        const viewMaxX = (w - x) / k;
+        const viewMinY = -y / k;
+        const viewMaxY = (h - y) / k;
 
         const drawBake = (entry) => {
           if (!entry) return;
@@ -754,6 +803,9 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         };
         const bakeAlpha = Math.max(0, Math.min(1, (MODE_FADE_END - k) / (MODE_FADE_END - MODE_FADE_START)));
         const liveAlpha = 1 - bakeAlpha;
+        const visibleBorderIndexes = liveAlpha > 0 || sel
+          ? querySpatialIndex(world.borderSpatialIndex, world.borders, viewMinX, viewMinY, viewMaxX, viewMaxY)
+          : [];
         if (globalBake && bakeAlpha > 0) {
           ctx.save();
           ctx.globalAlpha = bakeAlpha;
@@ -773,19 +825,14 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         if (sel || (flashRef.current && Date.now() < flashRef.current.until)) {
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
-          const viewMinX = -x / k;
-          const viewMaxX = (w - x) / k;
-          const viewMinY = -y / k;
-          const viewMaxY = (h - y) / k;
-          const isVisible = (bbox) => bbox[2] >= viewMinX && bbox[0] <= viewMaxX && bbox[3] >= viewMinY && bbox[1] <= viewMaxY;
 
           if (sel) {
             ctx.strokeStyle = "rgba(255,255,255,0.85)";
             ctx.lineWidth = Math.max(1.3 / k, 0.045);
             ctx.lineJoin = "round";
             ctx.lineCap = "round";
-            for (const bd of world.borders) {
-              if (!isVisible(bd.bbox)) continue;
+            for (const borderIndex of visibleBorderIndexes) {
+              const bd = world.borders[borderIndex];
               const aIsSel = owners[bd.a] === sel;
               const bIsSel = bd.b !== null && owners[bd.b] === sel;
               if (aIsSel === bIsSel) continue;
@@ -797,7 +844,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
           if (flashRef.current && Date.now() < flashRef.current.until) {
             const region = world.regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
-            if (region && isVisible(region.bbox)) {
+            if (region && region.bbox[2] >= viewMinX && region.bbox[0] <= viewMaxX && region.bbox[3] >= viewMinY && region.bbox[1] <= viewMaxY) {
               ctx.save();
               ctx.shadowColor = "#ffffff";
               ctx.shadowBlur = 8 / k;
