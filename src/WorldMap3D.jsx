@@ -189,38 +189,18 @@ function approxAreaKm2FromRings(rings) {
 }
 
 function getFlagImage(cache, code, onReady) {
-  if (!code) return null;
+  const normalizedCode = String(code || "").trim().toUpperCase();
+  if (!normalizedCode) return null;
 
-  const key = code.toLowerCase();
-  const entry = cache[key];
+  const key = normalizedCode.toLowerCase();
+  const cacheKey = `flag:${key}:w1280`;
+  const entry = cache[cacheKey];
 
   if (entry) {
     if (entry.failed) return null;
     return entry.complete && entry.naturalWidth > 0 ? entry : null;
   }
 
-  const inner = getFlagSvgs()?.[key];
-
-  // Прапори вже вбудовані в App.jsx. Використовуємо їх напряму,
-  // щоб карта не залежала від зовнішнього flagcdn і не втрачала
-  // прапори через CORS/мережеві помилки.
-  if (inner) {
-    const img = new Image();
-    img.onload = () => {
-      img.__flagReady = true;
-      onReady?.();
-    };
-    img.onerror = () => {
-      cache[key] = { failed: true };
-    };
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${inner}</svg>`;
-    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-    cache[key] = img;
-    return null;
-  }
-
-  // Резервний варіант для кодів, яких немає у вбудованому наборі.
   const img = new Image();
   img.crossOrigin = "anonymous";
   img.onload = () => {
@@ -228,10 +208,24 @@ function getFlagImage(cache, code, onReady) {
     onReady?.();
   };
   img.onerror = () => {
-    cache[key] = { failed: true };
+    const inner = getFlagSvgs()?.[key];
+    if (!inner) {
+      cache[cacheKey] = { failed: true };
+      return;
+    }
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${inner}</svg>`;
+    img.onload = () => {
+      img.__flagReady = true;
+      onReady?.();
+    };
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   };
-  img.src = `https://flagcdn.com/h480/${key}.png`;
-  cache[key] = img;
+  const url = `https://flagcdn.com/w1280/${key}.png`;
+  if (normalizedCode === "UA") {
+    console.info("WorldMap3D: UA flag request", { code: normalizedCode, url, expected: "https://flagcdn.com/w1280/ua.png" });
+  }
+  img.src = url;
+  cache[cacheKey] = img;
   return null;
 }
 
@@ -312,12 +306,15 @@ function drawCompass(ctx, cx, cy, r) {
    прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
    поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
 const BAKE_MAX_SIDE = 6144;
+const ADAPTIVE_BAKE_ZOOM = 6;
+const ADAPTIVE_BAKE_DELAY = 200;
+const OWNER_CLUSTER_DISTANCE = 18;
 
 /* Малює всю карту (підкладка → прапори → кордони) в довільний 2D-контекст,
    вже налаштований трансформацією world→pixel; scaleForLines — величина
    для нормалізації товщини ліній (та ж роль, що "k" камери). Використовується
    і для запікання в offscreen canvas, і не використовується щокадру напряму. */
-function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleForLines, onFlagReady) {
+function paintWorld(ctx, world, owners, ownerClusters, regionClusterIndexes, myCode, flagCache, scaleForLines, onFlagReady) {
   const { regions, borders } = world;
 
   ctx.fillStyle = "#1a2836";
@@ -327,7 +324,8 @@ function paintWorld(ctx, world, owners, ownerBBoxes, myCode, flagCache, scaleFor
     const r = regions[i];
     const [minX, minY, maxX, maxY] = r.bbox;
     const owner = owners[i];
-    const bb = ownerBBoxes[owner];
+    const clusters = ownerClusters[owner];
+    const bb = clusters?.[regionClusterIndexes[i]]?.bbox;
     const flag = getFlagImage(flagCache, owner, onFlagReady);
     ctx.save();
     ctx.clip(r.path);
@@ -397,7 +395,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   const canvasRef = useRef(null);
   const worldRef = useRef(null); // { regions, borders, bounds }
   const regionOwnerRef = useRef([]);
-  const ownerBBoxRef = useRef({});
+  const ownerClustersRef = useRef({});
+  const regionClusterIndexesRef = useRef([]);
   const prevCityControlRef = useRef(null);
   const flagCacheRef = useRef({});
   const flashRef = useRef(null);
@@ -414,26 +413,58 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   onSelectRef.current = onSelect;
   const bakedRef = useRef(null); // { canvas, minX, minY, scale }
   const bakeTimerRef = useRef(null);
+  const bakeIdleRef = useRef(null);
   const noisePatternRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
 
   const recomputeOwnersAndBBoxes = (regions, cityControlObj) => {
     const owners = regions.map((r) => ownerForRegion(cityControlObj, r.iso + "|" + r.name, r.iso));
-    const bboxes = {};
-    regions.forEach((r, i) => {
-      const o = owners[i];
-      const [minX, minY, maxX, maxY] = r.bbox;
-      if (!bboxes[o]) bboxes[o] = [minX, minY, maxX, maxY];
-      else {
-        const b = bboxes[o];
-        if (minX < b[0]) b[0] = minX;
-        if (minY < b[1]) b[1] = minY;
-        if (maxX > b[2]) b[2] = maxX;
-        if (maxY > b[3]) b[3] = maxY;
+    const grouped = {};
+    regions.forEach((region, index) => {
+      const owner = owners[index];
+      if (!grouped[owner]) grouped[owner] = [];
+      const [minX, minY, maxX, maxY] = region.bbox;
+      grouped[owner].push({
+        index,
+        area: approxAreaKm2FromRings(region.rings),
+        center: [(minX + maxX) / 2, (minY + maxY) / 2],
+        bbox: region.bbox.slice(),
+      });
+    });
+
+    const clusters = {};
+    const regionClusterIndexes = Array(regions.length).fill(0);
+    Object.entries(grouped).forEach(([owner, entries]) => {
+      const remaining = entries.slice();
+      const ownerClusters = [];
+      while (remaining.length) {
+        remaining.sort((a, b) => b.area - a.area);
+        const anchor = remaining.shift();
+        const cluster = [anchor];
+        for (let i = remaining.length - 1; i >= 0; i--) {
+          const candidate = remaining[i];
+          const distance = Math.hypot(candidate.center[0] - anchor.center[0], candidate.center[1] - anchor.center[1]);
+          if (distance <= OWNER_CLUSTER_DISTANCE) cluster.push(remaining.splice(i, 1)[0]);
+        }
+        const bbox = cluster.reduce(
+          (box, item) => [
+            Math.min(box[0], item.bbox[0]),
+            Math.min(box[1], item.bbox[1]),
+            Math.max(box[2], item.bbox[2]),
+            Math.max(box[3], item.bbox[3]),
+          ],
+          [Infinity, Infinity, -Infinity, -Infinity]
+        );
+        const clusterIndex = ownerClusters.push({ bbox }) - 1;
+        cluster.forEach((item) => {
+          regionClusterIndexes[item.index] = clusterIndex;
+        });
       }
+      clusters[owner] = ownerClusters;
     });
     regionOwnerRef.current = owners;
-    ownerBBoxRef.current = bboxes;
+    ownerClustersRef.current = clusters;
+    regionClusterIndexesRef.current = regionClusterIndexes;
   };
 
   /* Перемальовує всю карту ОДИН РАЗ у фоновий canvas. Викликається лише
@@ -442,15 +473,28 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   const bake = () => {
     const world = worldRef.current;
     if (!world) return;
-    const [minX, minY, maxX, maxY] = world.bounds;
+    const canvasElement = canvasRef.current;
+    const camera = camRef.current;
+    const adaptive = camera.k > ADAPTIVE_BAKE_ZOOM && canvasElement;
+    const width = canvasElement?.clientWidth || 1;
+    const height = canvasElement?.clientHeight || 1;
+    let [minX, minY, maxX, maxY] = world.bounds;
+    if (adaptive) {
+      const marginX = width / camera.k * 0.18;
+      const marginY = height / camera.k * 0.18;
+      minX = Math.max(world.bounds[0], (-camera.x / camera.k) - marginX);
+      maxX = Math.min(world.bounds[2], ((width - camera.x) / camera.k) + marginX);
+      minY = Math.max(world.bounds[1], (-camera.y / camera.k) - marginY);
+      maxY = Math.min(world.bounds[3], ((height - camera.y) / camera.k) + marginY);
+    }
     const spanX = maxX - minX || 1;
     const spanY = maxY - minY || 1;
-    const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY);
+    const requestedScale = adaptive ? camera.k * 2.5 : 1;
+    const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY, Math.max(requestedScale, 1));
 
-    let canvas = bakedRef.current?.canvas;
-    if (!canvas) {
-      canvas = document.createElement("canvas");
-    }
+    const startedAt = performance.now();
+    console.time("WorldMap3D bake");
+    const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(spanX * scale));
     canvas.height = Math.max(1, Math.round(spanY * scale));
     const bctx = canvas.getContext("2d");
@@ -460,21 +504,29 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       bctx,
       world,
       regionOwnerRef.current,
-      ownerBBoxRef.current,
+      ownerClustersRef.current,
+      regionClusterIndexesRef.current,
       myCountryCodeRef.current,
       flagCacheRef.current,
       scale,
-      () => scheduleBake(300), // прапор довантажився вже ПІСЛЯ цього запікання — перезапечемо ще раз
+      () => scheduleBake(300),
     );
 
-    bakedRef.current = { canvas, minX, minY, scale };
+    bakedRef.current = { canvas, minX, minY, scale, adaptive };
+    console.timeEnd("WorldMap3D bake");
+    console.info("WorldMap3D bake result", { adaptive, zoom: camera.k, width: canvas.width, height: canvas.height, ms: Math.round(performance.now() - startedAt) });
   };
 
   const scheduleBake = (delay) => {
     if (bakeTimerRef.current) clearTimeout(bakeTimerRef.current);
     bakeTimerRef.current = setTimeout(() => {
       bakeTimerRef.current = null;
-      bake();
+      const run = () => {
+        bakeIdleRef.current = null;
+        bake();
+      };
+      if (typeof window.requestIdleCallback === "function") bakeIdleRef.current = window.requestIdleCallback(run, { timeout: 500 });
+      else bakeIdleRef.current = setTimeout(run, 0);
     }, delay);
   };
 
@@ -563,6 +615,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     ro.observe(canvas);
 
     const draw = () => {
+      if (document.hidden) {
+        raf = 0;
+        return;
+      }
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
       const dpr = Math.min(2.5, window.devicePixelRatio || 1);
@@ -594,6 +650,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(dk) < 0.002) {
             camRef.current = { ...tgt };
             targetCamRef.current = null;
+            scheduleBake(ADAPTIVE_BAKE_DELAY);
           } else {
             camRef.current = {
               x: camRef.current.x + dx * 0.18,
@@ -735,9 +792,14 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       // завжди в одному положенні — це коректно).
       drawCompass(ctx, 34, 34, 20);
 
-      raf = requestAnimationFrame(draw);
+      if (!document.hidden) raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
+
+    const onVisibilityChange = () => {
+      if (!document.hidden && !raf) raf = requestAnimationFrame(draw);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const posOf = (ev) => {
       const rect = canvas.getBoundingClientRect();
@@ -754,6 +816,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       const wy = (my - y) / k;
       targetCamRef.current = null;
       camRef.current = { k: next, x: mx - wx * next, y: my - wy * next };
+      scheduleBake(ADAPTIVE_BAKE_DELAY);
     };
 
     const onDown = (ev) => {
@@ -778,6 +841,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
           zoomAt(mid.x, mid.y, d / pinchRef.current);
           pinchRef.current = d;
+          scheduleBake(ADAPTIVE_BAKE_DELAY);
         }
         return;
       }
@@ -786,6 +850,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const dy = p.y - dragRef.current.y;
         if (Math.hypot(dx, dy) > 4) dragRef.current.moved = true;
         camRef.current = { ...camRef.current, x: dragRef.current.cx + dx, y: dragRef.current.cy + dy };
+        scheduleBake(ADAPTIVE_BAKE_DELAY);
       }
     };
     const onUp = (ev) => {
@@ -801,6 +866,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       }
       if (pointersRef.current.size === 0) dragRef.current.active = false;
       pinchRef.current = 0;
+      scheduleBake(ADAPTIVE_BAKE_DELAY);
     };
     const onWheel = (ev) => {
       ev.preventDefault();
@@ -817,6 +883,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
     return () => {
       cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       ro.disconnect();
       canvas.removeEventListener("pointerdown", onDown);
       canvas.removeEventListener("pointermove", onMove);
@@ -876,9 +943,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const world = worldRef.current;
     const canvas = canvasRef.current;
     if (!world || !canvas || !loaded) return;
+    let resetTimer = null;
     if (!selected) {
-      targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
-      return;
+      resetTimer = setTimeout(() => {
+        if (!selectedRef.current) targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
+      }, 200);
+      return () => clearTimeout(resetTimer);
     }
     cnSfx.modalOpen();
     const owners = regionOwnerRef.current;
@@ -899,6 +969,10 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const k = Math.min(40, Math.max(0.6, Math.min(w / spanX, h / spanY)));
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     targetCamRef.current = { k, x: w / 2 - cx * k, y: h / 2 - cy * k };
+    scheduleBake(ADAPTIVE_BAKE_DELAY);
+    return () => {
+      if (resetTimer) clearTimeout(resetTimer);
+    };
   }, [selected, loaded]);
 
   const zoomBy = (delta) => {
@@ -911,12 +985,14 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const wx = (w / 2 - x) / k, wy = (h / 2 - y) / k;
     targetCamRef.current = null;
     camRef.current = { k: next, x: w / 2 - wx * next, y: h / 2 - wy * next };
+    scheduleBake(ADAPTIVE_BAKE_DELAY);
   };
   const resetView = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     cnSfx.toggle();
     targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
+    scheduleBake(ADAPTIVE_BAKE_DELAY);
   };
 
   return (
