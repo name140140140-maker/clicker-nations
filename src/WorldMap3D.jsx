@@ -193,7 +193,7 @@ function getFlagImage(cache, code, onReady) {
   if (!normalizedCode) return null;
 
   const key = normalizedCode.toLowerCase();
-  const cacheKey = `flag:${key}:w1280`;
+  const cacheKey = `flag:${key}:w2560`;
   const entry = cache[cacheKey];
 
   if (entry) {
@@ -220,9 +220,9 @@ function getFlagImage(cache, code, onReady) {
     };
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
   };
-  const url = `https://flagcdn.com/w1280/${key}.png`;
+  const url = `https://flagcdn.com/w2560/${key}.png`;
   if (normalizedCode === "UA") {
-    console.info("WorldMap3D: UA flag request", { code: normalizedCode, url, expected: "https://flagcdn.com/w1280/ua.png" });
+    console.info("WorldMap3D: UA flag request", { code: normalizedCode, url, expected: "https://flagcdn.com/w2560/ua.png" });
   }
   img.src = url;
   cache[cacheKey] = img;
@@ -305,9 +305,10 @@ function drawCompass(ctx, cx, cy, r) {
    ОДИН РАЗ (при завантаженні, зміні власника території чи довантаженні
    прапора) — щокадру ми лише показуємо готовий растр, розтягнутий під
    поточний зум, замість перемальовування ~3000 областей 60 разів/сек. */
-const BAKE_MAX_SIDE = 8192;
-const ADAPTIVE_BAKE_ZOOM = 6;
-const ADAPTIVE_BAKE_DELAY = 200;
+const BAKE_MAX_SIDE = 6144;
+const VECTOR_ZOOM = 8;
+const MODE_FADE_START = 7;
+const MODE_FADE_END = 9;
 const INTERNAL_BORDER_FADE_START = 7;
 const INTERNAL_BORDER_FADE_END = 11;
 
@@ -412,10 +413,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
   myCountryCodeRef.current = myCountryCode;
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
-  const bakedRef = useRef(null); // { canvas, minX, minY, scale }
-  const globalBakeRef = useRef(null); // stable low-zoom fallback under adaptive bake
+  const globalBakeRef = useRef(null); // { canvas, minX, minY, scale }
   const bakeTimerRef = useRef(null);
-  const bakeIdleRef = useRef(null);
   const noisePatternRef = useRef(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -482,30 +481,15 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     regionClusterIndexesRef.current = regionClusterIndexes;
   };
 
-  /* Перемальовує всю карту ОДИН РАЗ у фоновий canvas. Викликається лише
-     при завантаженні, зміні власника території чи довантаженні прапора —
-     ніколи щокадру. */
-  const bake = (forceGlobal = false) => {
+  /* Глобальний bake для віддаленого режиму. Живий режим нижче ніколи не
+     читає цей canvas, тому готовий растр не масштабується на великому зумі. */
+  const bake = () => {
     const world = worldRef.current;
     if (!world) return;
-    const canvasElement = canvasRef.current;
-    const camera = camRef.current;
-    const adaptive = !forceGlobal && camera.k > ADAPTIVE_BAKE_ZOOM && canvasElement;
-    const width = canvasElement?.clientWidth || 1;
-    const height = canvasElement?.clientHeight || 1;
     let [minX, minY, maxX, maxY] = world.bounds;
-    if (adaptive) {
-      const marginX = width / camera.k * 0.18;
-      const marginY = height / camera.k * 0.18;
-      minX = Math.max(world.bounds[0], (-camera.x / camera.k) - marginX);
-      maxX = Math.min(world.bounds[2], ((width - camera.x) / camera.k) + marginX);
-      minY = Math.max(world.bounds[1], (-camera.y / camera.k) - marginY);
-      maxY = Math.min(world.bounds[3], ((height - camera.y) / camera.k) + marginY);
-    }
     const spanX = maxX - minX || 1;
     const spanY = maxY - minY || 1;
-    const requestedScale = adaptive ? camera.k * 2.5 : 1;
-    const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY, Math.max(requestedScale, 1));
+    const scale = Math.min(BAKE_MAX_SIDE / spanX, BAKE_MAX_SIDE / spanY);
 
     const startedAt = performance.now();
     console.time("WorldMap3D bake");
@@ -527,24 +511,104 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       () => scheduleBake(300),
     );
 
-    const baked = { canvas, minX, minY, scale, adaptive };
-    bakedRef.current = baked;
-    if (!adaptive) globalBakeRef.current = baked;
+    globalBakeRef.current = { canvas, minX, minY, scale };
     console.timeEnd("WorldMap3D bake");
-    console.info("WorldMap3D bake result", { adaptive, zoom: camera.k, width: canvas.width, height: canvas.height, ms: Math.round(performance.now() - startedAt) });
+    console.info("WorldMap3D global bake result", { width: canvas.width, height: canvas.height, ms: Math.round(performance.now() - startedAt) });
   };
 
   const scheduleBake = (delay) => {
     if (bakeTimerRef.current) clearTimeout(bakeTimerRef.current);
     bakeTimerRef.current = setTimeout(() => {
       bakeTimerRef.current = null;
-      const run = () => {
-        bakeIdleRef.current = null;
-        bake();
-      };
-      if (typeof window.requestIdleCallback === "function") bakeIdleRef.current = window.requestIdleCallback(run, { timeout: 500 });
-      else bakeIdleRef.current = setTimeout(run, 0);
+      bake();
     }, delay);
+  };
+
+  const drawLiveWorld = (ctx, world, owners, k, x, y, width, height) => {
+    const visible = (bbox) => {
+      const [minX, minY, maxX, maxY] = bbox;
+      const viewMinX = -x / k;
+      const viewMaxX = (width - x) / k;
+      const viewMinY = -y / k;
+      const viewMaxY = (height - y) / k;
+      return !(maxX < viewMinX || minX > viewMaxX || maxY < viewMinY || minY > viewMaxY);
+    };
+
+    ctx.save();
+    ctx.transform(k, 0, 0, k, x, y);
+    ctx.fillStyle = "#1a2836";
+    for (const region of world.regions) {
+      if (visible(region.bbox)) ctx.fill(region.path);
+    }
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    for (let i = 0; i < world.regions.length; i++) {
+      const region = world.regions[i];
+      if (!visible(region.bbox)) continue;
+      const [minX, minY, maxX, maxY] = region.bbox;
+      const owner = owners[i];
+      const clusters = ownerClustersRef.current[owner];
+      const cluster = clusters?.[regionClusterIndexesRef.current[i]];
+      const flag = getFlagImage(flagCacheRef.current, owner, () => scheduleBake(300));
+      ctx.save();
+      ctx.clip(region.path);
+      if (flag && cluster) {
+        const [clusterMinX, clusterMinY, clusterMaxX, clusterMaxY] = cluster.bbox;
+        const clusterWidth = clusterMaxX - clusterMinX;
+        const clusterHeight = clusterMaxY - clusterMinY;
+        const flagRatio = flag.naturalWidth / flag.naturalHeight;
+        const clusterRatio = clusterWidth / clusterHeight;
+        let drawWidth = clusterWidth;
+        let drawHeight = clusterHeight;
+        let drawX = clusterMinX;
+        let drawY = clusterMinY;
+        if (flagRatio > clusterRatio) {
+          drawWidth = clusterHeight * flagRatio;
+          drawX -= (drawWidth - clusterWidth) / 2;
+        } else {
+          drawHeight = clusterWidth / flagRatio;
+          drawY -= (drawHeight - clusterHeight) / 2;
+        }
+        ctx.drawImage(flag, drawX, drawY, drawWidth, drawHeight);
+        if (owner === myCodeRef.current) {
+          ctx.fillStyle = "rgba(34,211,238,0.72)";
+          ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+        }
+      } else {
+        ctx.fillStyle = owner === myCodeRef.current ? "#22d3ee" : "#264a63";
+        ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+      }
+      ctx.restore();
+    }
+
+    ctx.setLineDash([]);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (const border of world.borders) {
+      if (border.b === null || owners[border.a] === owners[border.b] || !visible(border.bbox)) continue;
+      ctx.beginPath();
+      border.line.forEach(([lineX, lineY], index) => (index === 0 ? ctx.moveTo(lineX, lineY) : ctx.lineTo(lineX, lineY)));
+      ctx.strokeStyle = "rgba(103,232,249,0.88)";
+      ctx.lineWidth = k > 14 ? 0.42 / k : k > 7 ? 0.52 / k : 0.68 / k;
+      ctx.shadowColor = "rgba(90,210,255,0.28)";
+      ctx.shadowBlur = k > 7 ? 1.8 / k : 1.2 / k;
+      ctx.stroke();
+    }
+
+    const internalOpacity = Math.max(0, Math.min(1, (k - INTERNAL_BORDER_FADE_START) / (INTERNAL_BORDER_FADE_END - INTERNAL_BORDER_FADE_START)));
+    if (internalOpacity > 0) {
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = `rgba(148,163,184,${0.32 * internalOpacity})`;
+      ctx.lineWidth = Math.max(0.48 / k, 0.016);
+      for (const border of world.borders) {
+        if (border.b === null || owners[border.a] !== owners[border.b] || !visible(border.bbox)) continue;
+        ctx.beginPath();
+        border.line.forEach(([lineX, lineY], index) => (index === 0 ? ctx.moveTo(lineX, lineY) : ctx.lineTo(lineX, lineY)));
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   };
 
   /* Завантаження карти — один раз */
@@ -606,10 +670,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Основний цикл малювання: щокадру лише показує вже готовий "запечений"
-     растр під поточний зум/панораму (дешево) + малює тонким вектором
-     тільки те, що дійсно змінюється щокадру: біле виділення й спалах
-     захоплення. */
+    /* Основний цикл малювання: bake для віддаленого режиму та живий вектор
+      з viewport culling для наближення. */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -657,9 +719,8 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       }
 
       const world = worldRef.current;
-      const baked = bakedRef.current;
       const globalBake = globalBakeRef.current;
-      if (world && (baked || globalBake)) {
+      if (world) {
         const tgt = targetCamRef.current;
         if (tgt) {
           const dx = tgt.x - camRef.current.x;
@@ -668,7 +729,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(dk) < 0.002) {
             camRef.current = { ...tgt };
             targetCamRef.current = null;
-            scheduleBake(ADAPTIVE_BAKE_DELAY);
           } else {
             camRef.current = {
               x: camRef.current.x + dx * 0.18,
@@ -682,9 +742,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const owners = regionOwnerRef.current;
         const sel = selectedRef.current;
 
-        // Один-єдиний drawImage замість перемальовування тисяч областей —
-        // це і прибирає лаги. Готовий растр просто розтягується під
-        // поточний зум/панораму.
         const drawBake = (entry) => {
           if (!entry) return;
           const bw = entry.canvas.width / entry.scale;
@@ -695,66 +752,18 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           ctx.imageSmoothingQuality = "high";
           ctx.drawImage(entry.canvas, sx, sy, bw * k, bh * k);
         };
-        // Keep the complete world visible while an adaptive bake is pending.
-        drawBake(globalBake);
-        if (baked !== globalBake) drawBake(baked);
-
-        // Векторний шар кордонів країн:
-        // при medium/high zoom не масштабуємо растрову лінію, а малюємо
-        // оригінальні TopoJSON-дуги безпосередньо в поточний canvas.
-        // Це прибирає "мило" та пікселізацію кордонів при наближенні.
-        if (k > 3.5) {
-          const visMinX = -x / k, visMaxX = (w - x) / k;
-          const visMinY = -y / k, visMaxY = (h - y) / k;
+        const bakeAlpha = Math.max(0, Math.min(1, (MODE_FADE_END - k) / (MODE_FADE_END - MODE_FADE_START)));
+        const liveAlpha = 1 - bakeAlpha;
+        if (globalBake && bakeAlpha > 0) {
           ctx.save();
-          ctx.transform(k, 0, 0, k, x, y);
-          ctx.setLineDash([]);
-          ctx.lineJoin = "round";
-          ctx.lineCap = "round";
-          for (const bd of world.borders) {
-            if (bd.b === null || owners[bd.a] === owners[bd.b]) continue;
-            const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
-            if (bMaxX < visMinX || bMinX > visMaxX || bMaxY < visMinY || bMinY > visMaxY) continue;
-            ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
-            const width = k > 14 ? 0.42 / k : k > 7 ? 0.52 / k : 0.68 / k;
-            ctx.strokeStyle = "rgba(103,232,249,0.88)";
-            ctx.lineWidth = width;
-            ctx.shadowColor = "rgba(90,210,255,0.28)";
-            ctx.shadowBlur = k > 7 ? 1.8 / k : 1.2 / k;
-            ctx.stroke();
-          }
+          ctx.globalAlpha = bakeAlpha;
+          drawBake(globalBake);
           ctx.restore();
         }
-
-        // Внутрішні лінії між областями ОДНІЄЇ країни — живий шар,
-        // з'являється лише при значному наближенні (як у Google Maps:
-        // тонкі, напівпрозорі, суцільні), і рахує тільки бордери,
-        // що реально потрапляють у видиму область екрана — тому лишається
-        // дешевим навіть при тисячах бордерів по всьому світу.
-        const internalBorderOpacity = Math.max(
-          0,
-          Math.min(1, (k - INTERNAL_BORDER_FADE_START) / (INTERNAL_BORDER_FADE_END - INTERNAL_BORDER_FADE_START))
-        );
-        if (internalBorderOpacity > 0) {
-          const visMinX = -x / k, visMaxX = (w - x) / k;
-          const visMinY = -y / k, visMaxY = (h - y) / k;
+        if (liveAlpha > 0) {
           ctx.save();
-          ctx.transform(k, 0, 0, k, x, y);
-          ctx.setLineDash([]);
-          ctx.strokeStyle = `rgba(148,163,184,${0.32 * internalBorderOpacity})`;
-          ctx.lineWidth = Math.max(0.48 / k, 0.016);
-          ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-          for (const bd of world.borders) {
-            if (bd.b === null || owners[bd.a] !== owners[bd.b]) continue;
-            const [bMinX, bMinY, bMaxX, bMaxY] = bd.bbox;
-            if (bMaxX < visMinX || bMinX > visMaxX || bMaxY < visMinY || bMinY > visMaxY) continue;
-            ctx.beginPath();
-            bd.line.forEach(([lx, ly], i) => (i === 0 ? ctx.moveTo(lx, ly) : ctx.lineTo(lx, ly)));
-            ctx.stroke();
-          }
-          ctx.setLineDash([]);
+          ctx.globalAlpha = liveAlpha;
+          drawLiveWorld(ctx, world, owners, k, x, y, w, h);
           ctx.restore();
         }
 
@@ -764,13 +773,19 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         if (sel || (flashRef.current && Date.now() < flashRef.current.until)) {
           ctx.save();
           ctx.transform(k, 0, 0, k, x, y);
+          const viewMinX = -x / k;
+          const viewMaxX = (w - x) / k;
+          const viewMinY = -y / k;
+          const viewMaxY = (h - y) / k;
+          const isVisible = (bbox) => bbox[2] >= viewMinX && bbox[0] <= viewMaxX && bbox[3] >= viewMinY && bbox[1] <= viewMaxY;
 
           if (sel) {
             ctx.strokeStyle = "rgba(255,255,255,0.85)";
             ctx.lineWidth = Math.max(1.3 / k, 0.045);
             ctx.lineJoin = "round";
-  ctx.lineCap = "round";
+            ctx.lineCap = "round";
             for (const bd of world.borders) {
+              if (!isVisible(bd.bbox)) continue;
               const aIsSel = owners[bd.a] === sel;
               const bIsSel = bd.b !== null && owners[bd.b] === sel;
               if (aIsSel === bIsSel) continue;
@@ -782,7 +797,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
           if (flashRef.current && Date.now() < flashRef.current.until) {
             const region = world.regions.find((r) => r.iso + "|" + r.name === flashRef.current.key);
-            if (region) {
+            if (region && isVisible(region.bbox)) {
               ctx.save();
               ctx.shadowColor = "#ffffff";
               ctx.shadowBlur = 8 / k;
@@ -844,7 +859,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       const wy = (my - y) / k;
       targetCamRef.current = null;
       camRef.current = { k: next, x: mx - wx * next, y: my - wy * next };
-      scheduleBake(ADAPTIVE_BAKE_DELAY);
     };
 
     const onDown = (ev) => {
@@ -869,7 +883,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
           const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
           zoomAt(mid.x, mid.y, d / pinchRef.current);
           pinchRef.current = d;
-          scheduleBake(ADAPTIVE_BAKE_DELAY);
         }
         return;
       }
@@ -878,7 +891,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
         const dy = p.y - dragRef.current.y;
         if (Math.hypot(dx, dy) > 4) dragRef.current.moved = true;
         camRef.current = { ...camRef.current, x: dragRef.current.cx + dx, y: dragRef.current.cy + dy };
-        scheduleBake(ADAPTIVE_BAKE_DELAY);
       }
     };
     const onUp = (ev) => {
@@ -894,7 +906,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
       }
       if (pointersRef.current.size === 0) dragRef.current.active = false;
       pinchRef.current = 0;
-      scheduleBake(ADAPTIVE_BAKE_DELAY);
     };
     const onWheel = (ev) => {
       ev.preventDefault();
@@ -947,8 +958,7 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
 
     recomputeOwnersAndBBoxes(world.regions, cityControl);
     prevCityControlRef.current = { ...(cityControl || {}) };
-    bake(true);
-    scheduleBake(ADAPTIVE_BAKE_DELAY);
+    bake();
 
     if (capturedKey) {
       cnSfx.purchase();
@@ -998,7 +1008,6 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const k = Math.min(40, Math.max(0.6, Math.min(w / spanX, h / spanY)));
     const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
     targetCamRef.current = { k, x: w / 2 - cx * k, y: h / 2 - cy * k };
-    scheduleBake(ADAPTIVE_BAKE_DELAY);
     return () => {
       if (resetTimer) clearTimeout(resetTimer);
     };
@@ -1014,14 +1023,12 @@ export default function WorldMap3D({ selected, onSelect, myCountryCode, cityCont
     const wx = (w / 2 - x) / k, wy = (h / 2 - y) / k;
     targetCamRef.current = null;
     camRef.current = { k: next, x: w / 2 - wx * next, y: h / 2 - wy * next };
-    scheduleBake(ADAPTIVE_BAKE_DELAY);
   };
   const resetView = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     cnSfx.toggle();
     targetCamRef.current = fitCamera(canvas.clientWidth, canvas.clientHeight);
-    scheduleBake(ADAPTIVE_BAKE_DELAY);
   };
 
   return (
