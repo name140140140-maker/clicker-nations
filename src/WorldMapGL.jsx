@@ -1,14 +1,13 @@
 import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
 
 /**
- * WorldMapGL — тестова заміна WorldMap3D.
+ * WorldMapGL — тестовий рендер базової карти MapLibre.
  * Поки що БЕЗ областей: просто базова карта MapLibre, той самий стиль,
  * що на https://maplibre.org/maplibre-gl-js/docs/examples/display-a-map/
  * Мета цього кроку — перевірити сам рендер (zoom/pan/тайли), а не логіку гри.
  */
-export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, onCapture }) {
+export default function WorldMapGL() {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
 
@@ -39,7 +38,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       style={{
         width: "100%",
         height: "100%",
-        minHeight: 420,
+        minHeight: 0,
         borderRadius: 12,
         overflow: "hidden",
       }}
