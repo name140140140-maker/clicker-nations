@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "maplibre-gl/dist/maplibre-gl.css";
-import App from "./App.jsx";
+import App from "./MapTestApp.jsx";
 
 // Telegram Mini App: сказати Telegram, що додаток готовий і розгорнути на весь екран
 if (window.Telegram && window.Telegram.WebApp) {
