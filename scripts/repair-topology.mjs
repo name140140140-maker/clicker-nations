@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { buffer, simplify } from "@turf/turf";
+import { buffer } from "@turf/turf";
 import { topology } from "topojson-server";
 
 const REGIONS_PATH = new URL("../public/data/world-regions.geojson", import.meta.url);
@@ -41,15 +41,15 @@ function coordinateCount(geometry) {
 }
 
 function repairFeature(feature) {
+  // ВАЖЛИВО: тут раніше був ще один simplify() з tolerance 0.02 ПІСЛЯ
+  // ремонту геометрії. Він спрощував кожну область окремо, незалежно від
+  // сусідніх — і саме це ламало спільні кордони, які CGAZ + mapshaper
+  // (у fetch-regions.mjs) вже акуратно узгодили. Вхідні дані тепер і так
+  // легкі (стиснуті на етапі fetch:regions), тому тут лишаємо тільки
+  // "ремонт" биті форм, без повторного спрощення.
   try {
     const repaired = buffer(feature, 0);
-    if (!hasValidGeometry(repaired)) return feature;
-    const simplified = simplify({ ...feature, geometry: repaired.geometry }, {
-      tolerance: 0.02,
-      highQuality: false,
-      mutate: false,
-    });
-    return hasValidGeometry(simplified) ? { ...feature, geometry: simplified.geometry } : feature;
+    return hasValidGeometry(repaired) ? { ...feature, geometry: repaired.geometry } : feature;
   } catch {
     return feature;
   }
