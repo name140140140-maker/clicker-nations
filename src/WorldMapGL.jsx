@@ -73,6 +73,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           type: "geojson",
           data: geojson,
           promoteId: "cn_key",
+          buffer: 512,
         });
 
         map.addLayer({
