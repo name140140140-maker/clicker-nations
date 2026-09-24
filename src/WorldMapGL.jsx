@@ -28,6 +28,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     const map = new maplibregl.Map({
       container: containerRef.current,
+      antialias: true,
       style: {
         version: 8,
         sources: {},
