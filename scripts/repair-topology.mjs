@@ -55,6 +55,12 @@ function isPolarRing(ring) {
   return minLatitude <= -89 && maxLatitude <= -84;
 }
 
+function normalizePolygonRingWinding(polygon) {
+  if (!Array.isArray(polygon) || polygon.length === 0) return polygon;
+  const rewound = rewind({ type: "Polygon", coordinates: polygon }, { reverse: false });
+  return rewound.coordinates;
+}
+
 function splitAntarcticaPolarRing(feature) {
   const isAntarctica = feature.properties?.iso === "AQ" || feature.properties?.cn_region_iso === "AQ";
   if (!isAntarctica || !feature.geometry) return feature;
@@ -68,18 +74,22 @@ function splitAntarcticaPolarRing(feature) {
 
   const splitPolygons = [];
   for (const polygon of polygons) {
-    const polarRing = polygon.find((ring) => isPolarRing(ring));
-    if (!polarRing) {
-      splitPolygons.push(polygon);
+    const ringsWithArea = polygon.map((ring) => ({ ring, area: signedArea(ring) }));
+    const exterior = ringsWithArea.reduce((largest, current) => Math.abs(current.area) > Math.abs(largest.area) ? current : largest, ringsWithArea[0]);
+    const sameSignPolarRing = ringsWithArea.find(
+      ({ ring, area }) => ring !== exterior.ring && isPolarRing(ring) && Math.sign(area) === Math.sign(exterior.area),
+    );
+
+    if (!sameSignPolarRing) {
+      splitPolygons.push(normalizePolygonRingWinding(polygon));
       continue;
     }
 
-    const rings = polygon.filter((ring) => ring !== polarRing);
-    const polarPolygon = [polarRing];
-    if (rings.length > 0) {
-      splitPolygons.push(...rings.map((ring) => [ring]));
+    const remainingRings = polygon.filter((ring) => ring !== sameSignPolarRing.ring);
+    if (remainingRings.length > 0) {
+      splitPolygons.push(normalizePolygonRingWinding(remainingRings));
     }
-    splitPolygons.push(polarPolygon);
+    splitPolygons.push(normalizePolygonRingWinding([sameSignPolarRing.ring]));
   }
 
   return {
@@ -100,12 +110,13 @@ function repairFeature(feature) {
   // легкі (стиснуті на етапі fetch:regions), тому тут лишаємо тільки
   // "ремонт" биті форм, без повторного спрощення.
   try {
+    const isAntarctica = feature.properties?.iso === "AQ" || feature.properties?.cn_region_iso === "AQ";
     const rewound = rewind(feature, { reverse: false });
     const normalizedBeforeBuffer = splitAntarcticaPolarRing(rewound);
     const buffered = buffer(rewind(normalizedBeforeBuffer, { reverse: false }), 0);
     const afterBuffer = rewind(buffered, { reverse: false });
     const normalizedAfterBuffer = splitAntarcticaPolarRing(afterBuffer);
-    const repaired = rewind(normalizedAfterBuffer, { reverse: false });
+    const repaired = isAntarctica ? normalizedAfterBuffer : rewind(normalizedAfterBuffer, { reverse: false });
     return hasValidGeometry(repaired) ? { ...feature, geometry: repaired.geometry } : feature;
   } catch {
     return feature;
