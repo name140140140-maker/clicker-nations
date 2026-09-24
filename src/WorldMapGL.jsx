@@ -83,6 +83,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           paint: {
             "fill-color": COLOR_OTHER, // початкове значення, одразу оновиться ефектом нижче
             "fill-opacity": 0.85,
+            "fill-antialias": false,
           },
         });
 
