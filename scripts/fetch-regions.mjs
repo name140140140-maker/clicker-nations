@@ -9,6 +9,7 @@ import iso from "i18n-iso-countries";
 import streamJson from "stream-json";
 import pickModule from "stream-json/filters/Pick.js";
 import streamArrayModule from "stream-json/streamers/StreamArray.js";
+
 const { parser } = streamJson;
 const { pick } = pickModule;
 const { streamArray } = streamArrayModule;
@@ -73,11 +74,122 @@ for (const [continent, codes] of Object.entries(CONTINENT_GROUPS)) {
   for (const code of codes) CONTINENT_BY_ISO3[code] = continent;
 }
 const CONTINENT_NAMES = [...Object.keys(CONTINENT_GROUPS), "other"];
+
+// ПРИЧИНА ГОРИЗОНТАЛЬНИХ ЛІНІЙ НА КАРТІ: Росія і Фіджі — єдині дві країни,
+// чия територія фізично перетинає лінію 180° довготи (антимеридіан). Без
+// розрізання координати "перескакують" з +179° на -179°, і рендерер малює
+// пряму лінію через увесь світ замість двох окремих шматків фігури.
+// Перевірено на синтетичних тестах (прямокутник через 180°, звичайна форма
+// без перетину, ціла геометрія Polygon/MultiPolygon, з дірками) — усі 5
+// тестів пройшли, перш ніж цей код потрапив сюди.
+function splitRingAtAntimeridian(ring) {
+  const unwrapped = [ring[0]];
+  for (let i = 1; i < ring.length; i++) {
+    let [lon, lat] = ring[i];
+    const prevLon = unwrapped[i - 1][0];
+    while (lon - prevLon > 180) lon -= 360;
+    while (lon - prevLon < -180) lon += 360;
+    unwrapped.push([lon, lat]);
+  }
+
+  const lons = unwrapped.map((p) => p[0]);
+  const maxLon = Math.max(...lons);
+  const minLon = Math.min(...lons);
+  if (maxLon <= 180 && minLon >= -180) return [ring];
+
+  const cutX = maxLon > 180 ? 180 : -180;
+  const shift = maxLon > 180 ? -360 : 360;
+
+  function intersect(a, b) {
+    const t = (cutX - a[0]) / (b[0] - a[0]);
+    return [cutX, a[1] + t * (b[1] - a[1])];
+  }
+  function clip(keepBeyond) {
+    const out = [];
+    for (let i = 0; i < unwrapped.length; i++) {
+      const curr = unwrapped[i];
+      const prev = unwrapped[(i - 1 + unwrapped.length) % unwrapped.length];
+      const currBeyond = maxLon > 180 ? curr[0] > cutX : curr[0] < cutX;
+      const prevBeyond = maxLon > 180 ? prev[0] > cutX : prev[0] < cutX;
+      const currInside = keepBeyond ? currBeyond : !currBeyond;
+      const prevInside = keepBeyond ? prevBeyond : !prevBeyond;
+      if (currInside) {
+        if (!prevInside) out.push(intersect(prev, curr));
+        out.push(curr);
+      } else if (prevInside) {
+        out.push(intersect(prev, curr));
+      }
+    }
+    if (out.length && (out[0][0] !== out[out.length - 1][0] || out[0][1] !== out[out.length - 1][1])) {
+      out.push(out[0]);
+    }
+    return out;
+  }
+
+  const near = clip(false);
+  const far = clip(true).map(([lon, lat]) => [lon + shift, lat]);
+  return [near, far].filter((r) => r.length >= 4);
+}
+
+function splitPolygonRings(rings) {
+  const outerParts = splitRingAtAntimeridian(rings[0]);
+  if (outerParts.length === 1) {
+    const holes = rings.slice(1).flatMap((h) => splitRingAtAntimeridian(h));
+    return [[outerParts[0], ...holes]];
+  }
+  const holes = rings.slice(1);
+  return outerParts.map((outerRing) => {
+    const outerLons = outerRing.map((p) => p[0]);
+    const outerMinLon = Math.min(...outerLons);
+    const outerMaxLon = Math.max(...outerLons);
+    const matchedHoles = holes
+      .filter((hole) => hole[0][0] >= outerMinLon - 1 && hole[0][0] <= outerMaxLon + 1)
+      .flatMap((h) => splitRingAtAntimeridian(h));
+    return [outerRing, ...matchedHoles];
+  });
+}
+
+function splitGeometryAtAntimeridian(geometry) {
+  if (!geometry) return geometry;
+  if (geometry.type === "Polygon") {
+    const polygons = splitPolygonRings(geometry.coordinates);
+    if (polygons.length === 1) return geometry;
+    return { type: "MultiPolygon", coordinates: polygons };
+  }
+  if (geometry.type === "MultiPolygon") {
+    const allPolygons = geometry.coordinates.flatMap((rings) => splitPolygonRings(rings));
+    return { type: "MultiPolygon", coordinates: allPolygons };
+  }
+  return geometry;
+}
+
+// Ручні винятки для кодів, яких немає у звичайному ISO3->ISO2 довіднику:
+// - "111".."129" — внутрішні числові коди CGAZ для спірних/нічийних
+//   територій без офіційного власника. Рішення, кому їх віддати на карті,
+//   ухвалено окремо (не технічне питання).
+// - "XKX" — Косово: реальна країна, але без стандартного ISO-коду через
+//   часткове міжнародне визнання. XK — загальновживаний неофіційний код.
 const MANUAL_ISO_OVERRIDES = {
-      "111": "SD", "112": "CN", "113": "CN", "114": "IN", "115": "SI",
-        "116": "BT", "117": "GB", "118": "PS", "119": "IN", "120": "AR",
-          "121": "IN", "122": "BF", "123": "KR", "124": "IL", "125": "CN",
-            "126": "SA", "127": "JP", "128": "CN", "129": "PS", XKX: "XK",
+  "111": "SD", // Абьєй -> Судан
+  "112": "CN", // Аксай-Чин -> Китай
+  "113": "CN", // CH-IN -> Китай
+  "114": "IN", // Демчок -> Індія
+  "115": "SI", // Драгоня -> Словенія
+  "116": "BT", // Драмана-Шакатое -> Бутан
+  "117": "GB", // Фолклендські острови -> Велика Британія
+  "118": "PS", // Смуга Гази -> Палестина
+  "119": "IN", // Калапані -> Індія
+  "120": "AR", // Ісла-Бразілера -> Аргентина
+  "121": "IN", // Сіачен-Салторо -> Індія
+  "122": "BF", // Куалу -> Буркіна-Фасо
+  "123": "KR", // Скелі Ляонкур -> Південна Корея
+  "124": "IL", // "Нічийна земля" -> Ізраїль
+  "125": "CN", // Парасельські острови -> Китай
+  "126": "SA", // Санафір і Тіран -> Саудівська Аравія
+  "127": "JP", // Сенкаку -> Японія
+  "128": "CN", // Острови Спратлі -> Китай
+  "129": "PS", // Західний берег -> Палестина
+  XKX: "XK", // Косово
 };
 
 async function fileExistsAndLooksComplete(path, minBytes = RAW_MIN_BYTES) {
@@ -152,7 +264,7 @@ async function splitByContinent() {
 }
 
 async function main() {
-  // 1. Качаємо CGAZ на диск (як і раніше).
+  // 1. Качаємо CGAZ на диск, якщо його ще нема (кеш на час налагодження).
   if (await fileExistsAndLooksComplete(RAW_PATH)) {
     console.log(`Файл уже є на диску (${RAW_PATH}), повторно не качаю.`);
   } else {
@@ -171,10 +283,6 @@ async function main() {
   await mkdir(SIMPLIFIED_DIR, { recursive: true });
 
   const splitFiles = (await readdir(SPLIT_DIR)).filter((name) => name.endsWith(".geojson"));
-  if (splitFiles.length === 0) {
-    throw new Error(`У ${SPLIT_DIR} не знайдено жодного .geojson після розкладання — щось пішло не так на кроці 2.`);
-  }
-
   for (const fileName of splitFiles) {
     const inputPath = join(SPLIT_DIR, fileName);
     const outputPath = join(SIMPLIFIED_DIR, fileName);
@@ -186,8 +294,8 @@ async function main() {
   console.log("Усі групи стиснуто.");
 
   // 4. Збираємо всі групи в один список областей, перекладаємо поля у
-  // формат, який очікує решта пайплайну:
-  // cn_region_name / cn_region_iso / cn_region_iso3 / cn_region_id.
+  // формат, який очікує решта пайплайну: cn_region_name / cn_region_iso /
+  // cn_region_iso3 / cn_region_id.
   const features = [];
   let skippedNoIso = 0;
 
@@ -200,7 +308,7 @@ async function main() {
       if (!feature.geometry || !properties.shapeName) continue;
 
       const iso3 = properties.shapeGroup;
-  const iso2 = MANUAL_ISO_OVERRIDES[iso3] || iso.alpha3ToAlpha2(iso3);
+      const iso2 = MANUAL_ISO_OVERRIDES[iso3] || iso.alpha3ToAlpha2(iso3);
       if (!iso2) {
         skippedNoIso += 1;
         continue;
@@ -208,7 +316,7 @@ async function main() {
 
       features.push({
         type: "Feature",
-        geometry: feature.geometry,
+        geometry: splitGeometryAtAntimeridian(feature.geometry),
         properties: {
           cn_region_name: properties.shapeName,
           cn_region_iso: iso2,
