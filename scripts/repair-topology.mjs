@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { buffer } from "@turf/turf";
+import { buffer, rewind } from "@turf/turf";
 import { topology } from "topojson-server";
 
 const REGIONS_PATH = new URL("../public/data/world-regions.geojson", import.meta.url);
@@ -40,6 +40,58 @@ function coordinateCount(geometry) {
   return count(geometry.coordinates);
 }
 
+function signedArea(ring) {
+  let area = 0;
+  for (let index = 0; index < ring.length - 1; index += 1) {
+    area += ring[index][0] * ring[index + 1][1] - ring[index + 1][0] * ring[index][1];
+  }
+  return area / 2;
+}
+
+function isPolarRing(ring) {
+  const latitudes = ring.map((coordinate) => coordinate[1]);
+  const minLatitude = Math.min(...latitudes);
+  const maxLatitude = Math.max(...latitudes);
+  return minLatitude <= -89 && maxLatitude <= -84;
+}
+
+function splitAntarcticaPolarRing(feature) {
+  const isAntarctica = feature.properties?.iso === "AQ" || feature.properties?.cn_region_iso === "AQ";
+  if (!isAntarctica || !feature.geometry) return feature;
+
+  const polygons = feature.geometry.type === "Polygon"
+    ? [feature.geometry.coordinates]
+    : feature.geometry.type === "MultiPolygon"
+      ? feature.geometry.coordinates
+      : null;
+  if (!polygons) return feature;
+
+  const splitPolygons = [];
+  for (const polygon of polygons) {
+    const polarRing = polygon.find((ring) => isPolarRing(ring));
+    if (!polarRing) {
+      splitPolygons.push(polygon);
+      continue;
+    }
+
+    const rings = polygon.filter((ring) => ring !== polarRing);
+    const polarPolygon = [polarRing];
+    if (rings.length > 0) {
+      splitPolygons.push(...rings.map((ring) => [ring]));
+    }
+    splitPolygons.push(polarPolygon);
+  }
+
+  return {
+    ...feature,
+    geometry: {
+      ...feature.geometry,
+      type: "MultiPolygon",
+      coordinates: splitPolygons,
+    },
+  };
+}
+
 function repairFeature(feature) {
   // ВАЖЛИВО: тут раніше був ще один simplify() з tolerance 0.02 ПІСЛЯ
   // ремонту геометрії. Він спрощував кожну область окремо, незалежно від
@@ -48,7 +100,12 @@ function repairFeature(feature) {
   // легкі (стиснуті на етапі fetch:regions), тому тут лишаємо тільки
   // "ремонт" биті форм, без повторного спрощення.
   try {
-    const repaired = buffer(feature, 0);
+    const rewound = rewind(feature, { reverse: false });
+    const normalizedBeforeBuffer = splitAntarcticaPolarRing(rewound);
+    const buffered = buffer(rewind(normalizedBeforeBuffer, { reverse: false }), 0);
+    const afterBuffer = rewind(buffered, { reverse: false });
+    const normalizedAfterBuffer = splitAntarcticaPolarRing(afterBuffer);
+    const repaired = rewind(normalizedAfterBuffer, { reverse: false });
     return hasValidGeometry(repaired) ? { ...feature, geometry: repaired.geometry } : feature;
   } catch {
     return feature;
