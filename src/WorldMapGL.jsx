@@ -85,10 +85,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             "fill-opacity": 0.85,
             "fill-antialias": false,
           },
-          layout: {
-            "fill-sort-key": 0,
-            "fill-rule": "evenodd",
-          },
         });
 
         map.addLayer({
@@ -138,11 +134,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     const cc = cityControl || {};
     map.setPaintProperty("regions-fill", "fill-color", [
       "case",
-      [
-        "==",
-        ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]],
-        myCountryCode || "",
-      ],
+      ["==", ["get", "iso"], myCountryCode || ""],
       COLOR_MINE,
       COLOR_OTHER,
     ]);
