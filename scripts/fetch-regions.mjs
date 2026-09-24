@@ -131,10 +131,23 @@ function splitRingAtAntimeridian(ring) {
   return [near, far].filter((r) => r.length >= 4);
 }
 
+// Антарктида (код AQ) в даних CGAZ охоплює довготу від -180° до +180° повним
+// колом навколо Південного полюса (перевірено на реальних даних гри) — таку
+// форму звичайне розрізання "по одному перетину" ламає. Тому кільця, що
+// повністю лежать біля полюса (|широта| > 60°), розрізанням не чіпаємо.
+const POLAR_LAT_THRESHOLD = 60;
+function isEntirelyPolar(ring) {
+  return ring.every(([, lat]) => Math.abs(lat) > POLAR_LAT_THRESHOLD);
+}
+function splitRingSafe(ring) {
+  if (isEntirelyPolar(ring)) return [ring];
+  return splitRingAtAntimeridian(ring);
+}
+
 function splitPolygonRings(rings) {
-  const outerParts = splitRingAtAntimeridian(rings[0]);
+  const outerParts = splitRingSafe(rings[0]);
   if (outerParts.length === 1) {
-    const holes = rings.slice(1).flatMap((h) => splitRingAtAntimeridian(h));
+    const holes = rings.slice(1).flatMap((h) => splitRingSafe(h));
     return [[outerParts[0], ...holes]];
   }
   const holes = rings.slice(1);
@@ -144,7 +157,7 @@ function splitPolygonRings(rings) {
     const outerMaxLon = Math.max(...outerLons);
     const matchedHoles = holes
       .filter((hole) => hole[0][0] >= outerMinLon - 1 && hole[0][0] <= outerMaxLon + 1)
-      .flatMap((h) => splitRingAtAntimeridian(h));
+      .flatMap((h) => splitRingSafe(h));
     return [outerRing, ...matchedHoles];
   });
 }
