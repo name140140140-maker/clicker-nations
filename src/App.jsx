@@ -56,7 +56,7 @@ import {
   Image as ImageIcon,
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
-import WorldMap3D from "./WorldMap3D";
+import WorldMap3D from "./WorldMapGL";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
