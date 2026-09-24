@@ -85,6 +85,10 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             "fill-opacity": 0.85,
             "fill-antialias": false,
           },
+          layout: {
+            "fill-sort-key": 0,
+            "fill-rule": "evenodd",
+          },
         });
 
         map.addLayer({

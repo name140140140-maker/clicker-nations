@@ -74,22 +74,20 @@ function splitAntarcticaPolarRing(feature) {
 
   const splitPolygons = [];
   for (const polygon of polygons) {
-    const ringsWithArea = polygon.map((ring) => ({ ring, area: signedArea(ring) }));
-    const exterior = ringsWithArea.reduce((largest, current) => Math.abs(current.area) > Math.abs(largest.area) ? current : largest, ringsWithArea[0]);
-    const sameSignPolarRing = ringsWithArea.find(
-      ({ ring, area }) => ring !== exterior.ring && isPolarRing(ring) && Math.sign(area) === Math.sign(exterior.area),
-    );
-
-    if (!sameSignPolarRing) {
+    const polarRings = polygon.filter((ring) => isPolarRing(ring));
+    if (polarRings.length === 0) {
       splitPolygons.push(normalizePolygonRingWinding(polygon));
       continue;
     }
 
-    const remainingRings = polygon.filter((ring) => ring !== sameSignPolarRing.ring);
-    if (remainingRings.length > 0) {
-      splitPolygons.push(normalizePolygonRingWinding(remainingRings));
+    const nonPolarRings = polygon.filter((ring) => !isPolarRing(ring));
+    if (nonPolarRings.length > 0) {
+      splitPolygons.push(normalizePolygonRingWinding(nonPolarRings));
     }
-    splitPolygons.push(normalizePolygonRingWinding([sameSignPolarRing.ring]));
+
+    polarRings.forEach((ring) => {
+      splitPolygons.push(normalizePolygonRingWinding([ring]));
+    });
   }
 
   return {
