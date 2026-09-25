@@ -79,10 +79,19 @@ const CONTINENT_NAMES = [...Object.keys(CONTINENT_GROUPS), "other"];
 // чия територія фізично перетинає лінію 180° довготи (антимеридіан). Без
 // розрізання координати "перескакують" з +179° на -179°, і рендерер малює
 // пряму лінію через увесь світ замість двох окремих шматків фігури.
-// Перевірено на синтетичних тестах (прямокутник через 180°, звичайна форма
-// без перетину, ціла геометрія Polygon/MultiPolygon, з дірками) — усі 5
-// тестів пройшли, перш ніж цей код потрапив сюди.
-function splitRingAtAntimeridian(ring) {
+//
+// ВАЖЛИВО: Антарктида (код AQ) в даних CGAZ охоплює довготу від -180° до
+// +180° ПОВНИМ КОЛОМ навколо Південного полюса (перевірено на реальних
+// даних гри) — таку форму звичайне розрізання "по одному перетину" ламає.
+// Перша спроба відрізнити Антарктиду від Чукотки/Фіджі за широтою (>60°)
+// виявилась неправильною: Чукотка (східна Росія) теж лежить вище 60° і
+// через це помилково пропускалась, тому лінія й повернулась саме для Росії.
+// Правильна ознака — не ШИРОТА, а яку ЧАСТКУ ДОВГОТИ охоплює форма після
+// "розгортання": Антарктида займає майже повне коло (~360°), звичайна
+// країна, що перетинає антимеридіан, — лише невеликий шматок (< 60°).
+// Перевірено на тестах: Чукотка (висока широта, звичайний перетин) далі
+// розрізається; Антарктида (повне коло) — ні; Фіджі й Україна не зламані.
+function unwrapRing(ring) {
   const unwrapped = [ring[0]];
   for (let i = 1; i < ring.length; i++) {
     let [lon, lat] = ring[i];
@@ -91,12 +100,10 @@ function splitRingAtAntimeridian(ring) {
     while (lon - prevLon < -180) lon += 360;
     unwrapped.push([lon, lat]);
   }
+  return unwrapped;
+}
 
-  const lons = unwrapped.map((p) => p[0]);
-  const maxLon = Math.max(...lons);
-  const minLon = Math.min(...lons);
-  if (maxLon <= 180 && minLon >= -180) return [ring];
-
+function cutUnwrappedRing(unwrapped, maxLon) {
   const cutX = maxLon > 180 ? 180 : -180;
   const shift = maxLon > 180 ? -360 : 360;
 
@@ -131,17 +138,21 @@ function splitRingAtAntimeridian(ring) {
   return [near, far].filter((r) => r.length >= 4);
 }
 
-// Антарктида (код AQ) в даних CGAZ охоплює довготу від -180° до +180° повним
-// колом навколо Південного полюса (перевірено на реальних даних гри) — таку
-// форму звичайне розрізання "по одному перетину" ламає. Тому кільця, що
-// повністю лежать біля полюса (|широта| > 60°), розрізанням не чіпаємо.
-const POLAR_LAT_THRESHOLD = 60;
-function isEntirelyPolar(ring) {
-  return ring.every(([, lat]) => Math.abs(lat) > POLAR_LAT_THRESHOLD);
-}
+const CIRCUMPOLAR_SPAN_THRESHOLD = 300; // градусів довготи
+
 function splitRingSafe(ring) {
-  if (isEntirelyPolar(ring)) return [ring];
-  return splitRingAtAntimeridian(ring);
+  const unwrapped = unwrapRing(ring);
+  const lons = unwrapped.map((p) => p[0]);
+  const maxLon = Math.max(...lons);
+  const minLon = Math.min(...lons);
+
+  if (maxLon - minLon >= CIRCUMPOLAR_SPAN_THRESHOLD) {
+    return [ring]; // форма огортає полюс по колу (Антарктида) — не розрізаємо
+  }
+  if (maxLon <= 180 && minLon >= -180) {
+    return [ring]; // не перетинає антимеридіан взагалі
+  }
+  return cutUnwrappedRing(unwrapped, maxLon);
 }
 
 function splitPolygonRings(rings) {
