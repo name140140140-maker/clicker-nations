@@ -12,10 +12,11 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 const TOPOLOGY_URL = "/data/world-topology.json";
 
-const COLOR_MINE = "#22d3ee";
-const COLOR_OTHER = "#2c4256";
-const COLOR_BG = "#0b1420";
-const COLOR_SELECTED_LINE = "#eaf2f6";
+const COLOR_WATER = "#7ec9e8";
+const COLOR_LAND_NEUTRAL = "#7fb069";
+const COLOR_MINE = "#f4b942";
+const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
+const COLOR_SELECTED_LINE = "#1f2d3d";
 
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl }) {
   const containerRef = useRef(null);
@@ -28,11 +29,11 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      antialias: true,
+      antialias: true, // прибирає тонкі "шви" між внутрішніми тайлами GeoJSON-джерела
       style: {
         version: 8,
         sources: {},
-        layers: [{ id: "bg", type: "background", paint: { "background-color": COLOR_BG } }],
+        layers: [{ id: "bg", type: "background", paint: { "background-color": COLOR_WATER } }],
       },
       center: [20, 35],
       zoom: 1.3,
@@ -81,9 +82,8 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           type: "fill",
           source: "regions",
           paint: {
-            "fill-color": COLOR_OTHER, // початкове значення, одразу оновиться ефектом нижче
+            "fill-color": COLOR_LAND_NEUTRAL, // початкове значення, одразу оновиться ефектом нижче
             "fill-opacity": 0.85,
-            "fill-antialias": false,
           },
         });
 
@@ -92,7 +92,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           type: "line",
           source: "regions",
           paint: {
-            "line-color": COLOR_BG,
+            "line-color": COLOR_BORDER,
             "line-width": 0.4,
           },
         });
@@ -131,12 +131,15 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     const map = mapRef.current;
     if (!map || status !== "ready" || !map.getLayer("regions-fill")) return;
 
-    const cc = cityControl || {};
     map.setPaintProperty("regions-fill", "fill-color", [
       "case",
-      ["==", ["get", "iso"], myCountryCode || ""],
+      [
+        "==",
+        ["coalesce", ["get", ["get", "cn_key"], ["literal", cityControl || {}]], ["get", "iso"]],
+        myCountryCode || "",
+      ],
       COLOR_MINE,
-      COLOR_OTHER,
+      COLOR_LAND_NEUTRAL,
     ]);
   }, [status, myCountryCode, cityControl]);
 
@@ -155,7 +158,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       "case",
       ["==", ["get", "iso"], selected || ""],
       COLOR_SELECTED_LINE,
-      COLOR_BG,
+      COLOR_BORDER,
     ]);
   }, [status, selected]);
 
@@ -172,7 +175,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             justifyContent: "center",
             color: "#7f97a6",
             fontSize: 13,
-            background: COLOR_BG,
+            background: COLOR_WATER,
             borderRadius: 12,
           }}
         >
@@ -189,7 +192,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             justifyContent: "center",
             color: "#f87171",
             fontSize: 13,
-            background: COLOR_BG,
+            background: COLOR_WATER,
             borderRadius: 12,
             padding: 16,
             textAlign: "center",
