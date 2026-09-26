@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import * as topojson from "topojson-client";
+import { getFlagSvgs } from "./App";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 // Крок 2 плану: реальна геометрія + реальне володіння (мій/чужий), клік
@@ -19,10 +20,31 @@ const COLOR_LAND_NEUTRAL = "#7fb069";
 const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
+const FLAG_FILL_OPACITY = 0.58;
+const FLAG_TEXTURE_SIZE = 128;
+
+function rasterizeFlag(innerSvg) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = FLAG_TEXTURE_SIZE;
+      canvas.height = FLAG_TEXTURE_SIZE;
+      const context = canvas.getContext("2d");
+      if (!context) return resolve(null);
+      context.drawImage(image, 0, 0, FLAG_TEXTURE_SIZE, FLAG_TEXTURE_SIZE);
+      resolve(context.getImageData(0, 0, FLAG_TEXTURE_SIZE, FLAG_TEXTURE_SIZE));
+    };
+    image.onerror = () => resolve(null);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
+    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  });
+}
 
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
+  const flagImageIdsRef = useRef([]);
   const [status, setStatus] = useState("loading"); // loading | ready | error
 
   // 1. Ініціалізація карти один раз.
@@ -136,6 +158,33 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           data: countriesGeojson,
         });
 
+        const flagSvgs = getFlagSvgs();
+        const flagCodes = Object.keys(geometriesByIso).filter((iso) => flagSvgs[iso.toLowerCase()]);
+        const flagImages = await Promise.all(
+          flagCodes.map(async (iso) => [iso, await rasterizeFlag(flagSvgs[iso.toLowerCase()])]),
+        );
+        if (!map.getSource("countries")) return;
+        map.addImage("flag-empty", { width: 1, height: 1, data: new Uint8Array(4) });
+        const flagPatternMatch = ["match", ["get", "iso"]];
+        flagImages.forEach(([iso, image]) => {
+          if (!image) return;
+          const imageId = `flag-${iso.toLowerCase()}`;
+          map.addImage(imageId, image);
+          flagImageIdsRef.current.push([iso, imageId]);
+        });
+        flagImageIdsRef.current.forEach(([iso, imageId]) => flagPatternMatch.push(iso, imageId));
+        flagPatternMatch.push("flag-empty");
+
+        map.addLayer({
+          id: "regions-flag-fill",
+          type: "fill",
+          source: "regions",
+          paint: {
+            "fill-pattern": flagPatternMatch,
+            "fill-opacity": FLAG_FILL_OPACITY,
+          },
+        }, "regions-line");
+
         map.addLayer({
           id: "countries-line",
           type: "line",
@@ -192,6 +241,12 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       COLOR_MINE,
       COLOR_LAND_NEUTRAL,
     ]);
+
+    const owner = ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]];
+    const flagPatternMatch = ["match", owner];
+    flagImageIdsRef.current.forEach(([iso, imageId]) => flagPatternMatch.push(iso, imageId));
+    flagPatternMatch.push("flag-empty");
+    map.setPaintProperty("regions-flag-fill", "fill-pattern", flagPatternMatch);
   }, [status, myCountryCode, cityControl]);
 
   // 3. Підсвічуємо контур вибраної країни. Робимо це на шарі countries-line
