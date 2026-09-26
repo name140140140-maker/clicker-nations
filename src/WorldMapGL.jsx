@@ -11,6 +11,9 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // прилітає з сервера через cityControl, а не вирішується тут, у карті.
 
 const TOPOLOGY_URL = "/data/world-topology.json";
+const COUNTRIES_URL = "/data/world-countries.geojson";
+const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
+const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
 
 const COLOR_WATER = "#7ec9e8";
 const COLOR_LAND_NEUTRAL = "#7fb069";
@@ -54,9 +57,14 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     map.on("load", async () => {
       try {
-        const response = await fetch(TOPOLOGY_URL);
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        const topology = await response.json();
+        const [regionsResponse, countriesResponse] = await Promise.all([
+          fetch(TOPOLOGY_URL),
+          fetch(COUNTRIES_URL),
+        ]);
+        if (!regionsResponse.ok) throw new Error(`${regionsResponse.status} ${regionsResponse.statusText}`);
+        if (!countriesResponse.ok) throw new Error(`${countriesResponse.status} ${countriesResponse.statusText}`);
+        const topology = await regionsResponse.json();
+        const countriesGeojson = await countriesResponse.json();
 
         const objectName = Object.keys(topology.objects)[0];
         const geojson = topojson.feature(topology, topology.objects[objectName]);
@@ -94,6 +102,37 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           paint: {
             "line-color": COLOR_BORDER,
             "line-width": 0.4,
+            // Межі областей з'являються поступово, тільки коли наблизились —
+            // здалеку показуємо лише суцільні контури країн (шар нижче).
+            "line-opacity": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              REGION_LINES_MIN_ZOOM,
+              0,
+              REGION_LINES_FULL_ZOOM,
+              1,
+            ],
+          },
+        });
+
+        // Другий шар даних: суцільні контури країн (218 форм, без внутрішніх
+        // меж областей). Завжди видимі, незалежно від зуму — на відміну від
+        // regions-line вище.
+        map.addSource("countries", {
+          type: "geojson",
+          data: countriesGeojson,
+          buffer: 512,
+        });
+
+        map.addLayer({
+          id: "countries-line",
+          type: "line",
+          source: "countries",
+          paint: {
+            "line-color": COLOR_SELECTED_LINE,
+            "line-width": 1.1,
+            "line-opacity": 0.55,
           },
         });
 
@@ -131,11 +170,12 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     const map = mapRef.current;
     if (!map || status !== "ready" || !map.getLayer("regions-fill")) return;
 
+    const cc = cityControl || {};
     map.setPaintProperty("regions-fill", "fill-color", [
       "case",
       [
         "==",
-        ["coalesce", ["get", ["get", "cn_key"], ["literal", cityControl || {}]], ["get", "iso"]],
+        ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]],
         myCountryCode || "",
       ],
       COLOR_MINE,
@@ -143,22 +183,25 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     ]);
   }, [status, myCountryCode, cityControl]);
 
-  // 3. Підсвічуємо контур вибраної країни.
+  // 3. Підсвічуємо контур вибраної країни. Робимо це на шарі countries-line
+  // (завжди видимий), а не regions-line — інакше підсвітка губилась би на
+  // віддаленні, коли межі областей ще не показані.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || status !== "ready" || !map.getLayer("regions-line")) return;
+    if (!map || status !== "ready" || !map.getLayer("countries-line")) return;
 
-    map.setPaintProperty("regions-line", "line-width", [
+    map.setPaintProperty("countries-line", "line-width", [
       "case",
-      ["==", ["get", "iso"], selected || ""],
-      1.6,
-      0.4,
+      ["==", ["get", "cn_region_iso"], selected || ""],
+      2.4,
+      1.1,
     ]);
-    map.setPaintProperty("regions-line", "line-color", [
+    map.setPaintProperty("countries-line", "line-color", COLOR_SELECTED_LINE);
+    map.setPaintProperty("countries-line", "line-opacity", [
       "case",
-      ["==", ["get", "iso"], selected || ""],
-      COLOR_SELECTED_LINE,
-      COLOR_BORDER,
+      ["==", ["get", "cn_region_iso"], selected || ""],
+      1,
+      0.55,
     ]);
   }, [status, selected]);
 
