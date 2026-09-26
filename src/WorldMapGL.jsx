@@ -11,7 +11,6 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // прилітає з сервера через cityControl, а не вирішується тут, у карті.
 
 const TOPOLOGY_URL = "/data/world-topology.json";
-const COUNTRIES_URL = "/data/world-countries.geojson";
 const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
 const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
 
@@ -57,17 +56,13 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     map.on("load", async () => {
       try {
-        const [regionsResponse, countriesResponse] = await Promise.all([
-          fetch(TOPOLOGY_URL),
-          fetch(COUNTRIES_URL),
-        ]);
-        if (!regionsResponse.ok) throw new Error(`${regionsResponse.status} ${regionsResponse.statusText}`);
-        if (!countriesResponse.ok) throw new Error(`${countriesResponse.status} ${countriesResponse.statusText}`);
-        const topology = await regionsResponse.json();
-        const countriesGeojson = await countriesResponse.json();
+        const response = await fetch(TOPOLOGY_URL);
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const topology = await response.json();
 
         const objectName = Object.keys(topology.objects)[0];
-        const geojson = topojson.feature(topology, topology.objects[objectName]);
+        const topoObject = topology.objects[objectName];
+        const geojson = topojson.feature(topology, topoObject);
 
         // Стабільний id на регіон = той самий ключ, яким уже користується
         // cityControl у грі ("КОД_КРАЇНИ|Назва області") — щоб не вигадувати
@@ -82,7 +77,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           type: "geojson",
           data: geojson,
           promoteId: "cn_key",
-          buffer: 512,
         });
 
         map.addLayer({
@@ -116,13 +110,30 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Другий шар даних: суцільні контури країн (218 форм, без внутрішніх
-        // меж областей). Завжди видимі, незалежно від зуму — на відміну від
-        // regions-line вище.
+        // Другий шар даних: суцільні контури країн — БЕЗ окремого важкого
+        // файлу (попередня версія тягла ще +14 МБ world-countries.geojson,
+        // саме це, найімовірніше, спричиняло фрізи й вильоти на слабких
+        // телефонах). Замість цього "склеюємо" області в контур країни
+        // прямо в браузері, з тих самих даних, що вже завантажені —
+        // topojson.merge() робить це швидко (одноразово, при завантаженні).
+        const geometriesByIso = {};
+        for (const geom of topoObject.geometries) {
+          const iso = geom.properties?.iso;
+          if (!iso) continue;
+          (geometriesByIso[iso] ??= []).push(geom);
+        }
+        const countriesGeojson = {
+          type: "FeatureCollection",
+          features: Object.entries(geometriesByIso).map(([iso, geoms]) => ({
+            type: "Feature",
+            properties: { iso },
+            geometry: topojson.merge(topology, geoms),
+          })),
+        };
+
         map.addSource("countries", {
           type: "geojson",
           data: countriesGeojson,
-          buffer: 512,
         });
 
         map.addLayer({
@@ -192,14 +203,14 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     map.setPaintProperty("countries-line", "line-width", [
       "case",
-      ["==", ["get", "cn_region_iso"], selected || ""],
+      ["==", ["get", "iso"], selected || ""],
       2.4,
       1.1,
     ]);
     map.setPaintProperty("countries-line", "line-color", COLOR_SELECTED_LINE);
     map.setPaintProperty("countries-line", "line-opacity", [
       "case",
-      ["==", ["get", "cn_region_iso"], selected || ""],
+      ["==", ["get", "iso"], selected || ""],
       1,
       0.55,
     ]);
