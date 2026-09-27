@@ -9,45 +9,41 @@ import "maplibre-gl/dist/maplibre-gl.css";
 //
 // ПРО ПРАПОРИ (важлива історія, щоб не наступити на ті самі граблі):
 // раніше прапори малювались вручну в окремому HTML <canvas> поверх карти
-// (project() кожної вершини + clip + drawImage на кожен moveend/zoomend,
-// потім навіть на кожен кадр через requestAnimationFrame). Це виявилось
-// принципово крихким: (1) наївний project() ламався на країнах, що
-// перетинають лінію зміни дат (Росія/США/Фіджі/Нова Зеландія/Кірибаті/
-// Антарктида) — контур перетворювався на лінію через увесь світ; (2)
-// навіть після виправлення цього прапори все одно "відривались" від
-// контуру під час активного pan/zoom, бо перемальовка в JS ніколи не
-// гарантовано встигає точно за рендером самої карти.
+// (project() кожної вершини + clip + drawImage на кожен moveend/zoomend
+// або й кожен кадр) — принципово крихко: (1) наївний project() ламався на
+// країнах через лінію зміни дат; (2) прапори "відривались" від контуру
+// під час активного pan/zoom, бо перемальовка в JS не встигала за
+// рендером карти.
 //
-// Натомість тепер прапори — це НАТИВНІ шари MapLibre: рендеримо offscreen
-// canvas (прапор, обрізаний точно по контуру території, з прозорістю
-// зовні) і додаємо як image-джерело, прив'язане до 4 географічних кутів
-// свого bounding box, плюс raster-шар поверх нього. Далі MapLibre сам
-// перепроєктує цю картинку щокадру разом з рештою карти (так само, як він
-// це вже робить із самими контурами країн) — жодного JS-коду на
-// pan/zoom/resize більше не потрібно, тому відрив чи розсинхронізація
-// стають неможливими в принципі.
+// Далі прапори стали нативними шарами MapLibre (image source + raster
+// layer), АЛЕ по одному шару на кожен шматок кожного власника території —
+// це сотні окремих джерел/шарів, і додавання/оновлення кожного має свою
+// вагу (текстура на GPU тощо). При частих захопленнях (перебудова кожні
+// ~300 мс) і при першому завантаженні (сотні шарів одразу) це й дало
+// відчутні лаги.
 //
-// ПРО ЗАХОПЛЕННЯ ОБЛАСТЕЙ: прапор прив'язаний не до статичного політичного
-// контуру країни, а до ПОТОЧНОГО ВЛАСНИКА території. Області одного й
-// того самого поточного власника, що межують одна з одною, об'єднуються в
-// один "кластер" — і саме кластер отримує один прапор-растр (обрізаний по
-// об'єднаному контуру кластера). Тому коли гравець захоплює сусідню
-// область іншої країни, там з'являється прапор загарбника, і він росте
-// разом із захопленою територією.
+// ТЕПЕР: ОДИН спільний "атлас" — persistent offscreen-canvas на ввесь світ
+// (з невеликим буфером довготи праворуч для країн, що перетинають лінію
+// зміни дат: Росія/США/Фіджі/Кірибаті/Нова Зеландія/Антарктида). Кожен
+// прапор кожного власника малюється (обрізаний по контуру, як і раніше)
+// прямо в цей спільний canvas, а в кінці — ОДИН toDataURL і ОДИН
+// image-source + ОДИН raster-layer на всю карту. При зміні cityControl
+// повторно перемальовуємо той самий canvas і оновлюємо ЦЕЙ ЖЕ source
+// (source.updateImage), а не створюємо нові шари — тому захоплення
+// території більше не смикає продуктивність карти.
 //
-// ПРО ШВИДКІСТЬ ЗАВАНТАЖЕННЯ: карта стає інтерактивною одразу після того,
-// як побудовані межі країн/областей (setStatus("ready")) — прапори
-// (сотні offscreen-рендерів) домальовуються ПІСЛЯ цього, фоново, вже
-// поверх готової карти, а не перед показом. Саме запікання розбите на
-// невеликі пачки з очікуванням наступного кадру (`requestAnimationFrame`)
-// між ними, щоб не морозити інтерфейс одним довгим синхронним проходом.
-// Прогрес-бар на початковому екрані показує реальний прогрес завантаження
-// байтів topology.json (найважча мережева частина), а не фейковий спінер.
+// ЗАВАНТАЖЕННЯ: карта показується користувачу лише коли справді все
+// готово (топологія + прапори + перше запікання) — жодного "відкрито, але
+// лагає". Прогрес-бар на екрані завантаження — реальний, зважений по всіх
+// етапах (байти topology.json → завантаження SVG прапорів → запікання
+// атласу), і сам процес розбитий на пачки з передачею кадру браузеру між
+// ними, щоб інтерфейс лишався живим (крутиться спінер, рухається бар),
+// а не завис одним довгим синхронним проходом.
 const TOPOLOGY_URL = "/data/world-topology.json";
 const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
 const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
 const FLAG_REBAKE_DEBOUNCE_MS = 300; // не перебудовувати прапори частіше, ніж раз на цей інтервал
-const FLAG_BAKE_BATCH_SIZE = 12; // скільки кластерів запікати за один прохід перед тим, як віддати кадр браузеру
+const FLAG_BAKE_BATCH_SIZE = 24; // скільки кластерів запікати за один прохід перед тим, як віддати кадр браузеру
 
 const COLOR_WATER = "#7ec9e8";
 const COLOR_LAND_NEUTRAL = "#7fb069";
@@ -55,14 +51,37 @@ const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
-const FLAG_RASTER_MAX_DIM = 192; // максимальний розмір offscreen-canvas для одного шматка суші (px)
+const FLAG_SOURCE_ID = "flags-world";
+const FLAG_LAYER_ID = "flags-world-layer";
+
+// Спільний "атлас"-canvas охоплює довготу [-180, 200] (буфер +20° праворуч
+// для розгорнутих координат країн через лінію зміни дат — див.
+// unwrapAntimeridian нижче) і всю широту [-90, 90].
+const WORLD_LNG_MIN = -180;
+const WORLD_LNG_MAX = 200;
+const WORLD_LAT_MIN = -90;
+const WORLD_LAT_MAX = 90;
+const WORLD_CANVAS_WIDTH = 2048;
+const WORLD_CANVAS_HEIGHT = 1024;
+const WORLD_IMAGE_CORNERS = [
+  [WORLD_LNG_MIN, WORLD_LAT_MAX],
+  [WORLD_LNG_MAX, WORLD_LAT_MAX],
+  [WORLD_LNG_MAX, WORLD_LAT_MIN],
+  [WORLD_LNG_MIN, WORLD_LAT_MIN],
+];
+
+function worldToPixel([lng, lat]) {
+  return [
+    ((lng - WORLD_LNG_MIN) / (WORLD_LNG_MAX - WORLD_LNG_MIN)) * WORLD_CANVAS_WIDTH,
+    ((WORLD_LAT_MAX - lat) / (WORLD_LAT_MAX - WORLD_LAT_MIN)) * WORLD_CANVAS_HEIGHT,
+  ];
+}
 
 // Розбиває Polygon/MultiPolygon на окремі частини (материк, острови,
-// ексклави) — кожна частина потім рендериться й позиціонується під СВІЙ
-// власний bounding box, а не під один спільний для всієї території. Без
-// цього розкидані по карті шматки (острови, заморські території, а тепер
-// і не суміжні шматки одного власника) розтягували один прапор на
-// проміжки океану/чужої землі між ними.
+// ексклави) — кожна частина потім малюється під СВІЙ власний bounding
+// box, а не під один спільний для всієї території. Без цього розкидані по
+// карті шматки (острови, заморські території, не суміжні шматки одного
+// власника) розтягували один прапор на проміжки океану/чужої землі.
 function toParts(geometry) {
   if (geometry.type === "Polygon") return [geometry.coordinates];
   if (geometry.type === "MultiPolygon") return geometry.coordinates;
@@ -73,7 +92,8 @@ function toParts(geometry) {
 // Антарктида) фізично перетинають лінію зміни дат (довгота ±180°). Без
 // цієї корекції координати по різні боки лінії дають bounding box шириною
 // у весь світ. Зсуваємо "невигідну" половину точок на +360°, щоб контур
-// лишався компактним прямокутником у довготі.
+// лишався компактним прямокутником у довготі (звідси й буфер WORLD_LNG_MAX
+// вище — щоб розгорнуті координати влізли в спільний атлас).
 function unwrapAntimeridian(rings) {
   let min = Infinity;
   let max = -Infinity;
@@ -106,11 +126,12 @@ function loadFlagImage(innerSvg) {
   });
 }
 
-// Рендерить один шматок території (rings у географічних координатах) в
-// offscreen canvas: прапор, обрізаний точно по контуру, з прозорістю
-// зовні. Повертає PNG data URL і 4 географічні кути bounding box (для
-// image-джерела MapLibre) — або null, якщо шматок вироджений.
-function buildFlagRaster(image, rings) {
+// Малює один шматок території (rings у географічних координатах) прямо в
+// СПІЛЬНИЙ атлас-canvas: прапор, обрізаний точно по контуру. На відміну
+// від попередньої версії тут немає власного canvas і власного toDataURL
+// на кожен шматок — усе йде в один и той самий контекст, кодується в PNG
+// рівно один раз, після того як усі прапори вже намальовані.
+function drawClusterFlag(ctx, image, rings) {
   let minLng = Infinity;
   let minLat = Infinity;
   let maxLng = -Infinity;
@@ -123,46 +144,31 @@ function buildFlagRaster(image, rings) {
       if (lat > maxLat) maxLat = lat;
     }
   }
-  const lngSpan = maxLng - minLng;
-  const latSpan = maxLat - minLat;
-  if (!(lngSpan > 1e-5) || !(latSpan > 1e-5)) return null;
+  if (!(maxLng - minLng > 1e-5) || !(maxLat - minLat > 1e-5)) return;
 
-  const scale = FLAG_RASTER_MAX_DIM / Math.max(lngSpan, latSpan);
-  const width = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(lngSpan * scale)));
-  const height = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(latSpan * scale)));
+  const [boxX0, boxY0] = worldToPixel([minLng, maxLat]);
+  const [boxX1, boxY1] = worldToPixel([maxLng, minLat]);
+  const boxX = Math.min(boxX0, boxX1);
+  const boxY = Math.min(boxY0, boxY1);
+  const boxW = Math.abs(boxX1 - boxX0);
+  const boxH = Math.abs(boxY1 - boxY0);
+  if (boxW < 0.5 || boxH < 0.5) return;
 
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-
-  const toXY = ([lng, lat]) => [((lng - minLng) / lngSpan) * width, ((maxLat - lat) / latSpan) * height];
-
+  ctx.save();
   ctx.beginPath();
   for (const ring of rings) {
     if (!ring.length) continue;
-    const [x0, y0] = toXY(ring[0]);
+    const [x0, y0] = worldToPixel(ring[0]);
     ctx.moveTo(x0, y0);
     for (let i = 1; i < ring.length; i++) {
-      const [x, y] = toXY(ring[i]);
+      const [x, y] = worldToPixel(ring[i]);
       ctx.lineTo(x, y);
     }
     ctx.closePath();
   }
   ctx.clip();
-  ctx.drawImage(image, 0, 0, width, height);
-
-  return {
-    dataUrl: canvas.toDataURL("image/png"),
-    // За годинниковою стрілкою, починаючи з верхнього лівого кута — саме
-    // так їх очікує image-джерело MapLibre.
-    coordinates: [
-      [minLng, maxLat],
-      [maxLng, maxLat],
-      [maxLng, minLat],
-      [minLng, minLat],
-    ],
-  };
+  ctx.drawImage(image, boxX, boxY, boxW, boxH);
+  ctx.restore();
 }
 
 // Суміжність областей рахується по топології один раз: якщо арку
@@ -236,8 +242,9 @@ function computeOwnerClusters(regionMeta, adjacency, cityControl) {
 }
 
 // Чекає на наступний кадр рендеру — використовуємо між пачками важкої
-// роботи (запікання прапорів), щоб віддати керування браузеру й не
-// заморожувати інтерфейс одним довгим синхронним проходом.
+// роботи, щоб віддати керування браузеру й не заморожувати інтерфейс
+// одним довгим синхронним проходом (і щоб спінер/прогрес-бар справді
+// рухались, а не "замерзали" на екрані завантаження).
 function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
@@ -273,13 +280,16 @@ async function fetchJsonWithProgress(url, onProgress) {
   return JSON.parse(await blob.text());
 }
 
+// Ваги етапів для суцільного прогрес-бару на екрані завантаження — сума
+// дає 1. Підібрано приблизно по тому, скільки часу займає кожен етап.
+const STAGE_WEIGHTS = { topology: 0.5, flagImages: 0.2, flagBake: 0.3 };
+
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, flagSvgs }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const [status, setStatus] = useState("loading"); // loading | ready | error
-  const [loadProgress, setLoadProgress] = useState(0); // 0..1, лише для початкового екрана
+  const [loadProgress, setLoadProgress] = useState(0); // 0..1, сумарний прогрес усіх етапів
   const [loadStage, setLoadStage] = useState("Завантажуємо карту світу…");
-  const [flagBakeProgress, setFlagBakeProgress] = useState(null); // { done, total, phase } | null — фонова доробка прапорів
 
   // Наповнюються один раз при завантаженні топології, читаються при
   // кожній перебудові прапорів — тримаємо в ref, щоб не тягнути їх у
@@ -288,8 +298,8 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const regionMetaRef = useRef(null); // [{ iso, cnKey, geometry }]
   const adjacencyRef = useRef(null); // Map(regionIndex -> Set(regionIndex))
   const flagImageCacheRef = useRef(new Map()); // iso(lowercase) -> завантажений Image
-  const activeFlagLayersRef = useRef([]); // [{ sourceId, layerId }] — що зараз додано на карту
-  const flagGenerationRef = useRef(0); // лічильник перебудов — для унікальних id джерел/шарів і скасування застарілих перебудов
+  const worldCanvasRef = useRef(null); // persistent offscreen-canvas — атлас усіх прапорів
+  const flagGenerationRef = useRef(0); // лічильник перебудов — скасовує застарілі фонові перебудови
   const rebakeTimerRef = useRef(null);
   const flagsReadyRef = useRef(false); // true після першого успішного запікання
 
@@ -328,14 +338,12 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     mapRef.current = map;
 
-    // Замінює всі поточні прапори-шари на нові, побудовані під актуальний
-    // cityControl. Викликається один раз одразу після першого завантаження
-    // прапорів-зображень і далі з дебаунсом при кожній зміні захоплення
-    // (окремий ефект нижче). Розбито на пачки (FLAG_BAKE_BATCH_SIZE
-    // кластерів за прохід) з очікуванням кадру між ними — не блокує
-    // інтерфейс, і скасовується сама (перевірка generation), якщо поки
-    // малювала, встигла запуститись новіша перебудова.
-    async function rebuildFlagLayers(cityControlSnapshot) {
+    // Перемальовує спільний атлас-canvas під актуальний cityControl і
+    // оновлює ОДИН image-source (без створення нових шарів). Розбито на
+    // пачки (FLAG_BAKE_BATCH_SIZE кластерів за прохід) з очікуванням
+    // кадру між ними; скасовує сама себе (перевірка generation), якщо
+    // тим часом уже запущена новіша перебудова.
+    async function rebuildFlagLayers(cityControlSnapshot, onBatchProgress) {
       const topology = topologyRef.current;
       const regionMeta = regionMetaRef.current;
       const adjacency = adjacencyRef.current;
@@ -343,71 +351,72 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
       const generation = ++flagGenerationRef.current;
       const clusters = computeOwnerClusters(regionMeta, adjacency, cityControlSnapshot);
-      const nextLayers = [];
 
-      setFlagBakeProgress({ done: 0, total: clusters.length, phase: "bake" });
+      let canvas = worldCanvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement("canvas");
+        canvas.width = WORLD_CANVAS_WIDTH;
+        canvas.height = WORLD_CANVAS_HEIGHT;
+        worldCanvasRef.current = canvas;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (let start = 0; start < clusters.length; start += FLAG_BAKE_BATCH_SIZE) {
         if (flagGenerationRef.current !== generation) return; // новіша перебудова вже запущена — цю кидаємо
 
         const batch = clusters.slice(start, start + FLAG_BAKE_BATCH_SIZE);
-        batch.forEach((cluster, offset) => {
-          const clusterIndex = start + offset;
+        for (const cluster of batch) {
           const image = flagImageCacheRef.current.get(String(cluster.owner || "").toLowerCase());
-          if (!image) return; // немає прапора для цього власника — просто не малюємо (колір заливки лишається)
+          if (!image) continue; // немає прапора для цього власника — просто не малюємо (колір заливки лишається)
 
           const geometries = cluster.members.map((idx) => regionMeta[idx].geometry);
           const merged = topojson.merge(topology, geometries);
           const parts = toParts(merged).map(unwrapAntimeridian);
+          for (const rings of parts) {
+            if (rings.length) drawClusterFlag(ctx, image, rings);
+          }
+        }
 
-          parts.forEach((rings, partIndex) => {
-            if (!rings.length) return;
-            const raster = buildFlagRaster(image, rings);
-            if (!raster) return;
-            const sourceId = `flag-${generation}-${clusterIndex}-${partIndex}`;
-            const layerId = `${sourceId}-layer`;
-            map.addSource(sourceId, {
-              type: "image",
-              url: raster.dataUrl,
-              coordinates: raster.coordinates,
-            });
-            map.addLayer({
-              id: layerId,
-              type: "raster",
-              source: sourceId,
-              paint: {
-                "raster-opacity": FLAG_FILL_OPACITY,
-                "raster-fade-duration": 0,
-              },
-            });
-            nextLayers.push({ sourceId, layerId });
-          });
-        });
-
-        setFlagBakeProgress({ done: Math.min(start + FLAG_BAKE_BATCH_SIZE, clusters.length), total: clusters.length, phase: "bake" });
+        onBatchProgress?.(Math.min(start + FLAG_BAKE_BATCH_SIZE, clusters.length), clusters.length);
         await nextFrame();
       }
 
-      if (flagGenerationRef.current !== generation) return; // ще одна перевірка перед заміною шарів
+      if (flagGenerationRef.current !== generation) return; // ще одна перевірка перед публікацією
 
-      // Прибираємо шари/джерела з попереднього запікання — територія
-      // могла змінитись, старі кластери вже неактуальні. Нові id завжди
-      // унікальні (лічильник generation), тому порядок remove/add не важливий.
-      for (const { sourceId, layerId } of activeFlagLayersRef.current) {
-        if (map.getLayer(layerId)) map.removeLayer(layerId);
-        if (map.getSource(sourceId)) map.removeSource(sourceId);
+      const dataUrl = canvas.toDataURL("image/png");
+      const existingSource = map.getSource(FLAG_SOURCE_ID);
+      if (existingSource && typeof existingSource.updateImage === "function") {
+        existingSource.updateImage({ url: dataUrl });
+      } else {
+        if (map.getLayer(FLAG_LAYER_ID)) map.removeLayer(FLAG_LAYER_ID);
+        if (map.getSource(FLAG_SOURCE_ID)) map.removeSource(FLAG_SOURCE_ID);
+        map.addSource(FLAG_SOURCE_ID, {
+          type: "image",
+          url: dataUrl,
+          coordinates: WORLD_IMAGE_CORNERS,
+        });
+        map.addLayer({
+          id: FLAG_LAYER_ID,
+          type: "raster",
+          source: FLAG_SOURCE_ID,
+          paint: {
+            "raster-opacity": FLAG_FILL_OPACITY,
+            "raster-fade-duration": 0,
+          },
+        });
       }
-      activeFlagLayersRef.current = nextLayers;
-      setFlagBakeProgress(null); // готово — ховаємо індикатор
     }
 
     map.on("load", async () => {
       try {
         setLoadStage("Завантажуємо карту світу…");
-        const topology = await fetchJsonWithProgress(TOPOLOGY_URL, (fraction) => setLoadProgress(fraction * 0.85));
+        const topology = await fetchJsonWithProgress(TOPOLOGY_URL, (fraction) =>
+          setLoadProgress(fraction * STAGE_WEIGHTS.topology),
+        );
         topologyRef.current = topology;
-        setLoadProgress(0.9);
         setLoadStage("Малюємо кордони…");
+        setLoadProgress(STAGE_WEIGHTS.topology);
 
         const objectName = Object.keys(topology.objects)[0];
         const topoObject = topology.objects[objectName];
@@ -520,18 +529,17 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           map.getCanvas().style.cursor = "";
         });
 
-        // Карта вже повністю інтерактивна — не чекаємо на прапори, щоб
-        // це показати. Прапори (найважча частина — сотні offscreen-
-        // рендерів) домальовуються нижче, вже фоново, поверх готової карти.
-        setLoadProgress(1);
-        setStatus("ready");
-
+        // Прапори: спершу завантажуємо КОЖЕН доступний прапор у Image
+        // (кешуємо назавжди — самі прапори не змінюються, змінюються лише
+        // кластери територій, якими вони обрізаються), а тоді робимо
+        // перше запікання спільного атласу. Карта показується користувачу
+        // тільки ПІСЛЯ цього — без "відкрито, але лагає".
         if (flagSvgs) {
-          const isoLowerList = Object.entries(flagSvgs);
-          setFlagBakeProgress({ done: 0, total: isoLowerList.length, phase: "images" });
+          setLoadStage("Завантажуємо прапори…");
+          const entries = Object.entries(flagSvgs);
           let loadedCount = 0;
           await Promise.all(
-            isoLowerList.map(async ([isoLower, svg]) => {
+            entries.map(async ([isoLower, svg]) => {
               try {
                 const image = await loadFlagImage(svg);
                 flagImageCacheRef.current.set(isoLower, image);
@@ -539,12 +547,19 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
                 // Один битий прапор не повинен ламати решту карти.
               }
               loadedCount += 1;
-              setFlagBakeProgress({ done: loadedCount, total: isoLowerList.length, phase: "images" });
+              setLoadProgress(STAGE_WEIGHTS.topology + (loadedCount / entries.length) * STAGE_WEIGHTS.flagImages);
             }),
           );
+
+          setLoadStage("Малюємо прапори на карті…");
+          await rebuildFlagLayers(cityControl, (done, total) => {
+            setLoadProgress(STAGE_WEIGHTS.topology + STAGE_WEIGHTS.flagImages + (done / total) * STAGE_WEIGHTS.flagBake);
+          });
           flagsReadyRef.current = true;
-          await rebuildFlagLayers(cityControl);
         }
+
+        setLoadProgress(1);
+        setStatus("ready");
       } catch (error) {
         console.error("Не вдалося завантажити карту:", error);
         setStatus("error");
@@ -587,7 +602,9 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
   // 2b. Перебудовуємо прапори-за-власником при кожній зміні cityControl —
   // з дебаунсом, щоб часті ігрові оновлення (кілька захоплень поспіль) не
-  // тригерили перерендер кожного разу окремо.
+  // тригерили перерендер кожного разу окремо. Оновлює той самий шар на
+  // місці (без створення нових) — тому не смикає продуктивність під час
+  // гри.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== "ready" || !flagsReadyRef.current) return;
@@ -625,16 +642,11 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   }, [status, selected]);
 
   const loadPercent = Math.round(loadProgress * 100);
-  const flagBakeLabel =
-    flagBakeProgress?.phase === "images" ? "Завантажуємо прапори" : "Малюємо прапори на карті";
 
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 420 }}>
       <style>{`
-        @keyframes cn-map-pulse {
-          0%, 100% { opacity: 0.4; transform: scale(0.85); }
-          50% { opacity: 1; transform: scale(1.15); }
-        }
+        @keyframes cn-map-spin { to { transform: rotate(360deg); } }
         @keyframes cn-map-shimmer {
           0% { background-position: -120px 0; }
           100% { background-position: 220px 0; }
@@ -657,12 +669,14 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           <div style={{ width: "min(280px, 80%)", textAlign: "center" }}>
             <div
               style={{
-                width: 40,
-                height: 40,
+                width: 42,
+                height: 42,
                 margin: "0 auto 18px",
                 borderRadius: "50%",
-                background: "radial-gradient(circle, #7ec9e8 0%, #1c4a5e 70%)",
-                animation: "cn-map-pulse 1.6s ease-in-out infinite",
+                border: "3px solid rgba(126,201,232,0.2)",
+                borderTopColor: "#7ec9e8",
+                borderRightColor: "#f4b942",
+                animation: "cn-map-spin 0.9s linear infinite",
               }}
             />
             <div style={{ color: "#dfeffb", fontSize: 13, marginBottom: 12, letterSpacing: 0.2 }}>{loadStage}</div>
@@ -690,37 +704,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             </div>
             <div style={{ color: "#9fc4dc", fontSize: 11, marginTop: 8 }}>{loadPercent}%</div>
           </div>
-        </div>
-      )}
-
-      {status === "ready" && flagBakeProgress && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: 10,
-            right: 10,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "5px 10px",
-            borderRadius: 999,
-            background: "rgba(13, 27, 51, 0.72)",
-            color: "#dfeffb",
-            fontSize: 10.5,
-            pointerEvents: "none",
-          }}
-        >
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: "#7ec9e8",
-              animation: "cn-map-pulse 1.2s ease-in-out infinite",
-              flexShrink: 0,
-            }}
-          />
-          {flagBakeLabel} {flagBakeProgress.done}/{flagBakeProgress.total}
         </div>
       )}
 
