@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import * as topojson from "topojson-client";
-import { getFlagSvgs } from "./App";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 // Крок 2 плану: реальна геометрія + реальне володіння (мій/чужий), клік
@@ -20,31 +19,38 @@ const COLOR_LAND_NEUTRAL = "#7fb069";
 const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
-const FLAG_FILL_OPACITY = 0.58;
-const FLAG_TEXTURE_SIZE = 128;
+const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
+const FLAG_IMAGE_SIZE = 64; // px, растеризований прапор
 
-function rasterizeFlag(innerSvg) {
-  return new Promise((resolve) => {
-    const image = new Image();
-    image.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = FLAG_TEXTURE_SIZE;
-      canvas.height = FLAG_TEXTURE_SIZE;
-      const context = canvas.getContext("2d");
-      if (!context) return resolve(null);
-      context.drawImage(image, 0, 0, FLAG_TEXTURE_SIZE, FLAG_TEXTURE_SIZE);
-      resolve(context.getImageData(0, 0, FLAG_TEXTURE_SIZE, FLAG_TEXTURE_SIZE));
-    };
-    image.onerror = () => resolve(null);
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
-    image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-  });
+// MapLibre fill-pattern потребує растрове зображення, а прапори в грі
+// зберігаються як SVG (getFlagSvgs() у App.jsx). Растеризуємо прямо в
+// браузері, одноразово при завантаженні карти — без нового файлу чи
+// білд-кроку.
+async function rasterizeFlag(innerSvg, size = FLAG_IMAGE_SIZE) {
+  const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
+  const blob = new Blob([svgMarkup], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, size, size);
+    return ctx.getImageData(0, 0, size, size);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
-export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl }) {
+export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, flagSvgs }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
-  const flagImageIdsRef = useRef([]);
   const [status, setStatus] = useState("loading"); // loading | ready | error
 
   // 1. Ініціалізація карти один раз.
@@ -111,6 +117,35 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
+        // Прапори всередині контурів, напівпрозоро — колір власника (шар
+        // вище) лишається видимим під прапором, а не замінюється ним.
+        if (flagSvgs) {
+          const uniqueIsos = [...new Set(geojson.features.map((f) => f.properties?.iso).filter(Boolean))];
+          await Promise.all(
+            uniqueIsos.map(async (iso) => {
+              const svg = flagSvgs[iso.toLowerCase()];
+              if (!svg || map.hasImage(iso)) return;
+              try {
+                const imageData = await rasterizeFlag(svg);
+                if (!map.hasImage(iso)) map.addImage(iso, imageData);
+              } catch {
+                // Якщо конкретний прапор не растеризувався — просто лишаємо
+                // ту область без прапора, решта карти працює далі.
+              }
+            }),
+          );
+
+          map.addLayer({
+            id: "regions-flag-pattern",
+            type: "fill",
+            source: "regions",
+            paint: {
+              "fill-pattern": ["get", "iso"], // початково — прапор "домашньої" країни
+              "fill-opacity": FLAG_FILL_OPACITY,
+            },
+          });
+        }
+
         map.addLayer({
           id: "regions-line",
           type: "line",
@@ -158,33 +193,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           data: countriesGeojson,
         });
 
-        const flagSvgs = getFlagSvgs();
-        const flagCodes = Object.keys(geometriesByIso).filter((iso) => flagSvgs[iso.toLowerCase()]);
-        const flagImages = await Promise.all(
-          flagCodes.map(async (iso) => [iso, await rasterizeFlag(flagSvgs[iso.toLowerCase()])]),
-        );
-        if (!map.getSource("countries")) return;
-        map.addImage("flag-empty", { width: 1, height: 1, data: new Uint8Array(4) });
-        const flagPatternMatch = ["match", ["get", "iso"]];
-        flagImages.forEach(([iso, image]) => {
-          if (!image) return;
-          const imageId = `flag-${iso.toLowerCase()}`;
-          map.addImage(imageId, image);
-          flagImageIdsRef.current.push([iso, imageId]);
-        });
-        flagImageIdsRef.current.forEach(([iso, imageId]) => flagPatternMatch.push(iso, imageId));
-        flagPatternMatch.push("flag-empty");
-
-        map.addLayer({
-          id: "regions-flag-fill",
-          type: "fill",
-          source: "regions",
-          paint: {
-            "fill-pattern": flagPatternMatch,
-            "fill-opacity": FLAG_FILL_OPACITY,
-          },
-        }, "regions-line");
-
         map.addLayer({
           id: "countries-line",
           type: "line",
@@ -225,28 +233,27 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   // 2. Перефарбовуємо, коли змінюється myCountryCode або cityControl
   // (хтось щось захопив). cityControl[iso+"|"+name] — поточний власник,
   // якщо область захоплена; якщо запису нема — власник той, чий iso
-  // "від природи" (записаний у самій геометрії).
+  // "від природи" (записаний у самій геометрії). Той самий вираз "хто
+  // власник" використовується і для кольору, і для прапора — якщо область
+  // захоплено, прапор теж має показувати нового власника, не "домашню"
+  // країну.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== "ready" || !map.getLayer("regions-fill")) return;
 
     const cc = cityControl || {};
+    const ownerExpr = ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]];
+
     map.setPaintProperty("regions-fill", "fill-color", [
       "case",
-      [
-        "==",
-        ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]],
-        myCountryCode || "",
-      ],
+      ["==", ownerExpr, myCountryCode || ""],
       COLOR_MINE,
       COLOR_LAND_NEUTRAL,
     ]);
 
-    const owner = ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]];
-    const flagPatternMatch = ["match", owner];
-    flagImageIdsRef.current.forEach(([iso, imageId]) => flagPatternMatch.push(iso, imageId));
-    flagPatternMatch.push("flag-empty");
-    map.setPaintProperty("regions-flag-fill", "fill-pattern", flagPatternMatch);
+    if (map.getLayer("regions-flag-pattern")) {
+      map.setPaintProperty("regions-flag-pattern", "fill-pattern", ownerExpr);
+    }
   }, [status, myCountryCode, cityControl]);
 
   // 3. Підсвічуємо контур вибраної країни. Робимо це на шарі countries-line

@@ -952,21 +952,34 @@ function getTelegramUser() {
 let storagePersistenceHealthy = true;
 let lastStorageError = "";
 
-async function storageGet(key, shared) {
+const STORAGE_TIMEOUT_MS = 4000;
+
+async function withStorageTimeout(promiseFactory, fallbackValue) {
+  let timer = null;
   try {
-    const value = await sbStorageGet(key, shared);
-    storagePersistenceHealthy = true;
-    return value;
+    const result = await Promise.race([
+      promiseFactory(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("storage timeout")), STORAGE_TIMEOUT_MS);
+      }),
+    ]);
+    return result;
   } catch (err) {
     lastStorageError = err?.message || String(err);
     storagePersistenceHealthy = false;
-    return null;
+    return fallbackValue;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
+}
+
+async function storageGet(key, shared) {
+  return withStorageTimeout(() => sbStorageGet(key, shared), null);
 }
 
 async function storageSet(key, value, shared) {
   try {
-    const ok = await sbStorageSet(key, value, shared);
+    const ok = await withStorageTimeout(() => sbStorageSet(key, value, shared), false);
     storagePersistenceHealthy = !!ok;
     if (!ok) lastStorageError = "sbStorageSet повернув false";
     return true;
@@ -6190,6 +6203,7 @@ function WorldMapScreen({ players, me, wars, cityControl, onShowRegions }) {
             myCountryCode={me?.countryCode}
             cityControl={cityControl}
             onCapture={handleCapture}
+            flagSvgs={getFlagSvgs()}
           />
           {captureToast && (
             <div className="cn-capture-toast" key={captureToast.name + captureToast.newOwner}>
