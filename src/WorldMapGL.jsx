@@ -26,6 +26,39 @@ const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
 
+// Розбиває Polygon/MultiPolygon на окремі частини (материк, острови,
+// ексклави) — кожна частина потім малюється й масштабується під СВІЙ
+// власний контур, а не під один спільний бокс для всієї країни. Без
+// цього острівні держави чи країни із заморськими територіями (напр.
+// Британія + Фолкленди) розтягували один прапор на проміжки океану між
+// шматками суші.
+function toParts(geometry) {
+  if (geometry.type === "Polygon") return [geometry.coordinates];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates;
+  return [];
+}
+
+// Деякі країни (Росія, США з Алеутськими островами, Фіджі, Нова Зеландія,
+// Кірибаті, Антарктида) фізично перетинають лінію зміни дат (довгота
+// ±180°). Без цієї корекції координати по різні боки лінії проєктуються у
+// протилежні краї екрана, і контур країни перетворюється на лінію через
+// увесь світ — САМЕ ЦЕ й спричиняло вихід прапорів далеко за межі країн
+// (прапор розтягувався на весь екран) та, ймовірно, збої показу карти
+// через величезні повторювані малювання на канвасі.
+function unwrapAntimeridian(rings) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const ring of rings) {
+    for (const [lng] of ring) {
+      if (lng < min) min = lng;
+      if (lng > max) max = lng;
+    }
+  }
+  if (max - min <= 180) return rings;
+  const mid = (min + max) / 2;
+  return rings.map((ring) => ring.map(([lng, lat]) => (lng < mid ? [lng + 360, lat] : [lng, lat])));
+}
+
 function loadFlagImage(innerSvg) {
   return new Promise((resolve, reject) => {
     const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
@@ -48,7 +81,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const containerRef = useRef(null);
   const flagCanvasRef = useRef(null);
   const mapRef = useRef(null);
-  const flagDataRef = useRef(null); // { iso: { image, rings: [[lng,lat], ...][] } }[]
+  const flagDataRef = useRef(null); // { iso: { image, parts: rings[][][] } }[] — parts = масив шматків суші, кожен зі своїми кільцями
   const [status, setStatus] = useState("loading"); // loading | ready | error
 
   // Малює прапори поверх карти: для кожної країни проєктує її контур у
@@ -73,38 +106,51 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     ctx.clearRect(0, 0, width, height);
     ctx.globalAlpha = FLAG_FILL_OPACITY;
 
-    for (const { image, rings } of Object.values(flagData)) {
-      if (!image || !rings.length) continue;
+    // Запобіжник: якщо якийсь шматок після проєкції все одно вийшов
+    // аномально великим (неврахований випадок антимеридіана і т.п.), не
+    // малюємо його, а не розтягуємо прапор на весь екран.
+    const maxArea = width * height * 4;
 
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      const projectedRings = rings.map((ring) =>
-        ring.map(([lng, lat]) => {
-          const p = map.project([lng, lat]);
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-          return p;
-        }),
-      );
+    for (const { image, parts } of Object.values(flagData)) {
+      if (!image || !parts.length) continue;
 
-      // Пропускаємо країни, які зараз повністю поза екраном — для швидкості.
-      if (maxX < 0 || minX > width || maxY < 0 || minY > height) continue;
+      for (const rings of parts) {
+        if (!rings.length) continue;
 
-      ctx.save();
-      ctx.beginPath();
-      for (const ring of projectedRings) {
-        if (!ring.length) continue;
-        ctx.moveTo(ring[0].x, ring[0].y);
-        for (let i = 1; i < ring.length; i++) ctx.lineTo(ring[i].x, ring[i].y);
-        ctx.closePath();
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        const projectedRings = rings.map((ring) =>
+          ring.map(([lng, lat]) => {
+            const p = map.project([lng, lat]);
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+            return p;
+          }),
+        );
+
+        // Пропускаємо шматки, які зараз повністю поза екраном — для швидкості.
+        if (maxX < 0 || minX > width || maxY < 0 || minY > height) continue;
+
+        const w = Math.max(maxX - minX, 1);
+        const h = Math.max(maxY - minY, 1);
+        if (w * h > maxArea) continue;
+
+        ctx.save();
+        ctx.beginPath();
+        for (const ring of projectedRings) {
+          if (!ring.length) continue;
+          ctx.moveTo(ring[0].x, ring[0].y);
+          for (let i = 1; i < ring.length; i++) ctx.lineTo(ring[i].x, ring[i].y);
+          ctx.closePath();
+        }
+        ctx.clip();
+        ctx.drawImage(image, minX, minY, w, h);
+        ctx.restore();
       }
-      ctx.clip();
-      ctx.drawImage(image, minX, minY, Math.max(maxX - minX, 1), Math.max(maxY - minY, 1));
-      ctx.restore();
     }
   }
 
@@ -250,11 +296,8 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
               if (!svg) return;
               try {
                 const image = await loadFlagImage(svg);
-                const rings =
-                  geometry.type === "Polygon"
-                    ? geometry.coordinates
-                    : geometry.coordinates.flat();
-                flagData[iso] = { image, rings };
+                const parts = toParts(geometry).map(unwrapAntimeridian);
+                flagData[iso] = { image, parts };
               } catch {
                 // Один битий прапор не повинен ламати решту карти.
               }
