@@ -82,6 +82,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const flagCanvasRef = useRef(null);
   const mapRef = useRef(null);
   const flagDataRef = useRef(null); // { iso: { image, parts: rings[][][] } }[] — parts = масив шматків суші, кожен зі своїми кільцями
+  const rafIdRef = useRef(null); // id запланованого кадру перемальовки прапорів
   const [status, setStatus] = useState("loading"); // loading | ready | error
 
   // Малює прапори поверх карти: для кожної країни проєктує її контур у
@@ -152,6 +153,18 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         ctx.restore();
       }
     }
+  }
+
+  // Планує перемальовку прапорів на наступний кадр анімації (а не одразу
+  // на кожній події) — так під час активного pan/zoom/інерції малюємо
+  // максимум раз на кадр, синхронно з рендером самої карти, і не
+  // навантажуємо WebView зайвими повторними викликами між кадрами.
+  function scheduleDrawFlags() {
+    if (rafIdRef.current != null) return;
+    rafIdRef.current = requestAnimationFrame(() => {
+      rafIdRef.current = null;
+      drawFlags();
+    });
   }
 
   // 1. Ініціалізація карти один раз.
@@ -305,9 +318,13 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           );
           flagDataRef.current = flagData;
           drawFlags();
-          map.on("moveend", drawFlags);
-          map.on("zoomend", drawFlags);
-          map.on("resize", drawFlags);
+          // "move" спрацьовує безперервно під час БУДЬ-якого переміщення
+          // карти (перетягування, зум, інерція) — на відміну від
+          // "moveend"/"zoomend", які чекають, поки жест повністю
+          // завершиться. Саме відсутність цих подій і давала прапорам
+          // "відриватися" від контуру під час активного руху карти.
+          map.on("move", scheduleDrawFlags);
+          map.on("resize", scheduleDrawFlags);
         }
 
         map.on("click", "regions-fill", (event) => {
@@ -330,6 +347,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     });
 
     return () => {
+      if (rafIdRef.current != null) cancelAnimationFrame(rafIdRef.current);
       map.remove();
       mapRef.current = null;
     };
