@@ -5,30 +5,42 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 // Крок 2-3 плану: реальна геометрія + реальне володіння (мій/чужий), клік
 // вибирає країну, прапори всередині контурів. Розрізнення "союзник/ворог"
-// і "живе" оновлення без перезавантаження — наступні кроки.
+// — наступний крок.
 //
-// ПРО ПРАПОРИ: раніше прапори малювались вручну в окремому HTML <canvas>
-// поверх карти (project() кожної вершини + clip + drawImage на кожен
-// moveend/zoomend, потім навіть на кожен кадр через requestAnimationFrame).
-// Це виявилось принципово крихким: (1) наївний project() ламався на
-// країнах, що перетинають лінію зміни дат (Росія/США/Фіджі/Нова
-// Зеландія/Кірибаті/Антарктида) — контур перетворювався на лінію через
-// увесь світ; (2) навіть після виправлення цього прапори все одно
-// "відривались" від контуру під час активного pan/zoom, бо перемальовка
-// в JS ніколи не гарантовано встигає точно за рендером самої карти.
+// ПРО ПРАПОРИ (важлива історія, щоб не наступити на ті самі граблі):
+// раніше прапори малювались вручну в окремому HTML <canvas> поверх карти
+// (project() кожної вершини + clip + drawImage на кожен moveend/zoomend,
+// потім навіть на кожен кадр через requestAnimationFrame). Це виявилось
+// принципово крихким: (1) наївний project() ламався на країнах, що
+// перетинають лінію зміни дат (Росія/США/Фіджі/Нова Зеландія/Кірибаті/
+// Антарктида) — контур перетворювався на лінію через увесь світ; (2)
+// навіть після виправлення цього прапори все одно "відривались" від
+// контуру під час активного pan/zoom, бо перемальовка в JS ніколи не
+// гарантовано встигає точно за рендером самої карти.
 //
-// Натомість тепер прапори — це НАТИВНІ шари MapLibre: для кожного
-// острова/материка країни один раз (при завантаженні) рендеримо offscreen
-// canvas — прапор, обрізаний точно по контуру цього шматка суші (з
-// прозорістю зовні контуру) — і додаємо як image-джерело, прив'язане до
-// 4 географічних кутів свого bounding box, плюс raster-шар поверх нього.
-// Далі MapLibre сам перепроєктує цю картинку щокадру разом з рештою
-// карти (так само, як він це вже робить із самими контурами країн) —
-// жодного JS-коду на pan/zoom/resize більше не потрібно, тому відрив чи
-// розсинхронізація стають неможливими в принципі.
+// Натомість тепер прапори — це НАТИВНІ шари MapLibre: рендеримо offscreen
+// canvas (прапор, обрізаний точно по контуру території, з прозорістю
+// зовні) і додаємо як image-джерело, прив'язане до 4 географічних кутів
+// свого bounding box, плюс raster-шар поверх нього. Далі MapLibre сам
+// перепроєктує цю картинку щокадру разом з рештою карти (так само, як він
+// це вже робить із самими контурами країн) — жодного JS-коду на
+// pan/zoom/resize більше не потрібно, тому відрив чи розсинхронізація
+// стають неможливими в принципі.
+//
+// ПРО ЗАХОПЛЕННЯ ОБЛАСТЕЙ: прапор прив'язаний не до статичного політичного
+// контуру країни, а до ПОТОЧНОГО ВЛАСНИКА території. Області одного й
+// того самого поточного власника, що межують одна з одною, об'єднуються в
+// один "кластер" — і саме кластер отримує один прапор-растр (обрізаний по
+// об'єднаному контуру кластера). Тому коли гравець захоплює сусідню
+// область іншої країни, там з'являється прапор загарбника, і він росте
+// разом із захопленою територією — так само, як це було зроблено в старій
+// (доMapLibre) версії карти. Суміжність областей рахується один раз із
+// топології (по спільних арках), а кластери й прапори перебудовуються з
+// дебаунсом при кожній зміні cityControl.
 const TOPOLOGY_URL = "/data/world-topology.json";
 const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
 const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
+const FLAG_REBAKE_DEBOUNCE_MS = 300; // не перебудовувати прапори частіше, ніж раз на цей інтервал
 
 const COLOR_WATER = "#7ec9e8";
 const COLOR_LAND_NEUTRAL = "#7fb069";
@@ -40,10 +52,10 @@ const FLAG_RASTER_MAX_DIM = 256; // максимальний розмір offscr
 
 // Розбиває Polygon/MultiPolygon на окремі частини (материк, острови,
 // ексклави) — кожна частина потім рендериться й позиціонується під СВІЙ
-// власний bounding box, а не під один спільний для всієї країни. Без
-// цього острівні держави чи країни із заморськими територіями (напр.
-// Британія + Фолкленди) розтягували один прапор на проміжки океану між
-// шматками суші.
+// власний bounding box, а не під один спільний для всієї території. Без
+// цього розкидані по карті шматки (острови, заморські території, а тепер
+// і не суміжні шматки одного власника) розтягували один прапор на
+// проміжки океану/чужої землі між ними.
 function toParts(geometry) {
   if (geometry.type === "Polygon") return [geometry.coordinates];
   if (geometry.type === "MultiPolygon") return geometry.coordinates;
@@ -87,10 +99,10 @@ function loadFlagImage(innerSvg) {
   });
 }
 
-// Рендерить один шматок суші (rings у географічних координатах) в offscreen
-// canvas: прапор, обрізаний точно по контуру, з прозорістю зовні. Повертає
-// PNG data URL і 4 географічні кути bounding box (для image-джерела
-// MapLibre) — або null, якщо шматок вироджений.
+// Рендерить один шматок території (rings у географічних координатах) в
+// offscreen canvas: прапор, обрізаний точно по контуру, з прозорістю
+// зовні. Повертає PNG data URL і 4 географічні кути bounding box (для
+// image-джерела MapLibre) — або null, якщо шматок вироджений.
 function buildFlagRaster(image, rings) {
   let minLng = Infinity;
   let minLat = Infinity;
@@ -146,10 +158,92 @@ function buildFlagRaster(image, rings) {
   };
 }
 
+// Суміжність областей рахується по топології один раз: якщо арку
+// (сегмент межі) використовують РІВНО дві області — вони сусіди. Арки з
+// одним власником — це зовнішнє узбережжя/кордон, не рахуються.
+function buildRegionAdjacency(geometries) {
+  const arcOwners = new Map();
+  const visitRing = (ring, regionIndex) => {
+    for (const arcRef of ring) {
+      const idx = arcRef < 0 ? ~arcRef : arcRef;
+      let owners = arcOwners.get(idx);
+      if (!owners) {
+        owners = new Set();
+        arcOwners.set(idx, owners);
+      }
+      owners.add(regionIndex);
+    }
+  };
+  geometries.forEach((geometry, regionIndex) => {
+    const polygons = geometry.type === "Polygon" ? [geometry.arcs] : geometry.type === "MultiPolygon" ? geometry.arcs : [];
+    for (const polygon of polygons) for (const ring of polygon) visitRing(ring, regionIndex);
+  });
+
+  const adjacency = new Map();
+  arcOwners.forEach((owners) => {
+    if (owners.size !== 2) return;
+    const [a, b] = [...owners];
+    if (a === b) return;
+    if (!adjacency.has(a)) adjacency.set(a, new Set());
+    if (!adjacency.has(b)) adjacency.set(b, new Set());
+    adjacency.get(a).add(b);
+    adjacency.get(b).add(a);
+  });
+  return adjacency;
+}
+
+// Хто зараз володіє областю: запис у cityControl (якщо область захоплена),
+// інакше — "рідний" iso цієї області.
+function resolveOwner(cnKey, iso, cityControl) {
+  if (cityControl && Object.prototype.hasOwnProperty.call(cityControl, cnKey)) return cityControl[cnKey];
+  return iso;
+}
+
+// Групує області в зв'язні кластери одного поточного власника (обхід у
+// глибину по графу суміжності, зупиняючись на межі зміни власника). Це і
+// є "територія загарбника", що росте разом із захопленням сусідніх
+// областей.
+function computeOwnerClusters(regionMeta, adjacency, cityControl) {
+  const owners = regionMeta.map((r) => resolveOwner(r.cnKey, r.iso, cityControl));
+  const visited = new Array(regionMeta.length).fill(false);
+  const clusters = [];
+  for (let i = 0; i < regionMeta.length; i++) {
+    if (visited[i]) continue;
+    const owner = owners[i];
+    visited[i] = true;
+    if (!owner) continue;
+    const stack = [i];
+    const members = [];
+    while (stack.length) {
+      const current = stack.pop();
+      members.push(current);
+      for (const neighbor of adjacency.get(current) || []) {
+        if (visited[neighbor] || owners[neighbor] !== owner) continue;
+        visited[neighbor] = true;
+        stack.push(neighbor);
+      }
+    }
+    clusters.push({ owner, members });
+  }
+  return clusters;
+}
+
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, flagSvgs }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const [status, setStatus] = useState("loading"); // loading | ready | error
+
+  // Наповнюються один раз при завантаженні топології, читаються при
+  // кожній перебудові прапорів — тримаємо в ref, щоб не тягнути їх у
+  // залежності ефектів і не перечитувати topology.json повторно.
+  const topologyRef = useRef(null);
+  const regionMetaRef = useRef(null); // [{ iso, cnKey, geometry }]
+  const adjacencyRef = useRef(null); // Map(regionIndex -> Set(regionIndex))
+  const flagImageCacheRef = useRef(new Map()); // iso(lowercase) -> завантажений Image
+  const activeFlagLayersRef = useRef([]); // [{ sourceId, layerId }] — що зараз додано на карту
+  const flagGenerationRef = useRef(0); // лічильник перебудов — для унікальних id джерел/шарів
+  const rebakeTimerRef = useRef(null);
+  const flagsReadyRef = useRef(false); // true після першого успішного запікання
 
   // 1. Ініціалізація карти один раз.
   useEffect(() => {
@@ -186,11 +280,67 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     mapRef.current = map;
 
+    // Замінює всі поточні прапори-шари на нові, побудовані під актуальний
+    // cityControl. Викликається один раз одразу після завантаження і далі
+    // з дебаунсом при кожній зміні захоплення (окремий ефект нижче).
+    function rebuildFlagLayers(cityControlSnapshot) {
+      const topology = topologyRef.current;
+      const regionMeta = regionMetaRef.current;
+      const adjacency = adjacencyRef.current;
+      if (!topology || !regionMeta || !adjacency) return;
+
+      const generation = ++flagGenerationRef.current;
+      const clusters = computeOwnerClusters(regionMeta, adjacency, cityControlSnapshot);
+      const nextLayers = [];
+
+      clusters.forEach((cluster, clusterIndex) => {
+        const image = flagImageCacheRef.current.get(String(cluster.owner || "").toLowerCase());
+        if (!image) return; // немає прапора для цього власника — просто не малюємо (колір заливки лишається)
+
+        const geometries = cluster.members.map((idx) => regionMeta[idx].geometry);
+        const merged = topojson.merge(topology, geometries);
+        const parts = toParts(merged).map(unwrapAntimeridian);
+
+        parts.forEach((rings, partIndex) => {
+          if (!rings.length) return;
+          const raster = buildFlagRaster(image, rings);
+          if (!raster) return;
+          const sourceId = `flag-${generation}-${clusterIndex}-${partIndex}`;
+          const layerId = `${sourceId}-layer`;
+          map.addSource(sourceId, {
+            type: "image",
+            url: raster.dataUrl,
+            coordinates: raster.coordinates,
+          });
+          map.addLayer({
+            id: layerId,
+            type: "raster",
+            source: sourceId,
+            paint: {
+              "raster-opacity": FLAG_FILL_OPACITY,
+              "raster-fade-duration": 0,
+            },
+          });
+          nextLayers.push({ sourceId, layerId });
+        });
+      });
+
+      // Прибираємо шари/джерела з попереднього запікання — територія
+      // могла змінитись, старі кластери вже неактуальні. Нові id завжди
+      // унікальні (лічильник generation), тому порядок remove/add не важливий.
+      for (const { sourceId, layerId } of activeFlagLayersRef.current) {
+        if (map.getLayer(layerId)) map.removeLayer(layerId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
+      }
+      activeFlagLayersRef.current = nextLayers;
+    }
+
     map.on("load", async () => {
       try {
         const response = await fetch(TOPOLOGY_URL);
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
         const topology = await response.json();
+        topologyRef.current = topology;
 
         const objectName = Object.keys(topology.objects)[0];
         const topoObject = topology.objects[objectName];
@@ -204,6 +354,16 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           const name = feature.properties?.name;
           feature.properties.cn_key = `${iso}|${name}`;
         });
+
+        // regionMeta індексується так само, як topoObject.geometries
+        // (topojson.feature зберігає порядок) — це і дозволяє напряму
+        // зіставляти "область у геоджейсоні" з "область у графі суміжності".
+        regionMetaRef.current = geojson.features.map((feature, index) => ({
+          iso: feature.properties.iso,
+          cnKey: feature.properties.cn_key,
+          geometry: topoObject.geometries[index],
+        }));
+        adjacencyRef.current = buildRegionAdjacency(topoObject.geometries);
 
         map.addSource("regions", {
           type: "geojson",
@@ -242,8 +402,9 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Другий шар даних: суцільні контури країн — обчислюються прямо в
-        // браузері з тих самих даних (без окремого важкого файлу).
+        // Другий шар даних: суцільні контури країн (політичні, статичні —
+        // не залежать від того, хто зараз володіє територією; захоплення
+        // показує зафарбовування + прапор, а не зміну політичного кордону).
         const geometriesByIso = {};
         for (const geom of topoObject.geometries) {
           const iso = geom.properties?.iso;
@@ -280,45 +441,23 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Прапори: для кожного шматка суші кожної країни рендеримо offscreen
-        // canvas один раз і додаємо як нативне image-джерело + raster-шар —
-        // MapLibre сам тримає їх прив'язаними до контуру на будь-якому
-        // pan/zoom/resize, без жодного додаткового JS-коду під час руху
-        // карти (додаються останніми, тому лягають поверх ліній кордонів,
-        // як і раніше).
+        // Прапори: спершу один раз завантажуємо КОЖЕН доступний прапор у
+        // Image (кешуємо назавжди — самі прапори не змінюються, змінюються
+        // лише кластери територій, якими вони обрізаються), а тоді робимо
+        // перше запікання під поточний cityControl.
         if (flagSvgs) {
           await Promise.all(
-            Object.entries(mergedByIso).map(async ([iso, geometry]) => {
-              const svg = flagSvgs[iso.toLowerCase()];
-              if (!svg) return;
+            Object.entries(flagSvgs).map(async ([isoLower, svg]) => {
               try {
                 const image = await loadFlagImage(svg);
-                const parts = toParts(geometry).map(unwrapAntimeridian);
-                parts.forEach((rings, partIndex) => {
-                  if (!rings.length) return;
-                  const raster = buildFlagRaster(image, rings);
-                  if (!raster) return;
-                  const sourceId = `flag-${iso}-${partIndex}`;
-                  map.addSource(sourceId, {
-                    type: "image",
-                    url: raster.dataUrl,
-                    coordinates: raster.coordinates,
-                  });
-                  map.addLayer({
-                    id: `${sourceId}-layer`,
-                    type: "raster",
-                    source: sourceId,
-                    paint: {
-                      "raster-opacity": FLAG_FILL_OPACITY,
-                      "raster-fade-duration": 0,
-                    },
-                  });
-                });
+                flagImageCacheRef.current.set(isoLower, image);
               } catch {
                 // Один битий прапор не повинен ламати решту карти.
               }
             }),
           );
+          rebuildFlagLayers(cityControl);
+          flagsReadyRef.current = true;
         }
 
         map.on("click", "regions-fill", (event) => {
@@ -340,7 +479,12 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       }
     });
 
+    // Дозволяє ефекту нижче (реакція на зміну cityControl) достукатись до
+    // тієї самої функції перебудови без повторного addEventListener.
+    map.__rebuildFlagLayers = rebuildFlagLayers;
+
     return () => {
+      if (rebakeTimerRef.current) clearTimeout(rebakeTimerRef.current);
       map.remove();
       mapRef.current = null;
     };
@@ -367,6 +511,23 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       COLOR_LAND_NEUTRAL,
     ]);
   }, [status, myCountryCode, cityControl]);
+
+  // 2b. Перебудовуємо прапори-за-власником при кожній зміні cityControl —
+  // з дебаунсом, щоб часті ігрові оновлення (кілька захоплень поспіль) не
+  // тригерили перерендер кожного разу окремо.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== "ready" || !flagsReadyRef.current) return;
+
+    if (rebakeTimerRef.current) clearTimeout(rebakeTimerRef.current);
+    rebakeTimerRef.current = setTimeout(() => {
+      map.__rebuildFlagLayers?.(cityControl);
+    }, FLAG_REBAKE_DEBOUNCE_MS);
+
+    return () => {
+      if (rebakeTimerRef.current) clearTimeout(rebakeTimerRef.current);
+    };
+  }, [status, cityControl]);
 
   // 3. Підсвічуємо контур вибраної країни. Робимо це на шарі countries-line
   // (завжди видимий), а не regions-line — інакше підсвітка губилась би на
