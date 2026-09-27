@@ -3,13 +3,18 @@ import maplibregl from "maplibre-gl";
 import * as topojson from "topojson-client";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-// Крок 2 плану: реальна геометрія + реальне володіння (мій/чужий), клік
-// вибирає країну. Розрізнення "союзник/ворог" (і саме "живе" оновлення
-// кольору без перезавантаження) — наступні кроки, тут ще НЕ підключено,
-// бо для цього потрібні ще й wars/alliances, яких компонент поки не отримує.
-// onCapture поки що нічим не викликається — сама подія захоплення
-// прилітає з сервера через cityControl, а не вирішується тут, у карті.
-
+// Крок 2-3 плану: реальна геометрія + реальне володіння (мій/чужий), клік
+// вибирає країну, прапори всередині контурів. Розрізнення "союзник/ворог"
+// і "живе" оновлення без перезавантаження — наступні кроки.
+//
+// ВАЖЛИВО про прапори: MapLibre-стиль fill-pattern завжди ПОВТОРЮЄ картинку
+// плиткою по формі (як шпалери), а не розтягує один прапор на всю країну —
+// саме тому перша версія показувала багато дрібних прапорів або лише
+// шматок прапора (Польща/Франція обрізались посеред візерунка). Щоб
+// показати ОДИН прапор, розтягнутий на всю форму країни, MapLibre-стилі
+// для цього не підходять — довелось намалювати прапори вручну, окремим
+// прозорим canvas поверх карти, який сам обчислює контур країни на екрані
+// і "вирізає" прапор точно по цій формі (canvas clip + drawImage).
 const TOPOLOGY_URL = "/data/world-topology.json";
 const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
 const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
@@ -20,38 +25,88 @@ const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
-const FLAG_IMAGE_SIZE = 64; // px, растеризований прапор
 
-// MapLibre fill-pattern потребує растрове зображення, а прапори в грі
-// зберігаються як SVG (getFlagSvgs() у App.jsx). Растеризуємо прямо в
-// браузері, одноразово при завантаженні карти — без нового файлу чи
-// білд-кроку.
-async function rasterizeFlag(innerSvg, size = FLAG_IMAGE_SIZE) {
-  const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
-  const blob = new Blob([svgMarkup], { type: "image/svg+xml" });
-  const url = URL.createObjectURL(blob);
-  try {
-    const img = await new Promise((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = reject;
-      image.src = url;
-    });
-    const canvas = document.createElement("canvas");
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, size, size);
-    return ctx.getImageData(0, 0, size, size);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+function loadFlagImage(innerSvg) {
+  return new Promise((resolve, reject) => {
+    const svgMarkup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">${innerSvg}</svg>`;
+    const blob = new Blob([svgMarkup], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
+  });
 }
 
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, flagSvgs }) {
   const containerRef = useRef(null);
+  const flagCanvasRef = useRef(null);
   const mapRef = useRef(null);
+  const flagDataRef = useRef(null); // { iso: { image, rings: [[lng,lat], ...][] } }[]
   const [status, setStatus] = useState("loading"); // loading | ready | error
+
+  // Малює прапори поверх карти: для кожної країни проєктує її контур у
+  // піксельні координати екрана, вирізає цю форму (clip) і розтягує прапор
+  // на весь баундінг-бокс — тому прапор завжди один і показаний повністю,
+  // незалежно від розміру країни.
+  function drawFlags() {
+    const map = mapRef.current;
+    const canvas = flagCanvasRef.current;
+    const flagData = flagDataRef.current;
+    if (!map || !canvas || !flagData) return;
+
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
+      canvas.width = width * ratio;
+      canvas.height = height * ratio;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.globalAlpha = FLAG_FILL_OPACITY;
+
+    for (const { image, rings } of Object.values(flagData)) {
+      if (!image || !rings.length) continue;
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      const projectedRings = rings.map((ring) =>
+        ring.map(([lng, lat]) => {
+          const p = map.project([lng, lat]);
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+          return p;
+        }),
+      );
+
+      // Пропускаємо країни, які зараз повністю поза екраном — для швидкості.
+      if (maxX < 0 || minX > width || maxY < 0 || minY > height) continue;
+
+      ctx.save();
+      ctx.beginPath();
+      for (const ring of projectedRings) {
+        if (!ring.length) continue;
+        ctx.moveTo(ring[0].x, ring[0].y);
+        for (let i = 1; i < ring.length; i++) ctx.lineTo(ring[i].x, ring[i].y);
+        ctx.closePath();
+      }
+      ctx.clip();
+      ctx.drawImage(image, minX, minY, Math.max(maxX - minX, 1), Math.max(maxY - minY, 1));
+      ctx.restore();
+    }
+  }
 
   // 1. Ініціалізація карти один раз.
   useEffect(() => {
@@ -59,7 +114,14 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      antialias: true, // прибирає тонкі "шви" між внутрішніми тайлами GeoJSON-джерела
+      antialias: true,
+      // Карта не обертається й не нахиляється — це проста 2D-карта, і
+      // нахил/поворот раніше "ламав" вигляд прапорів (горизонтальні смуги
+      // ставали діагональними).
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+      maxPitch: 0,
       style: {
         version: 8,
         sources: {},
@@ -71,6 +133,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       maxZoom: 7,
       attributionControl: false,
     });
+    map.touchZoomRotate.disableRotation();
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(
@@ -117,35 +180,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Прапори всередині контурів, напівпрозоро — колір власника (шар
-        // вище) лишається видимим під прапором, а не замінюється ним.
-        if (flagSvgs) {
-          const uniqueIsos = [...new Set(geojson.features.map((f) => f.properties?.iso).filter(Boolean))];
-          await Promise.all(
-            uniqueIsos.map(async (iso) => {
-              const svg = flagSvgs[iso.toLowerCase()];
-              if (!svg || map.hasImage(iso)) return;
-              try {
-                const imageData = await rasterizeFlag(svg);
-                if (!map.hasImage(iso)) map.addImage(iso, imageData);
-              } catch {
-                // Якщо конкретний прапор не растеризувався — просто лишаємо
-                // ту область без прапора, решта карти працює далі.
-              }
-            }),
-          );
-
-          map.addLayer({
-            id: "regions-flag-pattern",
-            type: "fill",
-            source: "regions",
-            paint: {
-              "fill-pattern": ["get", "iso"], // початково — прапор "домашньої" країни
-              "fill-opacity": FLAG_FILL_OPACITY,
-            },
-          });
-        }
-
         map.addLayer({
           id: "regions-line",
           type: "line",
@@ -167,24 +201,25 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Другий шар даних: суцільні контури країн — БЕЗ окремого важкого
-        // файлу (попередня версія тягла ще +14 МБ world-countries.geojson,
-        // саме це, найімовірніше, спричиняло фрізи й вильоти на слабких
-        // телефонах). Замість цього "склеюємо" області в контур країни
-        // прямо в браузері, з тих самих даних, що вже завантажені —
-        // topojson.merge() робить це швидко (одноразово, при завантаженні).
+        // Другий шар даних: суцільні контури країн — обчислюються прямо в
+        // браузері з тих самих даних (без окремого важкого файлу).
         const geometriesByIso = {};
         for (const geom of topoObject.geometries) {
           const iso = geom.properties?.iso;
           if (!iso) continue;
           (geometriesByIso[iso] ??= []).push(geom);
         }
+        const mergedByIso = {};
+        for (const [iso, geoms] of Object.entries(geometriesByIso)) {
+          mergedByIso[iso] = topojson.merge(topology, geoms);
+        }
+
         const countriesGeojson = {
           type: "FeatureCollection",
-          features: Object.entries(geometriesByIso).map(([iso, geoms]) => ({
+          features: Object.entries(mergedByIso).map(([iso, geometry]) => ({
             type: "Feature",
             properties: { iso },
-            geometry: topojson.merge(topology, geoms),
+            geometry,
           })),
         };
 
@@ -203,6 +238,34 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             "line-opacity": 0.55,
           },
         });
+
+        // Прапори: завантажуємо картинки один раз і зберігаємо контури
+        // кожної країни (у географічних координатах — самі пікселі
+        // перераховуються щоразу під час малювання, бо міняються з зумом).
+        if (flagSvgs) {
+          const flagData = {};
+          await Promise.all(
+            Object.entries(mergedByIso).map(async ([iso, geometry]) => {
+              const svg = flagSvgs[iso.toLowerCase()];
+              if (!svg) return;
+              try {
+                const image = await loadFlagImage(svg);
+                const rings =
+                  geometry.type === "Polygon"
+                    ? geometry.coordinates
+                    : geometry.coordinates.flat();
+                flagData[iso] = { image, rings };
+              } catch {
+                // Один битий прапор не повинен ламати решту карти.
+              }
+            }),
+          );
+          flagDataRef.current = flagData;
+          drawFlags();
+          map.on("moveend", drawFlags);
+          map.on("zoomend", drawFlags);
+          map.on("resize", drawFlags);
+        }
 
         map.on("click", "regions-fill", (event) => {
           const feature = event.features?.[0];
@@ -233,27 +296,22 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   // 2. Перефарбовуємо, коли змінюється myCountryCode або cityControl
   // (хтось щось захопив). cityControl[iso+"|"+name] — поточний власник,
   // якщо область захоплена; якщо запису нема — власник той, чий iso
-  // "від природи" (записаний у самій геометрії). Той самий вираз "хто
-  // власник" використовується і для кольору, і для прапора — якщо область
-  // захоплено, прапор теж має показувати нового власника, не "домашню"
-  // країну.
+  // "від природи" (записаний у самій геометрії).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== "ready" || !map.getLayer("regions-fill")) return;
 
     const cc = cityControl || {};
-    const ownerExpr = ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]];
-
     map.setPaintProperty("regions-fill", "fill-color", [
       "case",
-      ["==", ownerExpr, myCountryCode || ""],
+      [
+        "==",
+        ["coalesce", ["get", ["get", "cn_key"], ["literal", cc]], ["get", "iso"]],
+        myCountryCode || "",
+      ],
       COLOR_MINE,
       COLOR_LAND_NEUTRAL,
     ]);
-
-    if (map.getLayer("regions-flag-pattern")) {
-      map.setPaintProperty("regions-flag-pattern", "fill-pattern", ownerExpr);
-    }
   }, [status, myCountryCode, cityControl]);
 
   // 3. Підсвічуємо контур вибраної країни. Робимо це на шарі countries-line
@@ -281,6 +339,17 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 420 }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden" }} />
+      <canvas
+        ref={flagCanvasRef}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+          borderRadius: 12,
+        }}
+      />
       {status === "loading" && (
         <div
           style={{
