@@ -7,14 +7,25 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // вибирає країну, прапори всередині контурів. Розрізнення "союзник/ворог"
 // і "живе" оновлення без перезавантаження — наступні кроки.
 //
-// ВАЖЛИВО про прапори: MapLibre-стиль fill-pattern завжди ПОВТОРЮЄ картинку
-// плиткою по формі (як шпалери), а не розтягує один прапор на всю країну —
-// саме тому перша версія показувала багато дрібних прапорів або лише
-// шматок прапора (Польща/Франція обрізались посеред візерунка). Щоб
-// показати ОДИН прапор, розтягнутий на всю форму країни, MapLibre-стилі
-// для цього не підходять — довелось намалювати прапори вручну, окремим
-// прозорим canvas поверх карти, який сам обчислює контур країни на екрані
-// і "вирізає" прапор точно по цій формі (canvas clip + drawImage).
+// ПРО ПРАПОРИ: раніше прапори малювались вручну в окремому HTML <canvas>
+// поверх карти (project() кожної вершини + clip + drawImage на кожен
+// moveend/zoomend, потім навіть на кожен кадр через requestAnimationFrame).
+// Це виявилось принципово крихким: (1) наївний project() ламався на
+// країнах, що перетинають лінію зміни дат (Росія/США/Фіджі/Нова
+// Зеландія/Кірибаті/Антарктида) — контур перетворювався на лінію через
+// увесь світ; (2) навіть після виправлення цього прапори все одно
+// "відривались" від контуру під час активного pan/zoom, бо перемальовка
+// в JS ніколи не гарантовано встигає точно за рендером самої карти.
+//
+// Натомість тепер прапори — це НАТИВНІ шари MapLibre: для кожного
+// острова/материка країни один раз (при завантаженні) рендеримо offscreen
+// canvas — прапор, обрізаний точно по контуру цього шматка суші (з
+// прозорістю зовні контуру) — і додаємо як image-джерело, прив'язане до
+// 4 географічних кутів свого bounding box, плюс raster-шар поверх нього.
+// Далі MapLibre сам перепроєктує цю картинку щокадру разом з рештою
+// карти (так само, як він це вже робить із самими контурами країн) —
+// жодного JS-коду на pan/zoom/resize більше не потрібно, тому відрив чи
+// розсинхронізація стають неможливими в принципі.
 const TOPOLOGY_URL = "/data/world-topology.json";
 const REGION_LINES_MIN_ZOOM = 3.5; // з якого зуму показувати межі областей
 const REGION_LINES_FULL_ZOOM = 4.5; // з якого зуму межі областей повністю видимі
@@ -25,10 +36,11 @@ const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
+const FLAG_RASTER_MAX_DIM = 256; // максимальний розмір offscreen-canvas для одного шматка суші (px)
 
 // Розбиває Polygon/MultiPolygon на окремі частини (материк, острови,
-// ексклави) — кожна частина потім малюється й масштабується під СВІЙ
-// власний контур, а не під один спільний бокс для всієї країни. Без
+// ексклави) — кожна частина потім рендериться й позиціонується під СВІЙ
+// власний bounding box, а не під один спільний для всієї країни. Без
 // цього острівні держави чи країни із заморськими територіями (напр.
 // Британія + Фолкленди) розтягували один прапор на проміжки океану між
 // шматками суші.
@@ -38,13 +50,11 @@ function toParts(geometry) {
   return [];
 }
 
-// Деякі країни (Росія, США з Алеутськими островами, Фіджі, Нова Зеландія,
-// Кірибаті, Антарктида) фізично перетинають лінію зміни дат (довгота
-// ±180°). Без цієї корекції координати по різні боки лінії проєктуються у
-// протилежні краї екрана, і контур країни перетворюється на лінію через
-// увесь світ — САМЕ ЦЕ й спричиняло вихід прапорів далеко за межі країн
-// (прапор розтягувався на весь екран) та, ймовірно, збої показу карти
-// через величезні повторювані малювання на канвасі.
+// Деякі шматки суші (Чукотка/Алеутські острови, острови Фіджі, Кірибаті,
+// Антарктида) фізично перетинають лінію зміни дат (довгота ±180°). Без
+// цієї корекції координати по різні боки лінії дають bounding box шириною
+// у весь світ. Зсуваємо "невигідну" половину точок на +360°, щоб контур
+// лишався компактним прямокутником у довготі.
 function unwrapAntimeridian(rings) {
   let min = Infinity;
   let max = -Infinity;
@@ -77,95 +87,69 @@ function loadFlagImage(innerSvg) {
   });
 }
 
+// Рендерить один шматок суші (rings у географічних координатах) в offscreen
+// canvas: прапор, обрізаний точно по контуру, з прозорістю зовні. Повертає
+// PNG data URL і 4 географічні кути bounding box (для image-джерела
+// MapLibre) — або null, якщо шматок вироджений.
+function buildFlagRaster(image, rings) {
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  for (const ring of rings) {
+    for (const [lng, lat] of ring) {
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+  }
+  const lngSpan = maxLng - minLng;
+  const latSpan = maxLat - minLat;
+  if (!(lngSpan > 1e-5) || !(latSpan > 1e-5)) return null;
+
+  const scale = FLAG_RASTER_MAX_DIM / Math.max(lngSpan, latSpan);
+  const width = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(lngSpan * scale)));
+  const height = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(latSpan * scale)));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+
+  const toXY = ([lng, lat]) => [((lng - minLng) / lngSpan) * width, ((maxLat - lat) / latSpan) * height];
+
+  ctx.beginPath();
+  for (const ring of rings) {
+    if (!ring.length) continue;
+    const [x0, y0] = toXY(ring[0]);
+    ctx.moveTo(x0, y0);
+    for (let i = 1; i < ring.length; i++) {
+      const [x, y] = toXY(ring[i]);
+      ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+  ctx.clip();
+  ctx.drawImage(image, 0, 0, width, height);
+
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    // За годинниковою стрілкою, починаючи з верхнього лівого кута — саме
+    // так їх очікує image-джерело MapLibre.
+    coordinates: [
+      [minLng, maxLat],
+      [maxLng, maxLat],
+      [maxLng, minLat],
+      [minLng, minLat],
+    ],
+  };
+}
+
 export default function WorldMapGL({ selected, onSelect, myCountryCode, cityControl, flagSvgs }) {
   const containerRef = useRef(null);
-  const flagCanvasRef = useRef(null);
   const mapRef = useRef(null);
-  const flagDataRef = useRef(null); // { iso: { image, parts: rings[][][] } }[] — parts = масив шматків суші, кожен зі своїми кільцями
-  const rafIdRef = useRef(null); // id запланованого кадру перемальовки прапорів
   const [status, setStatus] = useState("loading"); // loading | ready | error
-
-  // Малює прапори поверх карти: для кожної країни проєктує її контур у
-  // піксельні координати екрана, вирізає цю форму (clip) і розтягує прапор
-  // на весь баундінг-бокс — тому прапор завжди один і показаний повністю,
-  // незалежно від розміру країни.
-  function drawFlags() {
-    const map = mapRef.current;
-    const canvas = flagCanvasRef.current;
-    const flagData = flagDataRef.current;
-    if (!map || !canvas || !flagData) return;
-
-    const ratio = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-    if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
-      canvas.width = width * ratio;
-      canvas.height = height * ratio;
-    }
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, width, height);
-    ctx.globalAlpha = FLAG_FILL_OPACITY;
-
-    // Запобіжник: якщо якийсь шматок після проєкції все одно вийшов
-    // аномально великим (неврахований випадок антимеридіана і т.п.), не
-    // малюємо його, а не розтягуємо прапор на весь екран.
-    const maxArea = width * height * 4;
-
-    for (const { image, parts } of Object.values(flagData)) {
-      if (!image || !parts.length) continue;
-
-      for (const rings of parts) {
-        if (!rings.length) continue;
-
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        const projectedRings = rings.map((ring) =>
-          ring.map(([lng, lat]) => {
-            const p = map.project([lng, lat]);
-            if (p.x < minX) minX = p.x;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.y > maxY) maxY = p.y;
-            return p;
-          }),
-        );
-
-        // Пропускаємо шматки, які зараз повністю поза екраном — для швидкості.
-        if (maxX < 0 || minX > width || maxY < 0 || minY > height) continue;
-
-        const w = Math.max(maxX - minX, 1);
-        const h = Math.max(maxY - minY, 1);
-        if (w * h > maxArea) continue;
-
-        ctx.save();
-        ctx.beginPath();
-        for (const ring of projectedRings) {
-          if (!ring.length) continue;
-          ctx.moveTo(ring[0].x, ring[0].y);
-          for (let i = 1; i < ring.length; i++) ctx.lineTo(ring[i].x, ring[i].y);
-          ctx.closePath();
-        }
-        ctx.clip();
-        ctx.drawImage(image, minX, minY, w, h);
-        ctx.restore();
-      }
-    }
-  }
-
-  // Планує перемальовку прапорів на наступний кадр анімації (а не одразу
-  // на кожній події) — так під час активного pan/zoom/інерції малюємо
-  // максимум раз на кадр, синхронно з рендером самої карти, і не
-  // навантажуємо WebView зайвими повторними викликами між кадрами.
-  function scheduleDrawFlags() {
-    if (rafIdRef.current != null) return;
-    rafIdRef.current = requestAnimationFrame(() => {
-      rafIdRef.current = null;
-      drawFlags();
-    });
-  }
 
   // 1. Ініціалізація карти один раз.
   useEffect(() => {
@@ -174,9 +158,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     const map = new maplibregl.Map({
       container: containerRef.current,
       antialias: true,
-      // Карта не обертається й не нахиляється — це проста 2D-карта, і
-      // нахил/поворот раніше "ламав" вигляд прапорів (горизонтальні смуги
-      // ставали діагональними).
+      // Карта не обертається й не нахиляється — це проста 2D-карта.
       dragRotate: false,
       pitchWithRotate: false,
       touchPitch: false,
@@ -298,11 +280,13 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
           },
         });
 
-        // Прапори: завантажуємо картинки один раз і зберігаємо контури
-        // кожної країни (у географічних координатах — самі пікселі
-        // перераховуються щоразу під час малювання, бо міняються з зумом).
+        // Прапори: для кожного шматка суші кожної країни рендеримо offscreen
+        // canvas один раз і додаємо як нативне image-джерело + raster-шар —
+        // MapLibre сам тримає їх прив'язаними до контуру на будь-якому
+        // pan/zoom/resize, без жодного додаткового JS-коду під час руху
+        // карти (додаються останніми, тому лягають поверх ліній кордонів,
+        // як і раніше).
         if (flagSvgs) {
-          const flagData = {};
           await Promise.all(
             Object.entries(mergedByIso).map(async ([iso, geometry]) => {
               const svg = flagSvgs[iso.toLowerCase()];
@@ -310,21 +294,31 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
               try {
                 const image = await loadFlagImage(svg);
                 const parts = toParts(geometry).map(unwrapAntimeridian);
-                flagData[iso] = { image, parts };
+                parts.forEach((rings, partIndex) => {
+                  if (!rings.length) return;
+                  const raster = buildFlagRaster(image, rings);
+                  if (!raster) return;
+                  const sourceId = `flag-${iso}-${partIndex}`;
+                  map.addSource(sourceId, {
+                    type: "image",
+                    url: raster.dataUrl,
+                    coordinates: raster.coordinates,
+                  });
+                  map.addLayer({
+                    id: `${sourceId}-layer`,
+                    type: "raster",
+                    source: sourceId,
+                    paint: {
+                      "raster-opacity": FLAG_FILL_OPACITY,
+                      "raster-fade-duration": 0,
+                    },
+                  });
+                });
               } catch {
                 // Один битий прапор не повинен ламати решту карти.
               }
             }),
           );
-          flagDataRef.current = flagData;
-          drawFlags();
-          // "move" спрацьовує безперервно під час БУДЬ-якого переміщення
-          // карти (перетягування, зум, інерція) — на відміну від
-          // "moveend"/"zoomend", які чекають, поки жест повністю
-          // завершиться. Саме відсутність цих подій і давала прапорам
-          // "відриватися" від контуру під час активного руху карти.
-          map.on("move", scheduleDrawFlags);
-          map.on("resize", scheduleDrawFlags);
         }
 
         map.on("click", "regions-fill", (event) => {
@@ -347,7 +341,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     });
 
     return () => {
-      if (rafIdRef.current != null) cancelAnimationFrame(rafIdRef.current);
       map.remove();
       mapRef.current = null;
     };
@@ -400,17 +393,6 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   return (
     <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 420 }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden" }} />
-      <canvas
-        ref={flagCanvasRef}
-        style={{
-          position: "absolute",
-          inset: 0,
-          width: "100%",
-          height: "100%",
-          pointerEvents: "none",
-          borderRadius: 12,
-        }}
-      />
       {status === "loading" && (
         <div
           style={{
