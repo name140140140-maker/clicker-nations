@@ -64,8 +64,27 @@ const FLAG_ANTI_SOURCE_PREFIX = "flags-anti-";
 const BUCKET_COUNT = 6;
 const BUCKET_LNG_SPAN = 360 / BUCKET_COUNT;
 const BUCKET_CANVAS_WIDTH = 360;
-const BUCKET_CANVAS_HEIGHT = 1080;
 const FLAG_RASTER_MAX_DIM = 192; // розмір canvas для окремих шматків через лінію дати (px)
+
+// ВАЖЛИВО: MapLibre розтягує image-source ЛІНІЙНО між кутами в просторі
+// Web Mercator, а Mercator по вертикалі нелінійний (ширина ±90° = майже
+// нескінченність). Тому canvas обов'язково малюємо в Mercator-y, а не
+// лінійно по широті — інакше картинка "зсувається" і прапори не потрапляють
+// на свої країни (а видима частина світу відображається на тонку смужку
+// тексту́ри біля екватора, де порожньо).
+const LAT_LIMIT = 85.0511;
+function mercY(lat) {
+  const clamped = Math.max(-LAT_LIMIT, Math.min(LAT_LIMIT, lat));
+  return Math.log(Math.tan(Math.PI / 4 + (clamped * Math.PI) / 360));
+}
+// Відра покривають широти [-58, 84] — там уся заселена суша; Антарктида
+// поза межами (прапор там не потрібен), це економить пам'ять canvas.
+const BUCKET_LAT_TOP = 84;
+const BUCKET_LAT_BOTTOM = -58;
+const MERC_TOP = mercY(BUCKET_LAT_TOP);
+const MERC_BOTTOM = mercY(BUCKET_LAT_BOTTOM);
+const PX_PER_RAD = BUCKET_CANVAS_WIDTH / ((BUCKET_LNG_SPAN * Math.PI) / 180);
+const BUCKET_CANVAS_HEIGHT = Math.round((MERC_TOP - MERC_BOTTOM) * PX_PER_RAD);
 
 function bucketMinLng(index) {
   return -180 + index * BUCKET_LNG_SPAN;
@@ -75,17 +94,17 @@ function bucketCorners(index) {
   const min = bucketMinLng(index);
   const max = min + BUCKET_LNG_SPAN;
   return [
-    [min, 90],
-    [max, 90],
-    [max, -90],
-    [min, -90],
+    [min, BUCKET_LAT_TOP],
+    [max, BUCKET_LAT_TOP],
+    [max, BUCKET_LAT_BOTTOM],
+    [min, BUCKET_LAT_BOTTOM],
   ];
 }
 
 function bucketToPixel(bucketIndex, [lng, lat]) {
   return [
     ((lng - bucketMinLng(bucketIndex)) / BUCKET_LNG_SPAN) * BUCKET_CANVAS_WIDTH,
-    ((90 - lat) / 180) * BUCKET_CANVAS_HEIGHT,
+    ((MERC_TOP - mercY(lat)) / (MERC_TOP - MERC_BOTTOM)) * BUCKET_CANVAS_HEIGHT,
   ];
 }
 
@@ -214,19 +233,24 @@ function buildFlagRaster(image, rings) {
       if (lat > maxLat) maxLat = lat;
     }
   }
+  minLat = Math.max(-LAT_LIMIT, minLat);
+  maxLat = Math.min(LAT_LIMIT, maxLat);
   const lngSpan = maxLng - minLng;
-  const latSpan = maxLat - minLat;
-  if (!(lngSpan > 1e-5) || !(latSpan > 1e-5)) return null;
+  if (!(lngSpan > 1e-5) || !(maxLat - minLat > 1e-5)) return null;
 
-  const scale = FLAG_RASTER_MAX_DIM / Math.max(lngSpan, latSpan);
-  const width = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(lngSpan * scale)));
-  const height = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(latSpan * scale)));
+  // Розміри canvas — пропорційні до Mercator-простору (те, що бачить карта).
+  const lngRad = (lngSpan * Math.PI) / 180;
+  const yTop = mercY(maxLat);
+  const ySpan = yTop - mercY(minLat);
+  const scale = FLAG_RASTER_MAX_DIM / Math.max(lngRad, ySpan);
+  const width = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(lngRad * scale)));
+  const height = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(ySpan * scale)));
 
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
-  const toXY = ([lng, lat]) => [((lng - minLng) / lngSpan) * width, ((maxLat - lat) / latSpan) * height];
+  const toXY = ([lng, lat]) => [((lng - minLng) / lngSpan) * width, ((yTop - mercY(lat)) / ySpan) * height];
 
   ctx.beginPath();
   for (const ring of rings) {
