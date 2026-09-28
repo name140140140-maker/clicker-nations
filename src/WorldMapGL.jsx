@@ -26,10 +26,19 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // offscreen-canvas на відро) — усього 6 невеликих image-source замість
 // сотень, і кожне з них безпечного розміру (один гігантський растр на
 // весь світ або координати за межами ±180° у MapLibre рендеряться
-// ненадійно — саме так прапори одного разу повністю зникли). Кілька
-// шматків через лінію зміни дат (Росія/США/Фіджі/Кірибаті/НЗ/Антарктида)
-// мають окремі маленькі джерела. При зміні cityControl відра
+// ненадійно — саме так прапори одного разу повністю зникли). Малюємо в
+// Web Mercator-y (не лінійно по широті), інакше картинка "зсувається"
+// відносно того, що показує сама карта. При зміні cityControl відра
 // перемальовуються й оновлюються на місці (source.updateImage).
+//
+// Кожен ОКРЕМИЙ шматок суші (материк/острів/ексклав) обробляється своєю
+// логікою: дрібний шматок або шматок через лінію зміни дат — власний
+// маленький canvas (чіткий, незалежно від розміру країни-власника);
+// головний (найбільший) шматок кластера чи далека заморська територія —
+// спільне "відро"; а великий сусідній острів близько до материка прапора
+// не отримує (колір заливки й так показує власника). Обробка кожного
+// кластера обгорнута в try/catch — одна "погана" країна більше не обриває
+// цикл і не забирає прапори з усіх, хто йде далі в тому проході.
 //
 // ЗАВАНТАЖЕННЯ: карта показується користувачу лише коли справді все
 // готово (топологія + прапори + перше запікання) — жодного "відкрито, але
@@ -51,7 +60,7 @@ const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
 const FLAG_BUCKET_SOURCE_PREFIX = "flags-bucket-";
-const FLAG_ANTI_SOURCE_PREFIX = "flags-anti-";
+const FLAG_INDIVIDUAL_SOURCE_PREFIX = "flags-individual-"; // окремі шматки через лінію дати + всі дрібні (чіткі) шматки
 
 // Прапори запікаються не в один гігантський растр на весь світ (MapLibre
 // має відомі проблеми з image-source, що охоплює майже весь світ або
@@ -64,7 +73,23 @@ const FLAG_ANTI_SOURCE_PREFIX = "flags-anti-";
 const BUCKET_COUNT = 6;
 const BUCKET_LNG_SPAN = 360 / BUCKET_COUNT;
 const BUCKET_CANVAS_WIDTH = 360;
-const FLAG_RASTER_MAX_DIM = 192; // розмір canvas для окремих шматків через лінію дати (px)
+const FLAG_RASTER_MAX_DIM = 224; // розмір canvas для окремих (некрупних) шматків — чіткіше за спільні "відра"
+
+// "Відра" мають фіксовану роздільну здатність на градус, тому дрібна країна
+// отримує мало пікселів під свій прапор і виглядає розмито при наближенні
+// (а величезна країна — детально, просто тому що вона велика). Тому кожен
+// ОКРЕМИЙ шматок суші класифікуємо:
+//  - дрібний (площа bbox < SMALL_PART_AREA_DEG2) → власний маленький
+//    canvas із власною роздільною здатністю (чітко, незалежно від розміру
+//    країни-власника);
+//  - головний (найбільший) шматок кластера, або далекий (> FAR_DISTANCE_DEG
+//    від головного, напр. заморська територія) → спільне "відро" (досить
+//    чітко, бо територія й так велика на екрані);
+//  - інакше (великий, але близький до головного сусідній острів) — прапор
+//    на ньому НЕ малюємо: колір заливки й так показує чию це територію,
+//    зайвий прапор на кожному сусідньому острові лише захаращує карту.
+const SMALL_PART_AREA_DEG2 = 4; // приблизно 2°×2° — трохи більше за Кіпр
+const FAR_DISTANCE_DEG = 20; // за цією відстанню від головної частини вважаємо територію "заморською"
 
 // ВАЖЛИВО: MapLibre розтягує image-source ЛІНІЙНО між кутами в просторі
 // Web Mercator, а Mercator по вертикалі нелінійний (ширина ±90° = майже
@@ -159,6 +184,15 @@ function loadFlagImage(innerSvg) {
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
+      // Іноді onload спрацьовує для зображення з нульовим розміром (битий
+      // SVG) — ctx.drawImage() з таким зображенням кидає виняток, який без
+      // цієї перевірки міг би обірвати весь цикл запікання (і "зʼїсти"
+      // прапори всіх країн, що йдуть далі в тому проході). Тому трактуємо
+      // це як помилку завантаження тут, а не пізніше під час малювання.
+      if (!img.naturalWidth || !img.naturalHeight) {
+        reject(new Error("Прапор завантажився з нульовим розміром"));
+        return;
+      }
       resolve(img);
     };
     img.onerror = (e) => {
@@ -167,6 +201,27 @@ function loadFlagImage(innerSvg) {
     };
     img.src = url;
   });
+}
+
+// Прапор Непала — єдиний у світі НЕпрямокутний державний прапор (два
+// складені вимпели). У квадратному SVG viewBox навколо самого вимпела
+// лишається прозорий простір, і коли ми розтягуємо цей квадрат на
+// прямокутну територію країни, частина території лишається без кольору
+// (видно голу заливку суші). Тому для Непала домальовуємо суцільну
+// підкладку кольору поля прапора ПІД вимпелом один раз при завантаженні —
+// результат уже повністю непрозорий прямокутник, як у решти прапорів.
+const FLAG_BACKGROUND_FIX = { np: "#c8102e" };
+function applyFlagBackgroundFix(iso, image) {
+  const color = FLAG_BACKGROUND_FIX[iso];
+  if (!color) return image;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 0, 0);
+  return canvas; // canvas — коректне джерело для ctx.drawImage(), так само як Image
 }
 
 // Малює один шматок території в усі "відра", яких він торкається: прапор,
@@ -405,7 +460,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const adjacencyRef = useRef(null); // Map(regionIndex -> Set(regionIndex))
   const flagImageCacheRef = useRef(new Map()); // iso(lowercase) -> завантажений Image
   const bucketCanvasesRef = useRef(null); // persistent offscreen-canvas на кожне "відро" довготи
-  const antiLayersRef = useRef([]); // [{ sourceId, layerId }] — окремі шматки через лінію дати
+  const individualLayersRef = useRef([]); // [{ sourceId, layerId }] — власні шари для дрібних/крайових шматків
   const flagGenerationRef = useRef(0); // лічильник перебудов — скасовує застарілі фонові перебудови
   const rebakeTimerRef = useRef(null);
   const flagsReadyRef = useRef(false); // true після першого успішного запікання
@@ -430,7 +485,7 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       center: [20, 35],
       zoom: 1.3,
       minZoom: 1,
-      maxZoom: 7,
+      maxZoom: 10,
       attributionControl: false,
     });
     map.touchZoomRotate.disableRotation();
@@ -473,26 +528,66 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         return ctx;
       });
-      const antiRasters = [];
+      const individualRasters = []; // дрібні шматки + шматки через лінію дати — кожен власним джерелом
 
       for (let start = 0; start < clusters.length; start += FLAG_BAKE_BATCH_SIZE) {
         if (flagGenerationRef.current !== generation) return; // новіша перебудова вже запущена — цю кидаємо
 
         const batch = clusters.slice(start, start + FLAG_BAKE_BATCH_SIZE);
         for (const cluster of batch) {
-          const image = flagImageCacheRef.current.get(String(cluster.owner || "").toLowerCase());
-          if (!image) continue; // немає прапора для цього власника — просто не малюємо
+          // Один "поганий" кластер (дивна геометрія, збій merge) не повинен
+          // обривати цикл і забирати прапори з УСІХ кластерів, що йдуть
+          // далі в цьому проході — а саме так раніше й губилась велика
+          // випадкова на вигляд підмножина країн.
+          try {
+            const image = flagImageCacheRef.current.get(String(cluster.owner || "").toLowerCase());
+            if (!image) continue; // немає прапора для цього власника — просто не малюємо
 
-          const geometries = cluster.members.map((idx) => regionMeta[idx].geometry);
-          const merged = topojson.merge(topology, geometries);
-          for (const rings of toParts(merged)) {
-            if (!rings.length) continue;
-            if (isAntimeridianPart(rings)) {
-              const raster = buildFlagRaster(image, unwrapAntimeridian(rings));
-              if (raster) antiRasters.push(raster);
-            } else {
-              drawPartIntoBuckets(bucketCtxs, image, rings);
+            const geometries = cluster.members.map((idx) => regionMeta[idx].geometry);
+            const merged = topojson.merge(topology, geometries);
+            const rawParts = toParts(merged).filter((rings) => rings.length);
+            if (!rawParts.length) continue;
+
+            const partsMeta = rawParts.map((rings) => {
+              let minLng = Infinity;
+              let minLat = Infinity;
+              let maxLng = -Infinity;
+              let maxLat = -Infinity;
+              for (const ring of rings) {
+                for (const [lng, lat] of ring) {
+                  if (lng < minLng) minLng = lng;
+                  if (lng > maxLng) maxLng = lng;
+                  if (lat < minLat) minLat = lat;
+                  if (lat > maxLat) maxLat = lat;
+                }
+              }
+              return {
+                rings,
+                area: Math.max(0, maxLng - minLng) * Math.max(0, maxLat - minLat),
+                cx: (minLng + maxLng) / 2,
+                cy: (minLat + maxLat) / 2,
+              };
+            });
+            const main = partsMeta.reduce((a, b) => (b.area > a.area ? b : a));
+
+            for (const part of partsMeta) {
+              const isMain = part === main;
+              const isSmall = part.area < SMALL_PART_AREA_DEG2;
+              const isFar = !isMain && Math.hypot(part.cx - main.cx, part.cy - main.cy) > FAR_DISTANCE_DEG;
+              if (!isMain && !isSmall && !isFar) continue; // великий сусідній острів близько до материка — заливки досить
+
+              if (isAntimeridianPart(part.rings)) {
+                const raster = buildFlagRaster(image, unwrapAntimeridian(part.rings));
+                if (raster) individualRasters.push(raster);
+              } else if (isSmall) {
+                const raster = buildFlagRaster(image, part.rings); // власний чіткий canvas — незалежно від розміру країни
+                if (raster) individualRasters.push(raster);
+              } else {
+                drawPartIntoBuckets(bucketCtxs, image, part.rings);
+              }
             }
+          } catch (err) {
+            console.warn("Пропускаю прапор для кластера", cluster.owner, err);
           }
         }
 
@@ -523,9 +618,10 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         }
       });
 
-      // Шматки через лінію дати: їх мало, тож просто замінюємо повністю.
-      const nextAnti = antiRasters.map((raster, index) => {
-        const sourceId = `${FLAG_ANTI_SOURCE_PREFIX}${generation}-${index}`;
+      // Дрібні/крайові шматки: помірна кількість (не сотні), тож просто
+      // замінюємо повністю щоразу.
+      const nextIndividual = individualRasters.map((raster, index) => {
+        const sourceId = `${FLAG_INDIVIDUAL_SOURCE_PREFIX}${generation}-${index}`;
         const layerId = `${sourceId}-layer`;
         map.addSource(sourceId, { type: "image", url: raster.dataUrl, coordinates: raster.coordinates });
         map.addLayer({
@@ -536,11 +632,11 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         });
         return { sourceId, layerId };
       });
-      for (const { sourceId, layerId } of antiLayersRef.current) {
+      for (const { sourceId, layerId } of individualLayersRef.current) {
         if (map.getLayer(layerId)) map.removeLayer(layerId);
         if (map.getSource(sourceId)) map.removeSource(sourceId);
       }
-      antiLayersRef.current = nextAnti;
+      individualLayersRef.current = nextIndividual;
     }
 
     map.on("load", async () => {
@@ -677,9 +773,9 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             entries.map(async ([isoLower, svg]) => {
               try {
                 const image = await loadFlagImage(svg);
-                flagImageCacheRef.current.set(isoLower, image);
-              } catch {
-                // Один битий прапор не повинен ламати решту карти.
+                flagImageCacheRef.current.set(isoLower, applyFlagBackgroundFix(isoLower, image));
+              } catch (err) {
+                console.warn("Не вдалося завантажити прапор", isoLower, err);
               }
               loadedCount += 1;
               setLoadProgress(STAGE_WEIGHTS.topology + (loadedCount / entries.length) * STAGE_WEIGHTS.flagImages);
