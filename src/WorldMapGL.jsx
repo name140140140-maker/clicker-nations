@@ -22,15 +22,14 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // ~300 мс) і при першому завантаженні (сотні шарів одразу) це й дало
 // відчутні лаги.
 //
-// ТЕПЕР: ОДИН спільний "атлас" — persistent offscreen-canvas на ввесь світ
-// (з невеликим буфером довготи праворуч для країн, що перетинають лінію
-// зміни дат: Росія/США/Фіджі/Кірибаті/Нова Зеландія/Антарктида). Кожен
-// прапор кожного власника малюється (обрізаний по контуру, як і раніше)
-// прямо в цей спільний canvas, а в кінці — ОДИН toDataURL і ОДИН
-// image-source + ОДИН raster-layer на всю карту. При зміні cityControl
-// повторно перемальовуємо той самий canvas і оновлюємо ЦЕЙ ЖЕ source
-// (source.updateImage), а не створюємо нові шари — тому захоплення
-// території більше не смикає продуктивність карти.
+// ТЕПЕР: прапори запікаються в 6 "відер" по 60° довготи (persistent
+// offscreen-canvas на відро) — усього 6 невеликих image-source замість
+// сотень, і кожне з них безпечного розміру (один гігантський растр на
+// весь світ або координати за межами ±180° у MapLibre рендеряться
+// ненадійно — саме так прапори одного разу повністю зникли). Кілька
+// шматків через лінію зміни дат (Росія/США/Фіджі/Кірибаті/НЗ/Антарктида)
+// мають окремі маленькі джерела. При зміні cityControl відра
+// перемальовуються й оновлюються на місці (source.updateImage).
 //
 // ЗАВАНТАЖЕННЯ: карта показується користувачу лише коли справді все
 // готово (топологія + прапори + перше запікання) — жодного "відкрито, але
@@ -51,30 +50,55 @@ const COLOR_MINE = "#f4b942";
 const COLOR_BORDER = "#4a7a3d"; // темніший зелений для меж областей поверх суші
 const COLOR_SELECTED_LINE = "#1f2d3d";
 const FLAG_FILL_OPACITY = 0.4; // напівпрозорість прапора — колір землі лишається видимим
-const FLAG_SOURCE_ID = "flags-world";
-const FLAG_LAYER_ID = "flags-world-layer";
+const FLAG_BUCKET_SOURCE_PREFIX = "flags-bucket-";
+const FLAG_ANTI_SOURCE_PREFIX = "flags-anti-";
 
-// Спільний "атлас"-canvas охоплює довготу [-180, 200] (буфер +20° праворуч
-// для розгорнутих координат країн через лінію зміни дат — див.
-// unwrapAntimeridian нижче) і всю широту [-90, 90].
-const WORLD_LNG_MIN = -180;
-const WORLD_LNG_MAX = 200;
-const WORLD_LAT_MIN = -90;
-const WORLD_LAT_MAX = 90;
-const WORLD_CANVAS_WIDTH = 2048;
-const WORLD_CANVAS_HEIGHT = 1024;
-const WORLD_IMAGE_CORNERS = [
-  [WORLD_LNG_MIN, WORLD_LAT_MAX],
-  [WORLD_LNG_MAX, WORLD_LAT_MAX],
-  [WORLD_LNG_MAX, WORLD_LAT_MIN],
-  [WORLD_LNG_MIN, WORLD_LAT_MIN],
-];
+// Прапори запікаються не в один гігантський растр на весь світ (MapLibre
+// має відомі проблеми з image-source, що охоплює майже весь світ або
+// виходить за ±180° довготи — зображення обрізається або не
+// рендериться), а в кілька "відер" по 60° довготи кожне: невеликі,
+// безпечні за розміром image-source, яких усього 6 (замість сотень
+// окремих шарів). Країни, що фізично перетинають лінію зміни дат,
+// малюються окремо — кожна власним маленьким джерелом (їх лише
+// кілька), як і раніше.
+const BUCKET_COUNT = 6;
+const BUCKET_LNG_SPAN = 360 / BUCKET_COUNT;
+const BUCKET_CANVAS_WIDTH = 360;
+const BUCKET_CANVAS_HEIGHT = 1080;
+const FLAG_RASTER_MAX_DIM = 192; // розмір canvas для окремих шматків через лінію дати (px)
 
-function worldToPixel([lng, lat]) {
+function bucketMinLng(index) {
+  return -180 + index * BUCKET_LNG_SPAN;
+}
+
+function bucketCorners(index) {
+  const min = bucketMinLng(index);
+  const max = min + BUCKET_LNG_SPAN;
   return [
-    ((lng - WORLD_LNG_MIN) / (WORLD_LNG_MAX - WORLD_LNG_MIN)) * WORLD_CANVAS_WIDTH,
-    ((WORLD_LAT_MAX - lat) / (WORLD_LAT_MAX - WORLD_LAT_MIN)) * WORLD_CANVAS_HEIGHT,
+    [min, 90],
+    [max, 90],
+    [max, -90],
+    [min, -90],
   ];
+}
+
+function bucketToPixel(bucketIndex, [lng, lat]) {
+  return [
+    ((lng - bucketMinLng(bucketIndex)) / BUCKET_LNG_SPAN) * BUCKET_CANVAS_WIDTH,
+    ((90 - lat) / 180) * BUCKET_CANVAS_HEIGHT,
+  ];
+}
+
+function isAntimeridianPart(rings) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const ring of rings) {
+    for (const [lng] of ring) {
+      if (lng < min) min = lng;
+      if (lng > max) max = lng;
+    }
+  }
+  return max - min > 180;
 }
 
 // Розбиває Polygon/MultiPolygon на окремі частини (материк, острови,
@@ -92,8 +116,8 @@ function toParts(geometry) {
 // Антарктида) фізично перетинають лінію зміни дат (довгота ±180°). Без
 // цієї корекції координати по різні боки лінії дають bounding box шириною
 // у весь світ. Зсуваємо "невигідну" половину точок на +360°, щоб контур
-// лишався компактним прямокутником у довготі (звідси й буфер WORLD_LNG_MAX
-// вище — щоб розгорнуті координати влізли в спільний атлас).
+// лишався компактним прямокутником у довготі (такі шматки йдуть окремими
+// маленькими image-source, а не у "відра").
 function unwrapAntimeridian(rings) {
   let min = Infinity;
   let max = -Infinity;
@@ -126,12 +150,11 @@ function loadFlagImage(innerSvg) {
   });
 }
 
-// Малює один шматок території (rings у географічних координатах) прямо в
-// СПІЛЬНИЙ атлас-canvas: прапор, обрізаний точно по контуру. На відміну
-// від попередньої версії тут немає власного canvas і власного toDataURL
-// на кожен шматок — усе йде в один и той самий контекст, кодується в PNG
-// рівно один раз, після того як усі прапори вже намальовані.
-function drawClusterFlag(ctx, image, rings) {
+// Малює один шматок території в усі "відра", яких він торкається: прапор,
+// обрізаний по контуру. Частина, що виходить за межі canvas відра,
+// обрізається самим canvas — тож шматки в сусідніх відрах стикуються
+// бездоганно, як плитки однієї картинки.
+function drawPartIntoBuckets(bucketCtxs, image, rings) {
   let minLng = Infinity;
   let minLat = Infinity;
   let maxLng = -Infinity;
@@ -146,29 +169,88 @@ function drawClusterFlag(ctx, image, rings) {
   }
   if (!(maxLng - minLng > 1e-5) || !(maxLat - minLat > 1e-5)) return;
 
-  const [boxX0, boxY0] = worldToPixel([minLng, maxLat]);
-  const [boxX1, boxY1] = worldToPixel([maxLng, minLat]);
-  const boxX = Math.min(boxX0, boxX1);
-  const boxY = Math.min(boxY0, boxY1);
-  const boxW = Math.abs(boxX1 - boxX0);
-  const boxH = Math.abs(boxY1 - boxY0);
-  if (boxW < 0.5 || boxH < 0.5) return;
+  const first = Math.max(0, Math.floor((minLng + 180) / BUCKET_LNG_SPAN));
+  const last = Math.min(BUCKET_COUNT - 1, Math.floor((maxLng + 180) / BUCKET_LNG_SPAN));
 
-  ctx.save();
+  for (let b = first; b <= last; b++) {
+    const ctx = bucketCtxs[b];
+    if (!ctx) continue;
+    const [x0, y0] = bucketToPixel(b, [minLng, maxLat]);
+    const [x1, y1] = bucketToPixel(b, [maxLng, minLat]);
+    const boxW = Math.abs(x1 - x0);
+    const boxH = Math.abs(y1 - y0);
+    if (boxW < 0.5 || boxH < 0.5) continue;
+
+    ctx.save();
+    ctx.beginPath();
+    for (const ring of rings) {
+      if (!ring.length) continue;
+      const [rx, ry] = bucketToPixel(b, ring[0]);
+      ctx.moveTo(rx, ry);
+      for (let i = 1; i < ring.length; i++) {
+        const [px, py] = bucketToPixel(b, ring[i]);
+        ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    }
+    ctx.clip();
+    ctx.drawImage(image, Math.min(x0, x1), Math.min(y0, y1), boxW, boxH);
+    ctx.restore();
+  }
+}
+
+// Для рідкісних шматків через лінію дати: власний маленький canvas і
+// власні 4 кути (розгорнуті координати) — перевірений спосіб.
+function buildFlagRaster(image, rings) {
+  let minLng = Infinity;
+  let minLat = Infinity;
+  let maxLng = -Infinity;
+  let maxLat = -Infinity;
+  for (const ring of rings) {
+    for (const [lng, lat] of ring) {
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+  }
+  const lngSpan = maxLng - minLng;
+  const latSpan = maxLat - minLat;
+  if (!(lngSpan > 1e-5) || !(latSpan > 1e-5)) return null;
+
+  const scale = FLAG_RASTER_MAX_DIM / Math.max(lngSpan, latSpan);
+  const width = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(lngSpan * scale)));
+  const height = Math.max(4, Math.min(FLAG_RASTER_MAX_DIM, Math.round(latSpan * scale)));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  const toXY = ([lng, lat]) => [((lng - minLng) / lngSpan) * width, ((maxLat - lat) / latSpan) * height];
+
   ctx.beginPath();
   for (const ring of rings) {
     if (!ring.length) continue;
-    const [x0, y0] = worldToPixel(ring[0]);
+    const [x0, y0] = toXY(ring[0]);
     ctx.moveTo(x0, y0);
     for (let i = 1; i < ring.length; i++) {
-      const [x, y] = worldToPixel(ring[i]);
+      const [x, y] = toXY(ring[i]);
       ctx.lineTo(x, y);
     }
     ctx.closePath();
   }
   ctx.clip();
-  ctx.drawImage(image, boxX, boxY, boxW, boxH);
-  ctx.restore();
+  ctx.drawImage(image, 0, 0, width, height);
+
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    coordinates: [
+      [minLng, maxLat],
+      [maxLng, maxLat],
+      [maxLng, minLat],
+      [minLng, minLat],
+    ],
+  };
 }
 
 // Суміжність областей рахується по топології один раз: якщо арку
@@ -298,7 +380,8 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const regionMetaRef = useRef(null); // [{ iso, cnKey, geometry }]
   const adjacencyRef = useRef(null); // Map(regionIndex -> Set(regionIndex))
   const flagImageCacheRef = useRef(new Map()); // iso(lowercase) -> завантажений Image
-  const worldCanvasRef = useRef(null); // persistent offscreen-canvas — атлас усіх прапорів
+  const bucketCanvasesRef = useRef(null); // persistent offscreen-canvas на кожне "відро" довготи
+  const antiLayersRef = useRef([]); // [{ sourceId, layerId }] — окремі шматки через лінію дати
   const flagGenerationRef = useRef(0); // лічильник перебудов — скасовує застарілі фонові перебудови
   const rebakeTimerRef = useRef(null);
   const flagsReadyRef = useRef(false); // true після першого успішного запікання
@@ -338,11 +421,11 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
     mapRef.current = map;
 
-    // Перемальовує спільний атлас-canvas під актуальний cityControl і
-    // оновлює ОДИН image-source (без створення нових шарів). Розбито на
-    // пачки (FLAG_BAKE_BATCH_SIZE кластерів за прохід) з очікуванням
-    // кадру між ними; скасовує сама себе (перевірка generation), якщо
-    // тим часом уже запущена новіша перебудова.
+    // Перемальовує "відра" прапорів під актуальний cityControl і оновлює
+    // їхні image-source на місці (їх усього BUCKET_COUNT) + кілька окремих
+    // шарів для шматків через лінію дати. Розбито на пачки з очікуванням
+    // кадру між ними; скасовує сама себе (generation), якщо тим часом
+    // запущена новіша перебудова.
     async function rebuildFlagLayers(cityControlSnapshot, onBatchProgress) {
       const topology = topologyRef.current;
       const regionMeta = regionMetaRef.current;
@@ -352,15 +435,21 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
       const generation = ++flagGenerationRef.current;
       const clusters = computeOwnerClusters(regionMeta, adjacency, cityControlSnapshot);
 
-      let canvas = worldCanvasRef.current;
-      if (!canvas) {
-        canvas = document.createElement("canvas");
-        canvas.width = WORLD_CANVAS_WIDTH;
-        canvas.height = WORLD_CANVAS_HEIGHT;
-        worldCanvasRef.current = canvas;
+      if (!bucketCanvasesRef.current) {
+        bucketCanvasesRef.current = Array.from({ length: BUCKET_COUNT }, () => {
+          const canvas = document.createElement("canvas");
+          canvas.width = BUCKET_CANVAS_WIDTH;
+          canvas.height = BUCKET_CANVAS_HEIGHT;
+          return canvas;
+        });
       }
-      const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const canvases = bucketCanvasesRef.current;
+      const bucketCtxs = canvases.map((canvas) => {
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return ctx;
+      });
+      const antiRasters = [];
 
       for (let start = 0; start < clusters.length; start += FLAG_BAKE_BATCH_SIZE) {
         if (flagGenerationRef.current !== generation) return; // новіша перебудова вже запущена — цю кидаємо
@@ -368,13 +457,18 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         const batch = clusters.slice(start, start + FLAG_BAKE_BATCH_SIZE);
         for (const cluster of batch) {
           const image = flagImageCacheRef.current.get(String(cluster.owner || "").toLowerCase());
-          if (!image) continue; // немає прапора для цього власника — просто не малюємо (колір заливки лишається)
+          if (!image) continue; // немає прапора для цього власника — просто не малюємо
 
           const geometries = cluster.members.map((idx) => regionMeta[idx].geometry);
           const merged = topojson.merge(topology, geometries);
-          const parts = toParts(merged).map(unwrapAntimeridian);
-          for (const rings of parts) {
-            if (rings.length) drawClusterFlag(ctx, image, rings);
+          for (const rings of toParts(merged)) {
+            if (!rings.length) continue;
+            if (isAntimeridianPart(rings)) {
+              const raster = buildFlagRaster(image, unwrapAntimeridian(rings));
+              if (raster) antiRasters.push(raster);
+            } else {
+              drawPartIntoBuckets(bucketCtxs, image, rings);
+            }
           }
         }
 
@@ -384,28 +478,45 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
 
       if (flagGenerationRef.current !== generation) return; // ще одна перевірка перед публікацією
 
-      const dataUrl = canvas.toDataURL("image/png");
-      const existingSource = map.getSource(FLAG_SOURCE_ID);
-      if (existingSource && typeof existingSource.updateImage === "function") {
-        existingSource.updateImage({ url: dataUrl });
-      } else {
-        if (map.getLayer(FLAG_LAYER_ID)) map.removeLayer(FLAG_LAYER_ID);
-        if (map.getSource(FLAG_SOURCE_ID)) map.removeSource(FLAG_SOURCE_ID);
-        map.addSource(FLAG_SOURCE_ID, {
-          type: "image",
-          url: dataUrl,
-          coordinates: WORLD_IMAGE_CORNERS,
-        });
+      // "Відра": по одному джерелу на відро, оновлюємо на місці.
+      canvases.forEach((canvas, index) => {
+        const sourceId = `${FLAG_BUCKET_SOURCE_PREFIX}${index}`;
+        const layerId = `${sourceId}-layer`;
+        const dataUrl = canvas.toDataURL("image/png");
+        const existing = map.getSource(sourceId);
+        if (existing && typeof existing.updateImage === "function") {
+          existing.updateImage({ url: dataUrl, coordinates: bucketCorners(index) });
+        } else {
+          if (map.getLayer(layerId)) map.removeLayer(layerId);
+          if (existing) map.removeSource(sourceId);
+          map.addSource(sourceId, { type: "image", url: dataUrl, coordinates: bucketCorners(index) });
+          map.addLayer({
+            id: layerId,
+            type: "raster",
+            source: sourceId,
+            paint: { "raster-opacity": FLAG_FILL_OPACITY, "raster-fade-duration": 0 },
+          });
+        }
+      });
+
+      // Шматки через лінію дати: їх мало, тож просто замінюємо повністю.
+      const nextAnti = antiRasters.map((raster, index) => {
+        const sourceId = `${FLAG_ANTI_SOURCE_PREFIX}${generation}-${index}`;
+        const layerId = `${sourceId}-layer`;
+        map.addSource(sourceId, { type: "image", url: raster.dataUrl, coordinates: raster.coordinates });
         map.addLayer({
-          id: FLAG_LAYER_ID,
+          id: layerId,
           type: "raster",
-          source: FLAG_SOURCE_ID,
-          paint: {
-            "raster-opacity": FLAG_FILL_OPACITY,
-            "raster-fade-duration": 0,
-          },
+          source: sourceId,
+          paint: { "raster-opacity": FLAG_FILL_OPACITY, "raster-fade-duration": 0 },
         });
+        return { sourceId, layerId };
+      });
+      for (const { sourceId, layerId } of antiLayersRef.current) {
+        if (map.getLayer(layerId)) map.removeLayer(layerId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
       }
+      antiLayersRef.current = nextAnti;
     }
 
     map.on("load", async () => {
