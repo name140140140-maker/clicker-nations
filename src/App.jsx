@@ -57,6 +57,7 @@ import {
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
 import WorldMap3D from "./WorldMapGL";
+import MaintenanceScreen from "./MaintenanceScreen";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
@@ -193,6 +194,7 @@ const EMPTY_GAME_STATE = {
   advisors: {}, // { [countryCode]: [playerId, ...] } — Рада (до MAX_ADVISORS)
   councilProposals: {}, // { [countryCode]: [proposal, ...] }
   rebellions: [], // повстання проти лідера/радника всередині країни
+  maintenance: { enabled: false, message: "" },
 };
 
 async function loadGameState() {
@@ -1252,6 +1254,7 @@ export default function App() {
   const [cityDefense, setCityDefense] = useState({});
   const [news, setNews] = useState([]);
   const [season, setSeason] = useState(EMPTY_GAME_STATE.season);
+  const [maintenance, setMaintenance] = useState(EMPTY_GAME_STATE.maintenance);
   const [isLeader, setIsLeader] = useState(false);
   const [isAdvisor, setIsAdvisor] = useState(false);
   const gameDataStaleRef = useRef(0);
@@ -1355,6 +1358,24 @@ export default function App() {
     },
     [player]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function checkMaintenance() {
+      try {
+        const state = await loadGameState();
+        if (!cancelled) setMaintenance(state.maintenance || EMPTY_GAME_STATE.maintenance);
+      } catch {
+        // не блокуємо гру, якщо перевірка не вдалась
+      }
+    }
+    checkMaintenance();
+    const t = setInterval(checkMaintenance, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
 
   useEffect(() => {
     if (player) refreshMail();
@@ -1655,7 +1676,9 @@ export default function App() {
   return (
     <div className="cn-root" style={THEMES[theme]?.vars}>
       <GlobalStyles />
-      {booting || tosStatus === "checking" || languageChosen === null ? (
+      {maintenance.enabled && !isSuperAdmin() ? (
+        <MaintenanceScreen message={maintenance.message} />
+      ) : booting || tosStatus === "checking" || languageChosen === null ? (
         <BootScreen lang={language} />
       ) : !languageChosen ? (
         <LanguageSelectScreen lang={language} onSetLanguage={setLanguage} onContinue={confirmLanguageChoice} />
@@ -5598,6 +5621,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
   const [adminSeasonDate, setAdminSeasonDate] = useState("");
   const [adminPassPrice, setAdminPassPrice] = useState("");
   const [adminPassPriceLoaded, setAdminPassPriceLoaded] = useState(false);
+  const [adminMaintMsg, setAdminMaintMsg] = useState(maintenance.message || "");
 
   useEffect(() => {
     if (!adminOpen || !isSuperAdmin()) return;
@@ -5669,6 +5693,16 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     setAdminBusy(true);
     await storageSet(PREMIUM_PASS_PRICE_KEY, JSON.stringify(price), true);
     setAdminMsg(`✓ Вартість Premium Pass тепер ${price} ⭐`);
+    setAdminBusy(false);
+  };
+
+  const toggleMaintenanceMode = async () => {
+    setAdminBusy(true);
+    const updated = await saveGameStatePart({
+      maintenance: { enabled: !maintenance.enabled, message: adminMaintMsg },
+    });
+    setMaintenance(updated.maintenance);
+    setAdminMsg(updated.maintenance.enabled ? "🛠 Технічний перерив увімкнено" : "✓ Технічний перерив вимкнено");
     setAdminBusy(false);
   };
 
@@ -5962,6 +5996,28 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                 />
                 <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={savePremiumPassPrice}>
                   Зберегти
+                </button>
+              </div>
+
+              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>
+                Технічний перерив {maintenance.enabled ? "(зараз УВІМКНЕНО 🛠)" : "(зараз вимкнено)"}
+              </div>
+              <div className="cn-admin-row">
+                <input
+                  className="cn-admin-input"
+                  type="text"
+                  placeholder="Повідомлення для гравців (необов'язково)"
+                  value={adminMaintMsg}
+                  onChange={(e) => setAdminMaintMsg(e.target.value)}
+                />
+                <button
+                  className="cn-dev-btn"
+                  type="button"
+                  disabled={adminBusy}
+                  onClick={toggleMaintenanceMode}
+                  style={maintenance.enabled ? { background: "#dc2626" } : undefined}
+                >
+                  {maintenance.enabled ? "Вимкнути" : "Увімкнути"}
                 </button>
               </div>
             </div>
