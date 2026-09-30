@@ -1739,6 +1739,11 @@ export default function App() {
                 onOpenTutorial={openTutorial}
                 lang={language}
                 onSetLanguage={setLanguage}
+                maintenance={maintenance}
+                onSaveMaintenance={async (payload) => {
+                  const updated = await saveGameStatePart({ maintenance: payload });
+                  setMaintenance(updated.maintenance);
+                }}
               />
             )}
             {tab === "season" && (
@@ -4556,6 +4561,8 @@ function ProfileScreen({
   onOpenTutorial,
   lang,
   onSetLanguage,
+  maintenance,
+  onSaveMaintenance,
 }) {
   const [view, setView] = useState("main"); // main | mail | settings | search | titles | icons | achievements | stats
   const country = COUNTRY_MAP[me.countryCode];
@@ -4659,6 +4666,8 @@ function ProfileScreen({
         onOpenTutorial={onOpenTutorial}
         lang={lang}
         onSetLanguage={onSetLanguage}
+        maintenance={maintenance}
+        onSaveMaintenance={onSaveMaintenance}
       />
     );
   }
@@ -5600,7 +5609,7 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
 /*  Settings (Theme + Developer/Test panel)                             */
 /* ------------------------------------------------------------------ */
 
-function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage }) {
+function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage, maintenance, onSaveMaintenance }) {
   const [devOpen, setDevOpen] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -5698,11 +5707,9 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
 
   const toggleMaintenanceMode = async () => {
     setAdminBusy(true);
-    const updated = await saveGameStatePart({
-      maintenance: { enabled: !maintenance.enabled, message: adminMaintMsg },
-    });
-    setMaintenance(updated.maintenance);
-    setAdminMsg(updated.maintenance.enabled ? "🛠 Технічний перерив увімкнено" : "✓ Технічний перерив вимкнено");
+    const nextEnabled = !maintenance.enabled;
+    await onSaveMaintenance({ enabled: nextEnabled, message: adminMaintMsg });
+    setAdminMsg(nextEnabled ? "🛠 Технічний перерив увімкнено" : "✓ Технічний перерив вимкнено");
     setAdminBusy(false);
   };
 
