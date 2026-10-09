@@ -49,3 +49,6 @@ npm run fetch:regions
 window.Telegram.WebApp.CloudStorage.setItem("save", JSON.stringify(gameState));
 ```
 Якщо хочеш — можу одразу додати збереження прогресу в код, просто напиши.
+
+## Карта світу
+Живі кордони, прапори на територіях, LOD та оптимізації — див. [`src/map/README.md`](src/map/README.md). Перевірка даних карти: `npm run audit:map`.
