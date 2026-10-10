@@ -12,7 +12,9 @@
       clip-path="url(#np-a)") лишились → у Китаю зникли зірки, в Індії спиці
       чакри, у Кореї триграми тощо. Ідентифікатори відновлюються (flagIdMap.js).
    3. Прапори — вектор: на карту вони малюються з SVG під фактичний розмір на
-      екрані (а не з маленьких растрових відер), тому не розмиваються при zoom. */
+      екрані (а не з маленьких растрових відер), тому не розмиваються при zoom;
+      малюється лише та частина прапора, що потрапляє на canvas, — тож навіть при
+      величезному збільшенні пам'ять і час малювання обмежені розміром екрана. */
 
 import { FLAG_ID_MAP } from "./flagIdMap.js";
 
@@ -57,7 +59,7 @@ export const FLAG_SHAPE_OVERRIDES = {
 const SHAPED_COVERAGE = 0.8;
 
 const TIERS = [32, 64, 128, 256, 512];
-const DIRECT_PX = 640; // більші штампи малюємо напряму з вектора — завжди чітко
+const DIRECT_PX = 512; // прапор більший за це (у фізичних px) малюємо напряму з вектора — завжди чітко
 
 function loadSvgImage(markup) {
   return new Promise((resolve, reject) => {
@@ -161,20 +163,40 @@ export class FlagStore {
     };
   }
 
-  /* Малює прапор у квадрат (x, y, s) напряму з вектора. Нестандартні
-     прапори вписуються цілком, а поле під ними заливається кольором прапора. */
-  drawVector(ctx, iso, x, y, s) {
-    const img = this.images.get(iso);
+  /* Малює прапор, розтягнутий у прямокутник (dx, dy, dw, dh) у координатах canvas, і лише ту його
+     частину, що потрапляє в [0,bw]×[0,bh]. Нестандартні прапори (Непал) вписуються ЦІЛКОМ у
+     квадрат dw×dh; поле навколо них заливає викликач (воно тим самим кольором, що й прапор). */
+  drawFlag(ctx, iso, dx, dy, dw, dh, bw, bh) {
     const info = this.info.get(iso);
-    if (!img || !info) return false;
-    ctx.fillStyle = info.field; // підкладка: ховає шви між смугами й закриває прозорі проміжки
-    ctx.fillRect(x, y, s, s);
-    if (!info.shaped) {
-      ctx.drawImage(img, x, y, s, s);
-    } else {
-      const k = s / Math.max(info.cw, info.ch); // розмір повного 512-боксу, щоб вміст рівно влізав у квадрат
-      ctx.drawImage(img, x + s / 2 - (info.cx + info.cw / 2) * k, y + s / 2 - (info.cy + info.ch / 2) * k, k, k);
+    const img = this.images.get(iso);
+    if (!info || !img) return false;
+    if (info.shaped) {
+      const k = Math.min(dw, dh) / Math.max(info.cw, info.ch); // розмір повного 512-боксу, щоб вміст рівно влізав
+      const fx = dx + dw / 2 - (info.cx + info.cw / 2) * k;
+      const fy = dy + dh / 2 - (info.cy + info.ch / 2) * k;
+      return this._paint(ctx, img, 512, fx, fy, k, k, bw, bh, null);
     }
+    const size = Math.max(dw, dh);
+    if (size > DIRECT_PX) return this._paint(ctx, img, 512, dx, dy, dw, dh, bw, bh, info.field);
+    const tier = this._tier(iso, size);
+    return this._paint(ctx, tier, tier.width, dx, dy, dw, dh, bw, bh, null);
+  }
+
+  _paint(ctx, source, srcSize, dx, dy, dw, dh, bw, bh, underlay) {
+    if (!(dw > 0) || !(dh > 0)) return false;
+    const vx0 = Math.max(0, dx), vy0 = Math.max(0, dy);
+    const vx1 = Math.min(bw, dx + dw), vy1 = Math.min(bh, dy + dh);
+    if (vx1 <= vx0 || vy1 <= vy0) return false;
+    if (underlay) { // підкладка: ховає шви між смугами й закриває прозорі проміжки
+      ctx.fillStyle = underlay;
+      ctx.fillRect(vx0, vy0, vx1 - vx0, vy1 - vy0);
+    }
+    ctx.drawImage(
+      source,
+      ((vx0 - dx) / dw) * srcSize, ((vy0 - dy) / dh) * srcSize,
+      ((vx1 - vx0) / dw) * srcSize, ((vy1 - vy0) / dh) * srcSize,
+      vx0, vy0, vx1 - vx0, vy1 - vy0,
+    );
     return true;
   }
 
@@ -184,21 +206,14 @@ export class FlagStore {
     let entry = this.tiers.get(key);
     if (!entry) {
       const canvas = makeCanvas(size, size);
-      this.drawVector(canvas.getContext("2d"), iso, 0, 0, size);
+      const ctx = canvas.getContext("2d");
+      const info = this.info.get(iso);
+      this._paint(ctx, this.images.get(iso), 512, 0, 0, size, size, size, size, info.field);
       entry = { canvas, used: this.epoch };
       this.tiers.set(key, entry);
     }
     entry.used = this.epoch;
     return entry.canvas;
-  }
-
-  /* Малює штамп прапора розміром s (у координатах ctx) — devPx = скільки
-     це фізичних пікселів (щоб обрати відповідну якість). */
-  stamp(ctx, iso, x, y, s, devPx) {
-    if (!this.images.has(iso)) return false;
-    if (devPx > DIRECT_PX) return this.drawVector(ctx, iso, x, y, s);
-    ctx.drawImage(this._tier(iso, devPx), x, y, s, s);
-    return true;
   }
 
   /* Викликається після кожного запікання: звільняє великі растри, які давно не потрібні. */
@@ -237,7 +252,10 @@ export class FlagStore {
     ctx.roundRect ? ctx.roundRect(pad, pad, iw, ih, r - 3) : ctx.rect(pad, pad, iw, ih);
     ctx.clip();
     const sq = makeCanvas(iw, iw);
-    this.drawVector(sq.getContext("2d"), iso, 0, 0, iw);
+    const sqCtx = sq.getContext("2d");
+    const info = this.info.get(iso);
+    if (info.shaped) { sqCtx.fillStyle = info.field; sqCtx.fillRect(0, 0, iw, iw); }
+    this.drawFlag(sqCtx, iso, 0, 0, iw, iw, iw, iw);
     ctx.drawImage(sq, 0, (iw - ih) / 2, iw, ih, pad, pad, iw, ih);
     ctx.restore();
     return ctx.getImageData(0, 0, w, h);

@@ -30,7 +30,7 @@ import { FlagOverlay } from "./map/flagOverlay.js";
 // пачки з поверненням керування браузеру, щоб інтерфейс не замерзав.
 const TOPOLOGY_URL = "/data/world-topology.json";
 const MAX_ZOOM = 14; // було 10; джерела мають maxzoom 10 — вище плитки розтягуються, а не перегенеровуються
-const SOURCE_MAX_ZOOM = 10;
+const SOURCE_MAX_ZOOM = 8; // вище плитки розтягуються (overzoom), а не генеруються — менше роботи воркеру й пам'яті; геометрія та сама
 
 const COLOR_WATER = "#7ec9e8";
 const COLOR_LAND_NEUTRAL = "#7fb069";
@@ -39,7 +39,10 @@ const COLOR_BORDER = "#4a7a3d"; // темніший зелений для вну
 const COLOR_STATE_LINE = "#1f2d3d";
 const INTERNAL_LINES_MIN_ZOOM = 3.2; // з якого зуму показувати межі областей
 const INTERNAL_LINES_FULL_ZOOM = 4.4;
-const FLASH_MS = 1500; // тривалість підсвічування щойно захопленої області
+const FLASH_MS = 1500; // тривалість спалаху контуру щойно захопленої області
+const MAX_FLASH_ARCS = 120; // обмеження кількості ліній, що анімуються
+const LAND_OPACITY = 0.85;
+const COLOR_FLASH = "#fff3b0";
 const MAX_CAPTURE_EVENTS_AT_ONCE = 25; // масова синхронізація не має засипати гравця сповіщеннями
 
 // Ваги етапів для суцільного прогрес-бару — сума дає 1.
@@ -49,6 +52,9 @@ const STAGE_WEIGHTS = { topology: 0.3, model: 0.15, geojson: 0.15, flagImages: 0
 const ownerA = ["string", ["feature-state", "oa"], ["get", "ia"]];
 const ownerB = ["string", ["feature-state", "ob"], ["get", "ib"]];
 const regionOwner = ["string", ["feature-state", "o"], ["get", "iso"]];
+const flashValue = ["number", ["feature-state", "flash"], 0];
+const isCoast = ["==", ["get", "two"], 0];
+const isHighlighted = ["boolean", ["feature-state", "h"], false];
 
 const nextFrame = () =>
   new Promise((resolve) => {
@@ -142,7 +148,8 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   const [loadStage, setLoadStage] = useState("Завантажуємо карту світу…");
 
   // Усе, що створюється при завантаженні й потрібне ефектам нижче.
-  const worldRef = useRef({ territory: null, overlay: null, flash: new Map(), flashRaf: 0 });
+  const worldRef = useRef({ territory: null, overlay: null, flash: new Map(), flashRaf: 0, highlightOwner: "" });
+  const fillOwnerRef = useRef(null); // для кого зараз налаштовано золоту заливку
   // Актуальні пропси для довгоживучих обробників карти (щоб не перестворювати їх).
   const latest = useRef({});
   latest.current = { onSelect, onCapture, cityControl, myCountryCode, selected };
@@ -218,24 +225,23 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
         addGeoJsonSource(map, "borders", bordersBlob, { maxzoom: SOURCE_MAX_ZOOM });
 
         // --- шари (порядок = порядок малювання) ---
+        // Усі вирази залежать лише від feature-state: після створення шарів їх НЕ змінюємо —
+        // setPaintProperty для data-driven виразів перебудовує всі плитки джерела (важко на телефонах).
+        const myAtStart = latest.current.myCountryCode || "";
+        fillOwnerRef.current = myAtStart;
         map.addLayer({
           id: "regions-fill",
           type: "fill",
           source: "regions",
-          paint: { "fill-color": COLOR_LAND_NEUTRAL, "fill-opacity": 0.85 },
+          paint: { "fill-color": ["case", ["==", regionOwner, myAtStart], COLOR_MINE, COLOR_LAND_NEUTRAL], "fill-opacity": LAND_OPACITY },
         });
-        // прапори (image-source) вставляються перед цим шаром; вище — спалах захоплення й кордони
-        map.addLayer({
-          id: "regions-flash",
-          type: "fill",
-          source: "regions",
-          paint: { "fill-color": "#fff3b0", "fill-opacity": ["*", 0.8, ["number", ["feature-state", "flash"], 0]] },
-        });
+        // растри прапорів (базовий і детальний) вставляються перед цим шаром — під лініями
         // Внутрішні межі областей (між областями ОДНОГО власника): з'являються при наближенні.
         map.addLayer({
           id: "borders-internal",
           type: "line",
           source: "borders",
+          minzoom: INTERNAL_LINES_MIN_ZOOM,
           filter: ["==", ["get", "two"], 1],
           paint: {
             "line-color": COLOR_BORDER,
@@ -243,38 +249,25 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             "line-opacity": ["interpolate", ["linear"], ["zoom"], INTERNAL_LINES_MIN_ZOOM, 0, INTERNAL_LINES_FULL_ZOOM, 0.6],
           },
         });
-        // Узбережжя / зовнішній контур — завжди.
+        // Усі інші лінії — ОДИН шар (кожен додатковий шар дублює геометрію в пам'яті):
+        //  • ЖИВИЙ ДЕРЖАВНИЙ КОРДОН — де поточні власники сторін різні;
+        //  • узбережжя (зовнішній контур) — тонша й світліша лінія;
+        //  • контур вибраної країни за її ПОТОЧНОЮ територією (feature-state h);
+        //  • спалах контуру щойно захопленої області (feature-state flash).
         map.addLayer({
-          id: "borders-coast",
-          type: "line",
-          source: "borders",
-          filter: ["==", ["get", "two"], 0],
-          paint: { "line-color": COLOR_STATE_LINE, "line-width": 0.9, "line-opacity": 0.55 },
-        });
-        // ЖИВИЙ ДЕРЖАВНИЙ КОРДОН: лише там, де поточні власники сторін різні.
-        for (const [id, minzoom, maxzoom, width] of [["borders-state-lo", 0, 6, 1.3], ["borders-state-hi", 6, 24, 2.3]]) {
-          map.addLayer({
-            id,
-            type: "line",
-            source: "borders",
-            minzoom,
-            maxzoom,
-            filter: ["==", ["get", "two"], 1],
-            layout: { "line-join": "round" },
-            paint: { "line-color": COLOR_STATE_LINE, "line-width": ["case", ["!=", ownerA, ownerB], width, 0], "line-opacity": 0.92 },
-          });
-        }
-        // Контур вибраної країни (за ПОТОЧНОЮ територією власника): де рівно одна зі сторін — вибраний власник.
-        map.addLayer({
-          id: "borders-selected",
+          id: "borders-main",
           type: "line",
           source: "borders",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": COLOR_STATE_LINE, "line-width": 0, "line-opacity": 1 },
+          paint: {
+            "line-color": ["case", [">", flashValue, 0.02], COLOR_FLASH, COLOR_STATE_LINE],
+            "line-width": ["max", ["*", 6, flashValue], ["case", isHighlighted, 2.6, isCoast, 0.9, ["!=", ownerA, ownerB], 1.6, 0]],
+            "line-opacity": ["case", [">", flashValue, 0.02], 1, isCoast, 0.55, 0.92],
+          },
         });
 
         // Поточні власники → стан областей і кордонів (після першого завантаження — лише відмінні від рідних).
-        applyOwnerChanges(map, territory, initialChanges);
+        applyOwnerChanges(map, territory, initialChanges, "");
 
         // --- взаємодія: вибір країни за ПОТОЧНИМ власником ---
         map.on("click", (event) => {
@@ -301,10 +294,17 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
             base += STAGE_WEIGHTS.flagImages;
             setLoadStage("Малюємо прапори на карті…");
             await nextFrame();
-            const overlay = new FlagOverlay({ map, territory, flags: store, beforeLayerId: "regions-flash" });
+            const overlay = new FlagOverlay({
+              map,
+              territory,
+              flags: store,
+              beforeLayerId: "borders-internal",
+              colors: { water: COLOR_WATER, neutral: COLOR_LAND_NEUTRAL, mine: COLOR_MINE, landOpacity: LAND_OPACITY },
+              getMyCountry: () => latest.current.myCountryCode || "",
+            });
             overlay.attach();
             worldRef.current.overlay = overlay;
-            await overlay.bake();
+            await overlay.bakeAll();
           } catch (flagError) {
             console.warn("Прапори на карті недоступні:", flagError);
           }
@@ -332,11 +332,16 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2. Колір заливки: "мій" власник — золотий, решта — зелена.
+  // 2. Колір заливки: "мій" власник — золотий, решта — зелена. Вираз уже створено з актуальним
+  // кодом при завантаженні; змінюємо лише коли гравець справді змінився (це перебудовує плитки).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== "ready" || !map.getLayer("regions-fill")) return;
-    map.setPaintProperty("regions-fill", "fill-color", ["case", ["==", regionOwner, myCountryCode || ""], COLOR_MINE, COLOR_LAND_NEUTRAL]);
+    const mine = myCountryCode || "";
+    if (fillOwnerRef.current === mine) return;
+    fillOwnerRef.current = mine;
+    map.setPaintProperty("regions-fill", "fill-color", ["case", ["==", regionOwner, mine], COLOR_MINE, COLOR_LAND_NEUTRAL]);
+    worldRef.current.overlay?.invalidate();
   }, [status, myCountryCode]);
 
   // 3. ЖИВІ КОРДОНИ: cityControl змінився (хтось щось захопив) → оновлюємо лише змінені області,
@@ -350,10 +355,10 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     const changes = territory.setOwners(owners);
     if (!changes.length) return;
 
-    applyOwnerChanges(map, territory, changes);
+    applyOwnerChanges(map, territory, changes, worldRef.current.highlightOwner);
     territory.rebuildParts(new Set(changes.flatMap((c) => [c.from, c.to])));
-    overlay?.requestBake(250);
-    startFlash(map, worldRef.current, changes);
+    overlay?.invalidate();
+    startFlash(map, worldRef.current, territory, changes);
 
     if (latest.current.onCapture && changes.length <= MAX_CAPTURE_EVENTS_AT_ONCE) {
       // одна подія на оновлення — найбільша захоплена область
@@ -367,12 +372,17 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
     }
   }, [status, cityControl]);
 
-  // 4. Підсвічуємо контур вибраної країни — за її ПОТОЧНОЮ територією.
+  // 4. Підсвічуємо контур вибраної країни — за її ПОТОЧНОЮ територією. Це feature-state арок
+  // (h), тож зміна вибору оновлює лише кілька сотень ліній, а не перебудовує шари.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || status !== "ready" || !map.getLayer("borders-selected")) return;
-    const sel = selected || "";
-    map.setPaintProperty("borders-selected", "line-width", sel ? ["case", ["!=", ["==", ownerA, sel], ["==", ownerB, sel]], 2.6, 0] : 0);
+    const { territory } = worldRef.current;
+    if (!map || status !== "ready" || !territory) return;
+    const next = selected || "";
+    const prev = worldRef.current.highlightOwner || "";
+    if (prev === next) return;
+    worldRef.current.highlightOwner = next;
+    applyHighlight(map, territory, prev, next);
   }, [status, selected]);
 
   const loadPercent = Math.round(loadProgress * 100);
@@ -456,8 +466,16 @@ export default function WorldMapGL({ selected, onSelect, myCountryCode, cityCont
   );
 }
 
-// Записує поточних власників у feature-state: області (o) і обидві сторони кожної їхньої арки (oa/ob).
-function applyOwnerChanges(map, territory, changes) {
+// Лінія — край вибраної території, якщо рівно одна її сторона належить вибраному власнику.
+const isHighlightEdge = (territory, a, owner) => {
+  if (!owner) return false;
+  const { oa, ob } = territory.arcOwners(a);
+  return (oa === owner) !== (ob === owner);
+};
+
+// Записує поточних власників у feature-state: області (o) і обидві сторони кожної їхньої арки (oa/ob),
+// а також, чи арка зараз є краєм вибраної території (h).
+function applyOwnerChanges(map, territory, changes, selectedOwner) {
   if (!changes.length) return;
   const arcs = new Set();
   for (const { r, to } of changes) {
@@ -466,22 +484,37 @@ function applyOwnerChanges(map, territory, changes) {
   }
   for (const a of arcs) {
     const { oa, ob } = territory.arcOwners(a);
-    map.setFeatureState({ source: "borders", id: a }, { oa, ob });
+    map.setFeatureState({ source: "borders", id: a }, { oa, ob, h: isHighlightEdge(territory, a, selectedOwner) });
   }
 }
 
-// Короткий "спалах" щойно захоплених областей: feature-state flash 1 → 0.
-function startFlash(map, world, changes) {
+// Зміна вибраної країни: перераховуємо h лише для арок, що прилягають до областей старого й нового власника.
+function applyHighlight(map, territory, prev, next) {
+  const arcs = new Set();
+  for (let r = 0; r < territory.regions.length; r++) {
+    const o = territory.owner[r];
+    if (o === prev || o === next) for (const a of territory.regionArcs[r]) arcs.add(a);
+  }
+  for (const a of arcs) map.setFeatureState({ source: "borders", id: a }, { h: isHighlightEdge(territory, a, next) });
+}
+
+// Короткий "спалах" контуру щойно захоплених областей: feature-state flash 1 → 0.
+function startFlash(map, world, territory, changes) {
   const now = performance.now();
-  for (const { r } of changes) world.flash.set(r, now);
-  if (world.flashRaf) return;
+  for (const { r } of changes) {
+    for (const a of territory.regionArcs[r]) {
+      if (world.flash.size >= MAX_FLASH_ARCS) break;
+      world.flash.set(a, now);
+    }
+  }
+  if (world.flashRaf || !world.flash.size) return;
   const tick = () => {
     const t = performance.now();
-    for (const [r, start] of world.flash) {
+    for (const [a, start] of world.flash) {
       const k = (t - start) / FLASH_MS;
       const value = k >= 1 ? 0 : (1 - k) * (1 - k);
-      try { map.setFeatureState({ source: "regions", id: r }, { flash: value }); } catch { /* карту вже знищено */ }
-      if (k >= 1) world.flash.delete(r);
+      try { map.setFeatureState({ source: "borders", id: a }, { flash: value }); } catch { /* карту вже знищено */ }
+      if (k >= 1) world.flash.delete(a);
     }
     world.flashRaf = world.flash.size ? requestAnimationFrame(tick) : 0;
   };
