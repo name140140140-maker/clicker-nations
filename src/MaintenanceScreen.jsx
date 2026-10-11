@@ -39,7 +39,7 @@ const NOTES = [220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25]; // A-мін
 const CHORDS = [[110, 164.81, 220], [87.31, 130.81, 174.61], [98, 146.83, 196], [110, 164.81, 220]];
 
 function useClockAudio(tickOn, musicOn) {
-  const ref = useRef({ ctx: null, clockEpoch: 0, tickGain: null, musicGain: null, nextTick: 0, tickN: 0, nextNote: 0, nextChord: 0, chordN: 0, timer: null });
+  const ref = useRef({ ctx: null, tickGain: null, musicGain: null, nextTick: 0, tickN: 0, nextNote: 0, nextChord: 0, chordN: 0, timer: null });
 
   const ensure = () => {
     const r = ref.current;
@@ -48,7 +48,6 @@ function useClockAudio(tickOn, musicOn) {
     if (!AudioCtx) return r;
     const ctx = new AudioCtx();
     r.ctx = ctx;
-    r.clockEpoch = Math.round(Date.now() / 1000 - ctx.currentTime);
     r.tickGain = ctx.createGain();
     r.tickGain.gain.value = 0;
     r.tickGain.connect(ctx.destination);
@@ -58,8 +57,9 @@ function useClockAudio(tickOn, musicOn) {
     lp.type = "lowpass";
     lp.frequency.value = 1400;
     r.musicGain.connect(lp).connect(ctx.destination);
-    // Вирівнюємо розклад на найближчу цілу секунду годинника.
-    r.nextTick = Math.ceil(ctx.currentTime + 0.1);
+    // Розклад цокань іде по цілих секундах performance-годинника (його ж читає
+    // стрілка); у час AudioContext вони переводяться зі зсувом, що оновлюється.
+    r.nextTick = Math.ceil(performance.now() / 1000 + 0.1);
     r.tickN = 0;
     r.nextNote = ctx.currentTime + 0.5;
     r.nextChord = ctx.currentTime + 0.2;
@@ -107,8 +107,9 @@ function useClockAudio(tickOn, musicOn) {
     r.timer = setInterval(() => {
       const c = r.ctx;
       const horizon = c.currentTime + 1.2;
-      while (r.nextTick < horizon) {
-        scheduleTick(r, r.nextTick, r.tickN);
+      const offset = c.currentTime - performance.now() / 1000;
+      while (r.nextTick + offset < horizon) {
+        scheduleTick(r, Math.max(r.nextTick + offset, c.currentTime), r.tickN);
         r.tickN += 1;
         r.nextTick += 1;
       }
@@ -135,14 +136,12 @@ function useClockAudio(tickOn, musicOn) {
     r.ctx = null;
   }, []);
 
-  // Поточний час годинника в секундах (із поправкою на затримку виводу).
+  // Час для стрілки: той самий performance-годинник мінус затримка виводу звуку,
+  // тож «крок» стрілки припадає на момент, коли цокання реально лунає.
   const getTime = () => {
     const r = ref.current;
-    if (r.ctx) {
-      const lat = (r.ctx.outputLatency || r.ctx.baseLatency || 0);
-      return r.clockEpoch + r.ctx.currentTime - lat;
-    }
-    return Date.now() / 1000;
+    const lat = r.ctx && r.timer ? r.ctx.outputLatency || r.ctx.baseLatency || 0 : 0;
+    return performance.now() / 1000 - lat;
   };
   return getTime;
 }
@@ -173,7 +172,7 @@ export default function MaintenanceScreen({ message }) {
     const loop = () => {
       const t = getTimeRef.current();
       if (secRef.current) secRef.current.setAttribute("transform", `rotate(${stepAngle(t, 6)} 50 50)`);
-      const d = new Date(t * 1000);
+      const d = new Date();
       const sec = d.getSeconds() + d.getMilliseconds() / 1000;
       const min = d.getMinutes() + sec / 60;
       const hr = (d.getHours() % 12) + min / 60;
