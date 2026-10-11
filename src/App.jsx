@@ -57,6 +57,7 @@ import {
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
+import { fmtPopulation } from "./map/cities";
 import {
   loadNations,
   createCountry,
@@ -1147,6 +1148,13 @@ const TRANSLATIONS = {
   nn_region_free_text: { uk: "Вільна територія — її ніхто не контролює.", en: "Free territory — nobody controls it.", ru: "Свободная территория — её никто не контролирует." },
   nn_world_rank: { uk: "Місце у світі", en: "World rank", ru: "Место в мире" },
   nn_leader: { uk: "Лідер", en: "Leader", ru: "Лидер" },
+  nn_capital: { uk: "Столиця", en: "Capital", ru: "Столица" },
+  nn_regional_center: { uk: "Центр області", en: "Regional center", ru: "Центр области" },
+  nn_controlled_by: { uk: "Контролює", en: "Controlled by", ru: "Контролирует" },
+  nn_region: { uk: "Область", en: "Region", ru: "Область" },
+  nn_population: { uk: "Населення", en: "Population", ru: "Население" },
+  nn_importance: { uk: "Важливість", en: "Importance", ru: "Важность" },
+  nn_attack_soon: { uk: "Атака — незабаром", en: "Attack — coming soon", ru: "Атака — скоро" },
 
   /* Tutorial modal chrome */
   tutorial_skip_btn: { uk: "Пропустити", pl: "Pomiń", de: "Überspringen", ru: "Пропустить", it: "Salta", fr: "Passer", en: "Skip", es: "Omitir", ar: "تخطي" },
@@ -4777,6 +4785,7 @@ function clamp(v, min, max) {
 
 function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
   const [selected, setSelected] = useState(null); // { rid, name, ownerId }
+  const [selectedCity, setSelectedCity] = useState(null); // { city, regionName, ownerId }
   const [leaderName, setLeaderName] = useState(null); // undefined = завантаження
   const mapRef = useRef(null);
 
@@ -4800,6 +4809,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
 
   const selectedCountry = selected?.ownerId ? COUNTRY_MAP[selected.ownerId] : null;
   const kind = !selected ? null : !selected.ownerId ? "free" : selected.ownerId === me?.countryCode ? "own" : "occupied";
+  const cityName = (c) => (lang === "uk" && c.u ? c.u : c.n);
 
   useEffect(() => {
     if (!selectedCountry) {
@@ -4844,7 +4854,17 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
             countries={countries}
             myCountryId={me?.countryCode}
             selectedRid={selected?.rid}
-            onSelectRegion={(r) => setSelected((prev) => (prev?.rid === r.rid ? null : r))}
+            onSelectRegion={(r) => {
+              setSelectedCity(null);
+              setSelected((prev) => (prev?.rid === r.rid ? null : r));
+            }}
+            showCities
+            lang={lang}
+            selectedCityId={selectedCity ? selectedCity.city.i : null}
+            onSelectCity={(sel) => {
+              setSelectedCity(sel);
+              setSelected({ rid: sel.city.rid, name: sel.regionName, ownerId: sel.ownerId });
+            }}
           />
         </div>
       </div>
@@ -4855,7 +4875,41 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
         <Compass size={14} /> {t(lang, "nn_goto_mine")}
       </button>
 
-      {selected && (
+      {selectedCity && selected && (
+        <div className="cn-map-card cn-map-card--anim cn-city-card" key={"city" + selectedCity.city.i}>
+          <button className="cn-map-card-close" onClick={() => { setSelectedCity(null); setSelected(null); }} type="button" aria-label="Закрити">
+            <X size={14} />
+          </button>
+          <div className="cn-map-card-name">
+            {cityName(selectedCity.city)}
+            {selectedCity.city.cap === 2 && <span className="cn-map-card-tag">{t(lang, "nn_capital")}</span>}
+            {selectedCity.city.cap === 1 && <span className="cn-map-card-tag cn-map-card-tag--soft">{t(lang, "nn_regional_center")}</span>}
+          </div>
+          <div className="cn-city-line">
+            {selectedCountry ? (
+              <>
+                {t(lang, "nn_controlled_by")}: <Flag code={selectedCountry.id} size={14} className="cn-country-badge--lg" /> <b>{selectedCountry.name}</b>
+              </>
+            ) : (
+              t(lang, "nn_region_free_text")
+            )}
+          </div>
+          <div className="cn-city-line">{t(lang, "nn_region")}: <b>{selected.name}</b></div>
+          {!selectedCity.city.f && (
+            <div className="cn-city-line">{t(lang, "nn_population")}: <b>{fmtPopulation(selectedCity.city.p)}</b></div>
+          )}
+          <div className="cn-city-importance">
+            <span>{t(lang, "nn_importance")}</span>
+            <span className="cn-city-importance-bar"><span style={{ width: selectedCity.city.imp + "%" }} /></span>
+            <b>{selectedCity.city.imp}%</b>
+          </div>
+          <button className="cn-primary-btn cn-city-attack" type="button" disabled>
+            <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
+          </button>
+        </div>
+      )}
+
+      {selected && !selectedCity && (
         <div className="cn-map-card cn-map-card--anim" key={selected.rid}>
           <button className="cn-map-card-close" onClick={() => setSelected(null)} type="button" aria-label="Закрити">
             <X size={14} />
@@ -6617,6 +6671,16 @@ function GlobalStyles() {
       .cn-changelog-form { display: flex; flex-direction: column; }
       .cn-changelog-form .cn-dev-btn { align-self: flex-start; }
       .cn-changelog-textarea { resize: vertical; min-height: 64px; }
+      .cn-city-card { align-items: stretch; text-align: left; }
+      .cn-city-card .cn-map-card-name { justify-content: center; flex-wrap: wrap; }
+      .cn-city-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--cn-text-dim); }
+      .cn-city-line b { color: var(--cn-text); }
+      .cn-map-card-tag--soft { color: var(--cn-text-dim); background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.18); }
+      .cn-city-importance { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--cn-text-dim); margin-top: 4px; }
+      .cn-city-importance-bar { flex: 1; height: 8px; border-radius: 99px; background: rgba(255,255,255,0.1); overflow: hidden; }
+      .cn-city-importance-bar > span { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--cn-accent), var(--cn-accent-bright)); }
+      .cn-city-importance b { color: var(--cn-accent-bright); min-width: 38px; text-align: right; }
+      .cn-city-attack { margin-top: 10px; padding: 12px; }
       .cn-map-viewport-wrap { position: relative; margin: 0 -10px; }
       .cn-map-viewport {
         position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 22px; max-height: 84vh;

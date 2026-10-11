@@ -9,6 +9,7 @@
     "repair:regions": "node --max-old-space-size=4096 scripts/repair-regions.mjs",
     "build:topology": "node --max-old-space-size=4096 scripts/repair-topology.mjs",
     "repair:topology": "node --max-old-space-size=4096 scripts/repair-topology.mjs",
+    "build:cities": "node --max-old-space-size=4096 scripts/build-cities.mjs",
     "fetch:regions": "node --max-old-space-size=4096 scripts/fetch-regions.mjs",
     "preview": "vite preview"
   },

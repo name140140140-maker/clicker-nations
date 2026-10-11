@@ -2,6 +2,8 @@ import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } f
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { buildRegionModel } from "./map/regionsModel.js";
+import { loadCities, citiesGeoJson } from "./map/cities.js";
+import { cityZones } from "./map/geo.js";
 
 // КАРТА ТЕРРИТОРІЙ
 // Лише адміністративні області й їхні кордони — без реальних держав і прапорів.
@@ -30,6 +32,20 @@ export const MAP_COLORS = {
 };
 
 const OWNER_OPACITY = 0.9;
+
+// Підписи міст потребують шрифтів (glyphs). Це публічний набір Noto Sans від Protomaps;
+// за потреби його можна покласти у public/fonts і змінити URL тут (див. src/map/README.md).
+const GLYPHS_URL = "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf";
+const LABEL_FONT = ["Noto Sans Medium"];
+
+// Шари міст за важливістю: що важливіше — те з'являється раніше при наближенні.
+const CITY_TIERS = [
+  { id: "a", filter: [">=", ["get", "imp"], 55], minzoom: 2.2 },
+  { id: "b", filter: ["all", [">=", ["get", "imp"], 35], ["<", ["get", "imp"], 55]], minzoom: 4 },
+  { id: "c", filter: ["all", ["<", ["get", "imp"], 35], ["==", ["get", "f"], 0]], minzoom: 5.5 },
+  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 6.8 }, // області без реального міста: точка з назвою області
+];
+const labelField = (lang) => (lang === "uk" ? ["get", "u"] : ["get", "n"]);
 
 const STAGE_WEIGHTS = { topology: 0.55, model: 0.3, geojson: 0.15 };
 
@@ -104,7 +120,7 @@ function addGeoJsonSource(map, id, blob, options) {
 const worldCache = { model: null, regionsBlob: null, bordersBlob: null };
 
 const TerritoryMap = forwardRef(function TerritoryMap(
-  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion },
+  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -112,6 +128,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [loadProgress, setLoadProgress] = useState(0);
   const [loadStage, setLoadStage] = useState("Завантажуємо карту…");
+  const [citiesReady, setCitiesReady] = useState(false);
 
   // Усе, що створюється при завантаженні й потрібне ефектам нижче.
   const worldRef = useRef({
@@ -120,10 +137,13 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     colorByIndex: null,
     selectedIndex: -1,
     focused: false,
+    cities: null, // { list, byRid } після завантаження шару міст
+    cityColor: new Map(), // індекс міста → колір власника (застосований у feature-state)
+    selectedCity: -1,
   });
   // Актуальні пропси для довгоживучих обробників карти.
   const latest = useRef({});
-  latest.current = { onSelectRegion, owners, countries, myCountryId, mode };
+  latest.current = { onSelectRegion, owners, countries, myCountryId, mode, onSelectCity, lang };
 
   useImperativeHandle(ref, () => ({
     flyToRid(rid) {
@@ -150,7 +170,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       maxPitch: 0,
       renderWorldCopies: false,
       fadeDuration: 0,
-      style: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": MAP_COLORS.water } }] },
+      style: { version: 8, glyphs: GLYPHS_URL, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": MAP_COLORS.water } }] },
       center: [15, 30],
       zoom: 1.4,
       minZoom: 1,
@@ -247,9 +267,23 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         });
 
         map.on("click", (event) => {
+          const w = worldRef.current;
+          // місто має пріоритет: хіт-зона трохи більша за маркер (зручно пальцем)
+          const cityLayers = CITY_TIERS.map((t) => "cities-dot-" + t.id).filter((id) => map.getLayer(id));
+          if (cityLayers.length && w.cities) {
+            const { x, y } = event.point;
+            const hit = map.queryRenderedFeatures([[x - 9, y - 9], [x + 9, y + 9]], { layers: cityLayers })[0];
+            if (hit && hit.id !== undefined) {
+              const city = w.cities.list[Number(hit.id)];
+              if (city && latest.current.onSelectCity) {
+                const idx = w.model.indexByRid.get(city.rid);
+                latest.current.onSelectCity({ city, regionName: idx !== undefined ? w.model.regions[idx].name : "", ownerId: idx !== undefined ? w.ownerByIndex[idx] || "" : "" });
+                return;
+              }
+            }
+          }
           const top = map.queryRenderedFeatures(event.point, { layers: ["regions-fill"] })[0];
           if (!top || top.id === undefined) return;
-          const w = worldRef.current;
           const idx = Number(top.id);
           const region = w.model.regions[idx];
           if (!region || !latest.current.onSelectRegion) return;
@@ -329,6 +363,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       }
     }
 
+    syncCityColors(map, w, colorOf);
+
     // Один раз після завантаження: у режимі перегляду наближаємо камеру до власної країни.
     if (!w.focused && latest.current.mode === "view" && latest.current.myCountryId) {
       const mineIdx = [];
@@ -338,7 +374,100 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         fitRegion(map, model, mineIdx, 5, false);
       }
     }
-  }, [status, owners, countries]);
+  }, [status, owners, countries, citiesReady]);
+
+  // 2б. Шар міст: маркери за важливістю, підписи, зони міст вибраної області.
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = worldRef.current;
+    if (!map || status !== "ready" || !showCities || !w.model || w.cities) return;
+    let cancelled = false;
+    (async () => {
+      const data = await loadCities();
+      if (cancelled || !mapRef.current || !data.list.length) return;
+      w.cities = data;
+      map.addSource("cities", { type: "geojson", data: citiesGeoJson(data.list) });
+      map.addSource("zones", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+      // Зони міст усередині вибраної області (прев'ю: де проходитиме лінія фронту між містами)
+      map.addLayer({
+        id: "zones-fill", type: "fill", source: "zones",
+        paint: { "fill-color": "#ffffff", "fill-opacity": ["get", "a"] },
+      });
+      map.addLayer({
+        id: "zones-line", type: "line", source: "zones",
+        paint: { "line-color": "#ffffff", "line-width": 1.1, "line-opacity": 0.85, "line-dasharray": [2, 2] },
+      });
+      for (const tier of CITY_TIERS) {
+        map.addLayer({
+          id: "cities-dot-" + tier.id, type: "circle", source: "cities", minzoom: tier.minzoom, filter: tier.filter,
+          paint: {
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, ["+", 1.6, ["*", ["get", "imp"], 0.025]], 8, ["+", 3, ["*", ["get", "imp"], 0.07]]],
+            "circle-color": ["case", ["==", ["get", "cap"], 2], "#ffd54a", ["==", ["get", "f"], 1], "#9fb0bd", "#ffffff"],
+            "circle-stroke-width": ["case", ["==", ["get", "cap"], 2], 2.2, 1.6],
+            "circle-stroke-color": ["coalesce", ["feature-state", "oc"], "#0b1620"],
+          },
+        });
+        map.addLayer({
+          id: "cities-label-" + tier.id, type: "symbol", source: "cities", minzoom: tier.minzoom, filter: tier.filter,
+          layout: {
+            "text-field": labelField(latest.current.lang),
+            "text-font": LABEL_FONT,
+            "text-size": ["interpolate", ["linear"], ["zoom"], 2, 9, 8, ["+", 11, ["*", ["get", "imp"], 0.04]]],
+            "text-offset": [0, 0.85],
+            "text-anchor": "top",
+            "text-optional": true,
+            "symbol-sort-key": ["-", 0, ["get", "imp"]],
+          },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(6,14,28,0.95)", "text-halo-width": 1.5 },
+        });
+      }
+      map.addLayer({
+        id: "cities-selected", type: "circle", source: "cities", filter: ["has", "imp"],
+        paint: {
+          "circle-radius": 11, "circle-color": "rgba(0,0,0,0)", "circle-stroke-width": 2.5, "circle-stroke-color": MAP_COLORS.selected,
+          "circle-stroke-opacity": ["case", ["boolean", ["feature-state", "sel"], false], 1, 0],
+        },
+      });
+      setCitiesReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, [status, showCities]);
+
+  // Мова підписів міст.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !citiesReady) return;
+    for (const t of CITY_TIERS) if (map.getLayer("cities-label-" + t.id)) map.setLayoutProperty("cities-label-" + t.id, "text-field", labelField(lang));
+  }, [citiesReady, lang]);
+
+  // Вибране місто: контур навколо маркера.
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = worldRef.current;
+    if (!map || !citiesReady) return;
+    if (w.selectedCity >= 0) map.setFeatureState({ source: "cities", id: w.selectedCity }, { sel: false });
+    w.selectedCity = selectedCityId === null || selectedCityId === undefined ? -1 : selectedCityId;
+    if (w.selectedCity >= 0) map.setFeatureState({ source: "cities", id: w.selectedCity }, { sel: true });
+  }, [citiesReady, selectedCityId]);
+
+  // Зони міст вибраної області (діаграма Вороного, обрізана межами області).
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = worldRef.current;
+    if (!map || !citiesReady || !w.model || !map.getSource("zones")) return;
+    const src = map.getSource("zones");
+    const idx = selectedRid ? w.model.indexByRid.get(String(selectedRid)) : undefined;
+    const list = idx !== undefined ? w.cities.byRid.get(String(selectedRid)) || [] : [];
+    if (list.length < 2) { src.setData({ type: "FeatureCollection", features: [] }); return; }
+    const polys = w.model.regionPolygons(idx);
+    const zones = cityZones(polys, list.slice(0, 40).map((c) => ({ x: c.x, y: c.y, k: c.i })));
+    const features = [];
+    let n = 0;
+    for (const [k, polysOfCity] of zones) {
+      features.push({ type: "Feature", properties: { k, a: n++ % 2 ? 0.06 : 0.16 }, geometry: { type: "MultiPolygon", coordinates: polysOfCity } });
+    }
+    src.setData({ type: "FeatureCollection", features });
+  }, [citiesReady, selectedRid]);
 
   // 3. Вибрана область: підсвітка + контур.
   useEffect(() => {
@@ -429,4 +558,18 @@ function fitRegion(map, model, indices, maxZoom, animate = true) {
   // Області, що перетинають 180-й меридіан, мають хибні межі на пів світу — не наближаємо до них.
   if (e - w > 120) return;
   map.fitBounds([[w, s], [e, n]], { padding: 40, maxZoom, duration: animate ? 900 : 0 });
+}
+
+// Колір маркерів міст = колір країни, яка володіє областю міста (feature-state oc).
+function syncCityColors(map, w, colorOf) {
+  if (!w.cities || !map.getSource("cities")) return;
+  for (const c of w.cities.list) {
+    const idx = w.model.indexByRid.get(c.rid);
+    const owner = idx !== undefined ? w.ownerByIndex[idx] : "";
+    const color = owner ? colorOf[owner] || "" : "";
+    if ((w.cityColor.get(c.i) || "") === color) continue;
+    w.cityColor.set(c.i, color);
+    if (color) map.setFeatureState({ source: "cities", id: c.i }, { oc: color });
+    else map.removeFeatureState({ source: "cities", id: c.i }, "oc");
+  }
 }

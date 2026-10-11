@@ -15,11 +15,13 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
 
   // 1. Арки → текст координат + межі арки.
   const arcText = new Array(arcCount);
+  const arcPts = new Array(arcCount); // Float64Array [lng0, lat0, lng1, lat1, …] — для міст і зон
   const arcBBox = new Float64Array(arcCount * 4);
   for (let a = 0; a < arcCount; a++) {
     const raw = topology.arcs[a];
     const len = raw.length;
     const parts = new Array(len);
+    const pts = new Float64Array(len * 2);
     let qx = 0, qy = 0;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < len; i++) {
@@ -30,8 +32,11 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
       if (lng > maxX) maxX = lng;
       if (lat < minY) minY = lat;
       if (lat > maxY) maxY = lat;
+      pts[2 * i] = lng;
+      pts[2 * i + 1] = lat;
       parts[i] = "[" + lng + "," + lat + "]";
     }
+    arcPts[a] = pts;
     arcText[a] = parts.join(",");
     arcBBox[4 * a] = minX; arcBBox[4 * a + 1] = minY; arcBBox[4 * a + 2] = maxX; arcBBox[4 * a + 3] = maxY;
     if (a % 1500 === 1499) await yieldFn();
@@ -89,6 +94,7 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
     return "[" + parts.join(",") + "]";
   };
 
+  const regionPolysRefs = regionPolys.map((p) => p.map((rings) => rings));
   const model = {
     regions,
     indexByRid,
@@ -133,10 +139,32 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
       return chunks;
     },
 
-    /* Текст арок і кільця потрібні лише для побудови GeoJSON — після цього їх можна звільнити. */
+    /* Полігони області: [ [кільце, діри…], … ], кільце = масив [lng, lat]. Для міст і зон. */
+    regionPolygons(r) {
+      const out = [];
+      for (const rings of regionPolysRefs[r]) {
+        if (!rings || !rings.length) continue;
+        out.push(
+          rings.map((ring) => {
+            const pts = [];
+            for (const ref of ring) {
+              const a = ref < 0 ? ~ref : ref;
+              const m = arcPts[a];
+              const n = m.length / 2;
+              if (ref >= 0) for (let i = 0; i < n; i++) pts.push([m[2 * i], m[2 * i + 1]]);
+              else for (let i = n - 1; i >= 0; i--) pts.push([m[2 * i], m[2 * i + 1]]);
+            }
+            return pts;
+          }),
+        );
+      }
+      return out;
+    },
+
+    /* Текст арок потрібен лише для побудови GeoJSON — після цього його можна звільнити
+       (координати в arcPts лишаються: вони потрібні для зон міст). */
     release() {
       arcText.length = 0;
-      regionPolys.length = 0;
     },
   };
   return model;
