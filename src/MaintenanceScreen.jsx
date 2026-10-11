@@ -39,7 +39,7 @@ const NOTES = [220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25]; // A-мін
 const CHORDS = [[110, 164.81, 220], [87.31, 130.81, 174.61], [98, 146.83, 196], [110, 164.81, 220]];
 
 function useClockAudio(tickOn, musicOn) {
-  const ref = useRef({ ctx: null, tickGain: null, musicGain: null, nextTick: 0, tickN: 0, nextNote: 0, nextChord: 0, chordN: 0, timer: null });
+  const ref = useRef({ ctx: null, clockEpoch: 0, tickGain: null, musicGain: null, nextTick: 0, tickN: 0, nextNote: 0, nextChord: 0, chordN: 0, timer: null });
 
   const ensure = () => {
     const r = ref.current;
@@ -48,6 +48,7 @@ function useClockAudio(tickOn, musicOn) {
     if (!AudioCtx) return r;
     const ctx = new AudioCtx();
     r.ctx = ctx;
+    r.clockEpoch = Math.round(Date.now() / 1000 - ctx.currentTime);
     r.tickGain = ctx.createGain();
     r.tickGain.gain.value = 0;
     r.tickGain.connect(ctx.destination);
@@ -137,11 +138,11 @@ function useClockAudio(tickOn, musicOn) {
   // Поточний час годинника в секундах (із поправкою на затримку виводу).
   const getTime = () => {
     const r = ref.current;
-    if (r.ctx && r.ctx.state === "running" && r.timer) {
+    if (r.ctx) {
       const lat = (r.ctx.outputLatency || r.ctx.baseLatency || 0);
-      return r.ctx.currentTime - lat;
+      return r.clockEpoch + r.ctx.currentTime - lat;
     }
-    return performance.now() / 1000;
+    return Date.now() / 1000;
   };
   return getTime;
 }
@@ -172,8 +173,12 @@ export default function MaintenanceScreen({ message }) {
     const loop = () => {
       const t = getTimeRef.current();
       if (secRef.current) secRef.current.setAttribute("transform", `rotate(${stepAngle(t, 6)} 50 50)`);
-      if (minRef.current) minRef.current.setAttribute("transform", `rotate(${(Math.floor(t) * 0.1) % 360} 50 50)`);
-      if (hourRef.current) hourRef.current.setAttribute("transform", `rotate(${(Math.floor(t) * (0.1 / 12)) % 360} 50 50)`);
+      const d = new Date(t * 1000);
+      const sec = d.getSeconds() + d.getMilliseconds() / 1000;
+      const min = d.getMinutes() + sec / 60;
+      const hr = (d.getHours() % 12) + min / 60;
+      if (minRef.current) minRef.current.setAttribute("transform", `rotate(${min * 6} 50 50)`);
+      if (hourRef.current) hourRef.current.setAttribute("transform", `rotate(${hr * 30} 50 50)`);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -317,7 +322,6 @@ export default function MaintenanceScreen({ message }) {
           stroke: #3a1c05;
           stroke-width: 3;
           stroke-linecap: round;
-          transform-origin: 50px 50px;
         }
         .cn-maint-clock-hand--second { stroke: #b3260f; stroke-width: 1.6; }
         .cn-maint-clock-pin {

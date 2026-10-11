@@ -5785,7 +5785,7 @@ function GlobalStyles() {
       /* Clicker top actions (news / daily rewards) */
       .cn-clicker-topbar { position: relative; }
       .cn-clicker-top-actions {
-        position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+        position: absolute; right: 0; top: 0;
         display: flex; flex-direction: column; gap: 10px;
       }
       .cn-icon-tile {
