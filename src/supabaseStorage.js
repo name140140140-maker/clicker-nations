@@ -79,3 +79,49 @@ export async function sbStorageListKeys(prefix, shared) {
     return [];
   }
 }
+
+/* --- Додатково для країн гравців і територій --- */
+
+/* Усі записи з префіксом (ключ + значення). Supabase віддає максимум 1000 рядків за запит,
+   тому читаємо сторінками. */
+export async function sbStorageListEntries(prefix, shared) {
+  const PAGE = 1000;
+  const out = [];
+  try {
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabase
+        .from("kv_store")
+        .select("key,value")
+        .like("key", `${prefix}%`)
+        .eq("shared", !!shared)
+        .order("key", { ascending: true })
+        .range(from, from + PAGE - 1);
+      if (error || !data) return error ? null : out;
+      out.push(...data);
+      if (data.length < PAGE) break;
+    }
+    return out;
+  } catch {
+    return null; // null = помилка мережі/бази (на відміну від порожнього списку)
+  }
+}
+
+/* Атомарно створює запис, лише якщо такого ключа ще немає (перший, хто встиг, виграє).
+   Повертає "ok" | "exists" | "error". Використовується для захоплення вільної області:
+   дві людини не можуть одночасно зайняти одну й ту саму територію. */
+export async function sbStorageInsertIfAbsent(key, value, shared) {
+  try {
+    const { error } = await supabase.from("kv_store").insert({ key: fullKey(key, shared), value, shared: !!shared });
+    if (!error) {
+      // страховка на випадок, якщо в таблиці немає унікального обмеження на key
+      const { data } = await supabase.from("kv_store").select("value").eq("key", fullKey(key, shared)).limit(2);
+      if (data && data.length === 1 && data[0].value === value) return "ok";
+      if (data && data.length > 1) return "error";
+      return data && data[0] && data[0].value !== value ? "exists" : "ok";
+    }
+    if (error.code === "23505" || /duplicate key/i.test(error.message || "")) return "exists";
+    return "error";
+  } catch {
+    return "error";
+  }
+}
