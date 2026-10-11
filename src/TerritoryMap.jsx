@@ -40,10 +40,12 @@ const LABEL_FONT = ["Noto Sans Medium"];
 
 // Шари міст за важливістю: що важливіше — те з'являється раніше при наближенні.
 const CITY_TIERS = [
-  { id: "a", filter: [">=", ["get", "imp"], 55], minzoom: 2.2 },
-  { id: "b", filter: ["all", [">=", ["get", "imp"], 35], ["<", ["get", "imp"], 55]], minzoom: 4 },
-  { id: "c", filter: ["all", ["<", ["get", "imp"], 35], ["==", ["get", "f"], 0]], minzoom: 5.5 },
-  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 6.8 }, // області без реального міста: точка з назвою області
+  // Здалека — лише столиці та міста-гіганти; решта поступово при наближенні.
+  { id: "a", filter: ["all", ["==", ["get", "f"], 0], ["any", ["==", ["get", "cap"], 2], [">=", ["get", "imp"], 84]]], minzoom: 2.2 },
+  { id: "b", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["<", ["get", "imp"], 84], [">=", ["get", "imp"], 66]], minzoom: 4.2 },
+  { id: "e", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["<", ["get", "imp"], 66], [">=", ["get", "imp"], 52]], minzoom: 5.6 },
+  { id: "c", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["<", ["get", "imp"], 52]], minzoom: 7 },
+  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 7.5 }, // області без реального міста: точка з назвою області
 ];
 const labelField = (lang) => (lang === "uk" ? ["get", "u"] : ["get", "n"]);
 

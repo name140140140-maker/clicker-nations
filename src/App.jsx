@@ -5467,8 +5467,19 @@ function GlobalStyles() {
         --cn-accent-bright: #7CF0FF;
       }
 
+      /* Без синього підсвічування при тапі (глобус, кнопки меню) */
+      .cn-root, .cn-root * {
+        -webkit-tap-highlight-color: transparent;
+        -webkit-touch-callout: none;
+      }
+      .cn-root button, .cn-root [role="button"], .cn-globe-wrap, .cn-globe-wrap * , .cn-nav, .cn-nav * {
+        -webkit-user-select: none; user-select: none; outline: none;
+      }
+      .cn-root button:focus, .cn-root button:focus-visible, .cn-globe-wrap:focus, .cn-globe-wrap:focus-visible { outline: none; }
+      .cn-globe-svg, .cn-globe-svg * { -webkit-user-drag: none; pointer-events: none; }
       .cn-root {
-        min-height: 100vh;
+        height: 100vh; height: var(--tg-viewport-stable-height, 100dvh);
+        min-height: 0; overflow: hidden;
         width: 100%;
         position: relative;
         color: var(--cn-text);
@@ -5491,7 +5502,8 @@ function GlobalStyles() {
       .cn-app {
         width: 100%;
         max-width: 480px;
-        min-height: 100vh;
+        height: 100%;
+        min-height: 0;
         display: flex;
         flex-direction: column;
       }
@@ -5499,7 +5511,8 @@ function GlobalStyles() {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
-        padding: 20px 18px 8px;
+        overscroll-behavior: contain;
+        padding: calc(10px + env(safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)) 18px 6px;
       }
 
       /* Boot */
@@ -5651,20 +5664,20 @@ function GlobalStyles() {
         color: #fff; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 8px;
         box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.2);
       }
-      .cn-power-block { text-align: center; margin: 10px 0 4px; }
+      .cn-power-block { text-align: center; margin: 4px 0 2px; }
       .cn-power-label {
         font-size: 13px; letter-spacing: 0.22em; color: #A9CBEF; font-weight: 700;
       }
       .cn-power-value-row { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 2px; }
       .cn-power-dots { color: var(--cn-accent); font-size: 16px; letter-spacing: 2px; opacity: 0.85; align-self: center; }
       .cn-power-value {
-        font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 56px;
+        font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: clamp(38px, 7vh, 56px);
         color: #FFFFFF; text-shadow: 0 3px 0 rgba(2,8,22,0.55), 0 0 30px rgba(var(--cn-accent-rgb),0.55);
         line-height: 1.05;
       }
 
       .cn-globe-wrap {
-        position: relative; width: 250px; height: 250px; margin: 14px 0 18px;
+        position: relative; width: clamp(150px, 31vh, 250px); height: clamp(150px, 31vh, 250px); margin: 8px 0 10px;
         display: flex; align-items: center; justify-content: center;
         cursor: pointer; user-select: none; touch-action: manipulation;
         transition: transform 0.08s ease;
@@ -6823,14 +6836,15 @@ function GlobalStyles() {
       /* Bottom nav */
       .cn-nav {
         display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px;
-        padding: 10px 8px calc(10px + env(safe-area-inset-bottom, 0px));
+        padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+        flex-shrink: 0;
         background: rgba(var(--cn-nav-rgb),0.96); backdrop-filter: blur(14px);
         border-top: 1px solid rgba(var(--cn-accent-rgb),0.4);
       }
       .cn-nav-btn {
         display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
         background: rgba(var(--cn-panel-rgb),0.55); border: 1px solid rgba(var(--cn-accent-rgb),0.4);
-        border-radius: 14px; color: #C7D8F0; cursor: pointer; padding: 10px 2px;
+        border-radius: 14px; color: #C7D8F0; cursor: pointer; padding: 8px 2px; -webkit-tap-highlight-color: transparent;
         transition: color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
       }
       .cn-nav-btn--active {
