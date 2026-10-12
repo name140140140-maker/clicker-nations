@@ -45,9 +45,11 @@ const LABEL_FONT = ["Noto Sans Medium"];
 const isCap = ["==", ["get", "cap"], 2];
 const notFb = ["==", ["get", "f"], 0];
 const pop = ["get", "p"];
+// Прозорість від 0 на порозі масштабу до 1 через 0.7 рівня зуму.
+const fadeIn = (z) => ["interpolate", ["linear"], ["zoom"], z, 0, z + 0.7, 1];
 const CITY_TIERS = [
-  { id: "a", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 4000000]], [">=", pop, 12000000]]], minzoom: 2.3 },
-  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", [">=", pop, 6000000], ["<", pop, 12000000]]]], minzoom: 3.4 },
+  { id: "a", filter: ["all", notFb, isCap, [">=", pop, 4000000]], minzoom: 2.3 },
+  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", ["!", isCap], [">=", pop, 6000000]]]], minzoom: 3.4 },
   { id: "c", filter: ["all", notFb, ["any", ["all", isCap, ["<", pop, 1500000]], ["all", [">=", pop, 3000000], ["<", pop, 6000000], ["!", isCap]]]], minzoom: 4.4 },
   { id: "e", filter: ["all", notFb, ["!", isCap], [">=", pop, 1000000], ["<", pop, 3000000]], minzoom: 5.4 },
   { id: "f", filter: ["all", notFb, ["!", isCap], ["<", pop, 1000000], ["any", [">=", pop, 300000], ["==", ["get", "cap"], 1]]], minzoom: 6.6 },
@@ -202,7 +204,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       touchPitch: false,
       maxPitch: 0,
       renderWorldCopies: false,
-      fadeDuration: 0,
+      fadeDuration: 250, // плавна поява/зникнення підписів міст
+      maxTileCacheSize: 32, // менше плиток у пам'яті: на слабких телефонах WebView інакше вилітає
       style: { version: 8, glyphs: GLYPHS_URL, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": MAP_COLORS.water } }] },
       center: [15, 30],
       zoom: 1.4,
@@ -214,6 +217,11 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.AttributionControl({ compact: true, customAttribution: "Дані: geoBoundaries CGAZ (CC BY 4.0)" }));
     mapRef.current = map;
+
+    // Якщо система забрала WebGL-контекст (нестача пам'яті) — не лишаємо порожній екран.
+    const canvas = map.getCanvas();
+    const onLost = (e) => { e.preventDefault(); if (!cancelled) setStatus("lost"); };
+    canvas.addEventListener("webglcontextlost", onLost);
 
     map.on("load", async () => {
       try {
@@ -243,8 +251,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         worldRef.current.ownerByIndex = new Array(model.regions.length).fill("");
         worldRef.current.colorByIndex = new Array(model.regions.length).fill("");
 
-        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM });
-        addGeoJsonSource(map, "borders", bordersBlob, { maxzoom: SOURCE_MAX_ZOOM });
+        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.9, buffer: 32 });
+        addGeoJsonSource(map, "borders", bordersBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.9, buffer: 32 });
 
         // Усі вирази залежать лише від feature-state: після створення шарів їх не змінюємо
         // (зміна data-driven виразу перебудовує плитки всього джерела — важко на телефонах).
@@ -439,6 +447,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             "circle-color": ["case", ["==", ["get", "cap"], 2], "#ffd54a", ["==", ["get", "f"], 1], "#9fb0bd", "#ffffff"],
             "circle-stroke-width": ["case", ["==", ["get", "cap"], 2], 2.2, 1.6],
             "circle-stroke-color": ["coalesce", ["feature-state", "oc"], "#0b1620"],
+            // Плавно проявляється після порогу масштабу й так само згасає при віддаленні.
+            "circle-opacity": fadeIn(tier.minzoom),
+            "circle-stroke-opacity": fadeIn(tier.minzoom),
           },
         });
         map.addLayer({
@@ -452,7 +463,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             "text-optional": true,
             "symbol-sort-key": ["-", 0, ["get", "imp"]],
           },
-          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(6,14,28,0.95)", "text-halo-width": 1.5 },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(6,14,28,0.95)", "text-halo-width": 1.5, "text-opacity": fadeIn(tier.minzoom + 0.15) },
         });
       }
       map.addLayer({
@@ -570,6 +581,24 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           }}
         >
           Не вдалося завантажити карту. Перевір, що файл /data/world-topology.json існує.
+        </div>
+      )}
+
+      {status === "lost" && (
+        <div
+          style={{
+            position: "absolute", inset: 0, display: "flex", flexDirection: "column", gap: 12, alignItems: "center", justifyContent: "center",
+            color: "#dfeffb", fontSize: 13, background: MAP_COLORS.water, borderRadius: 12, padding: 16, textAlign: "center", zIndex: 6,
+          }}
+        >
+          <div>Карту призупинено, бо на пристрої бракує пам'яті.</div>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            style={{ padding: "8px 18px", borderRadius: 999, border: "1px solid rgba(126,201,232,0.6)", background: "rgba(126,201,232,0.15)", color: "#fff", fontWeight: 700 }}
+          >
+            Перезавантажити
+          </button>
         </div>
       )}
     </div>

@@ -5,6 +5,7 @@
    - для кожної області — її арки та межі в градусах (для наближення камери).
    Без прапорів, реальних держав і важких обчислень площ. Чистий JS (без DOM/React/MapLibre). */
 
+const MERC_LAT = 85.05;
 const round5 = (v) => Math.round(v * 1e5) / 1e5;
 
 export async function buildRegionModel(topology, yieldFn = async () => {}) {
@@ -27,7 +28,9 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
     for (let i = 0; i < len; i++) {
       if (tr) { qx += raw[i][0]; qy += raw[i][1]; } else { qx = raw[i][0]; qy = raw[i][1]; }
       const lng = round5(tr ? qx * tr.scale[0] + tr.translate[0] : qx);
-      const lat = round5(tr ? qy * tr.scale[1] + tr.translate[1] : qy);
+      // Меркатор не має сенсу далі за ±85.05°: дані Антарктиди сягають -85.24°, і це давало
+      // «клин» та зламану геометрію. Обрізаємо широту до межі проєкції.
+      const lat = round5(Math.max(-MERC_LAT, Math.min(MERC_LAT, tr ? qy * tr.scale[1] + tr.translate[1] : qy)));
       if (lng < minX) minX = lng;
       if (lng > maxX) maxX = lng;
       if (lat < minY) minY = lat;
