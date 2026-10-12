@@ -4867,6 +4867,79 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
             }}
           />
         </div>
+        {selectedCity && selected && (
+          <div className="cn-map-card cn-map-card--anim cn-city-card" key={"city" + selectedCity.city.i}>
+            <button className="cn-map-card-close" onClick={() => { setSelectedCity(null); setSelected(null); }} type="button" aria-label="Закрити">
+              <X size={14} />
+            </button>
+            <div className="cn-map-card-name">
+              {cityName(selectedCity.city)}
+              {selectedCity.city.cap === 2 && <span className="cn-map-card-tag">{t(lang, "nn_capital")}</span>}
+              {selectedCity.city.cap === 1 && <span className="cn-map-card-tag cn-map-card-tag--soft">{t(lang, "nn_regional_center")}</span>}
+            </div>
+            <div className="cn-city-line">
+              {selectedCountry ? (
+                <>
+                  {t(lang, "nn_controlled_by")}: <Flag code={selectedCountry.id} size={14} className="cn-country-badge--lg" /> <b>{selectedCountry.name}</b>
+                </>
+              ) : (
+                t(lang, "nn_region_free_text")
+              )}
+            </div>
+            <div className="cn-city-line">{t(lang, "nn_region")}: <b>{selected.name}</b></div>
+            {!selectedCity.city.f && (
+              <div className="cn-city-line">{t(lang, "nn_population")}: <b>{fmtPopulation(selectedCity.city.p)}</b></div>
+            )}
+            <div className="cn-city-importance">
+              <span>{t(lang, "nn_importance")}</span>
+              <span className="cn-city-importance-bar"><span style={{ width: selectedCity.city.imp + "%" }} /></span>
+              <b>{selectedCity.city.imp}%</b>
+            </div>
+            <button className="cn-primary-btn cn-city-attack" type="button" disabled>
+              <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
+            </button>
+          </div>
+        )}
+
+        {selected && !selectedCity && (
+          <div className="cn-map-card cn-map-card--anim" key={selected.rid}>
+            <button className="cn-map-card-close" onClick={() => setSelected(null)} type="button" aria-label="Закрити">
+              <X size={14} />
+            </button>
+            <div className="cn-map-card-name">
+              {selected.name}
+              {kind === "own" && <span className="cn-map-card-tag">{t(lang, "nn_legend_own")}</span>}
+            </div>
+            {kind === "free" && <div className="cn-map-card-sub">{t(lang, "nn_region_free_text")}</div>}
+            {selectedCountry && (
+              <>
+                <div className="cn-map-card-country">
+                  <Flag code={selectedCountry.id} size={22} className="cn-country-badge--lg" /> {selectedCountry.name}
+                </div>
+                <div className="cn-map-card-stats">
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">Country Power</span>
+                    <span className="cn-map-card-stat-value">{fmt(stats.power[selectedCountry.id] || 0)}</span>
+                  </div>
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "nn_world_rank")}</span>
+                    <span className="cn-map-card-stat-value">#{stats.rank[selectedCountry.id] || "—"}</span>
+                  </div>
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "lb_players")}</span>
+                    <span className="cn-map-card-stat-value">{fmt(stats.count[selectedCountry.id] || 0)}</span>
+                  </div>
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "nn_leader")}</span>
+                    <span className="cn-map-card-stat-value cn-map-card-stat-value--leader">
+                      {leaderName === undefined ? "…" : leaderName || "—"}
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <MapLegend lang={lang} myColor={myCountry?.color} />
@@ -4875,79 +4948,6 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
         <Compass size={14} /> {t(lang, "nn_goto_mine")}
       </button>
 
-      {selectedCity && selected && (
-        <div className="cn-map-card cn-map-card--anim cn-city-card" key={"city" + selectedCity.city.i}>
-          <button className="cn-map-card-close" onClick={() => { setSelectedCity(null); setSelected(null); }} type="button" aria-label="Закрити">
-            <X size={14} />
-          </button>
-          <div className="cn-map-card-name">
-            {cityName(selectedCity.city)}
-            {selectedCity.city.cap === 2 && <span className="cn-map-card-tag">{t(lang, "nn_capital")}</span>}
-            {selectedCity.city.cap === 1 && <span className="cn-map-card-tag cn-map-card-tag--soft">{t(lang, "nn_regional_center")}</span>}
-          </div>
-          <div className="cn-city-line">
-            {selectedCountry ? (
-              <>
-                {t(lang, "nn_controlled_by")}: <Flag code={selectedCountry.id} size={14} className="cn-country-badge--lg" /> <b>{selectedCountry.name}</b>
-              </>
-            ) : (
-              t(lang, "nn_region_free_text")
-            )}
-          </div>
-          <div className="cn-city-line">{t(lang, "nn_region")}: <b>{selected.name}</b></div>
-          {!selectedCity.city.f && (
-            <div className="cn-city-line">{t(lang, "nn_population")}: <b>{fmtPopulation(selectedCity.city.p)}</b></div>
-          )}
-          <div className="cn-city-importance">
-            <span>{t(lang, "nn_importance")}</span>
-            <span className="cn-city-importance-bar"><span style={{ width: selectedCity.city.imp + "%" }} /></span>
-            <b>{selectedCity.city.imp}%</b>
-          </div>
-          <button className="cn-primary-btn cn-city-attack" type="button" disabled>
-            <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
-          </button>
-        </div>
-      )}
-
-      {selected && !selectedCity && (
-        <div className="cn-map-card cn-map-card--anim" key={selected.rid}>
-          <button className="cn-map-card-close" onClick={() => setSelected(null)} type="button" aria-label="Закрити">
-            <X size={14} />
-          </button>
-          <div className="cn-map-card-name">
-            {selected.name}
-            {kind === "own" && <span className="cn-map-card-tag">{t(lang, "nn_legend_own")}</span>}
-          </div>
-          {kind === "free" && <div className="cn-map-card-sub">{t(lang, "nn_region_free_text")}</div>}
-          {selectedCountry && (
-            <>
-              <div className="cn-map-card-country">
-                <Flag code={selectedCountry.id} size={22} className="cn-country-badge--lg" /> {selectedCountry.name}
-              </div>
-              <div className="cn-map-card-stats">
-                <div className="cn-map-card-stat">
-                  <span className="cn-map-card-stat-label">Country Power</span>
-                  <span className="cn-map-card-stat-value">{fmt(stats.power[selectedCountry.id] || 0)}</span>
-                </div>
-                <div className="cn-map-card-stat">
-                  <span className="cn-map-card-stat-label">{t(lang, "nn_world_rank")}</span>
-                  <span className="cn-map-card-stat-value">#{stats.rank[selectedCountry.id] || "—"}</span>
-                </div>
-                <div className="cn-map-card-stat">
-                  <span className="cn-map-card-stat-label">{t(lang, "lb_players")}</span>
-                  <span className="cn-map-card-stat-value">{fmt(stats.count[selectedCountry.id] || 0)}</span>
-                </div>
-                <div className="cn-map-card-stat">
-                  <span className="cn-map-card-stat-label">{t(lang, "nn_leader")}</span>
-                  <span className="cn-map-card-stat-value cn-map-card-stat-value--leader">
-                    {leaderName === undefined ? "…" : leaderName || "—"}
-                  </span>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -6778,6 +6778,17 @@ function GlobalStyles() {
         padding: 14px 14px; border-radius: 16px; margin-bottom: 12px;
         background: radial-gradient(120% 100% at 50% 0%, rgba(var(--cn-accent-rgb),0.14), rgba(var(--cn-panel-rgb),0.55));
         border: 1px solid rgba(var(--cn-accent-rgb),0.4);
+      }
+      /* Картка області/міста — нижня панель поверх карти, прокручувати сторінку не потрібно */
+      .cn-map-viewport-wrap > .cn-map-card {
+        position: absolute; left: 20px; right: 20px; bottom: 10px; z-index: 8; margin: 0;
+        max-height: 58%; overflow-y: auto; overscroll-behavior: contain;
+        background: linear-gradient(180deg, rgba(var(--cn-accent-rgb),0.16), rgba(6,14,28,0.94) 38%), rgba(6,14,28,0.94);
+        backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        box-shadow: 0 -8px 28px rgba(0,0,0,0.5), 0 0 0 1px rgba(var(--cn-accent-rgb),0.25);
+      }
+      .cn-map-viewport-wrap > .cn-map-card::before {
+        content: ""; width: 38px; height: 4px; border-radius: 999px; background: rgba(255,255,255,0.28); margin: -4px 0 4px;
       }
       .cn-map-card-close {
         position: absolute; top: 10px; right: 10px; width: 26px; height: 26px; border-radius: 8px;
