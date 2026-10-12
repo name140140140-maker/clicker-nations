@@ -39,13 +39,20 @@ const GLYPHS_URL = "https://protomaps.github.io/basemaps-assets/fonts/{fontstack
 const LABEL_FONT = ["Noto Sans Medium"];
 
 // Шари міст за важливістю: що важливіше — те з'являється раніше при наближенні.
+// Рівні міст: від великих столиць до дрібних міст. p — населення, cap: 2 столиця, 1 центр області.
+// Здалека лишаються лише найважливіші столиці (Лондон, Париж…), дрібніші столиці
+// (Кишинів, Вадуц…) з'являються при наближенні, далі великі, а потім дрібні міста.
+const isCap = ["==", ["get", "cap"], 2];
+const notFb = ["==", ["get", "f"], 0];
+const pop = ["get", "p"];
 const CITY_TIERS = [
-  // Здалека — столиці та великі міста; решта поступово при наближенні.
-  { id: "a", filter: ["all", ["==", ["get", "f"], 0], ["any", ["==", ["get", "cap"], 2], [">=", ["get", "imp"], 72]]], minzoom: 2.2 },
-  { id: "b", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["<", ["get", "imp"], 72], ["any", ["==", ["get", "cap"], 1], [">=", ["get", "imp"], 60]]], minzoom: 3.4 },
-  { id: "e", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["!=", ["get", "cap"], 1], ["<", ["get", "imp"], 60], [">=", ["get", "imp"], 48]], minzoom: 4.6 },
-  { id: "c", filter: ["all", ["==", ["get", "f"], 0], ["!=", ["get", "cap"], 2], ["!=", ["get", "cap"], 1], ["<", ["get", "imp"], 48]], minzoom: 6 },
-  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 6.8 }, // області без реального міста: точка з назвою області
+  { id: "a", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 4000000]], [">=", pop, 12000000]]], minzoom: 2.3 },
+  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", [">=", pop, 6000000], ["<", pop, 12000000]]]], minzoom: 3.4 },
+  { id: "c", filter: ["all", notFb, ["any", ["all", isCap, ["<", pop, 1500000]], ["all", [">=", pop, 3000000], ["<", pop, 6000000], ["!", isCap]]]], minzoom: 4.4 },
+  { id: "e", filter: ["all", notFb, ["!", isCap], [">=", pop, 1000000], ["<", pop, 3000000]], minzoom: 5.4 },
+  { id: "f", filter: ["all", notFb, ["!", isCap], ["<", pop, 1000000], ["any", [">=", pop, 300000], ["==", ["get", "cap"], 1]]], minzoom: 6.6 },
+  { id: "g", filter: ["all", notFb, ["!", isCap], ["<", pop, 300000], ["!=", ["get", "cap"], 1]], minzoom: 7.8 },
+  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 8.5 }, // області без реального міста: точка з назвою області
 ];
 const labelField = (lang) => (lang === "uk" ? ["get", "u"] : ["get", "n"]);
 
@@ -131,6 +138,30 @@ const TerritoryMap = forwardRef(function TerritoryMap(
   const [loadProgress, setLoadProgress] = useState(0);
   const [loadStage, setLoadStage] = useState("Завантажуємо карту…");
   const [citiesReady, setCitiesReady] = useState(false);
+  // Екран завантаження тримається, доки карта справді не відмалювала області
+  // (інакше після "ready" кілька секунд видно порожній темно-синій фон).
+  const [painted, setPainted] = useState(false);
+  const [veilGone, setVeilGone] = useState(false);
+
+  useEffect(() => {
+    if (status !== "ready" || painted) return undefined;
+    const map = mapRef.current;
+    let done = false;
+    const finish = () => { if (!done) { done = true; requestAnimationFrame(() => requestAnimationFrame(() => setPainted(true))); } };
+    const timer = setTimeout(finish, 7000); // запобіжник
+    if (map) {
+      // Дочекаємось, поки плитки областей будуть намальовані (idle після ready).
+      const check = () => { if (map.areTilesLoaded && map.areTilesLoaded()) finish(); else map.once("idle", finish); };
+      setTimeout(check, 150);
+    } else finish();
+    return () => { clearTimeout(timer); };
+  }, [status, painted]);
+
+  useEffect(() => {
+    if (!painted) return undefined;
+    const t = setTimeout(() => setVeilGone(true), 500);
+    return () => clearTimeout(t);
+  }, [painted]);
 
   // Усе, що створюється при завантаженні й потрібне ефектам нижче.
   const worldRef = useRef({
@@ -296,6 +327,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
 
         if (cancelled) return;
         setLoadProgress(1);
+        setLoadStage("Малюємо карту…");
         setStatus("ready");
       } catch (error) {
         console.error("Не вдалося завантажити карту:", error);
@@ -403,7 +435,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         map.addLayer({
           id: "cities-dot-" + tier.id, type: "circle", source: "cities", minzoom: tier.minzoom, filter: tier.filter,
           paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, ["+", 1.6, ["*", ["get", "imp"], 0.025]], 8, ["+", 3, ["*", ["get", "imp"], 0.07]]],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 2, ["+", 1.4, ["*", ["get", "imp"], 0.02]], 8, ["+", 2.6, ["*", ["get", "imp"], 0.06]]],
             "circle-color": ["case", ["==", ["get", "cap"], 2], "#ffd54a", ["==", ["get", "f"], 1], "#9fb0bd", "#ffffff"],
             "circle-stroke-width": ["case", ["==", ["get", "cap"], 2], 2.2, 1.6],
             "circle-stroke-color": ["coalesce", ["feature-state", "oc"], "#0b1620"],
@@ -500,10 +532,11 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       `}</style>
       <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden" }} />
 
-      {status === "loading" && (
+      {status !== "error" && !veilGone && (
         <div
           style={{
             position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+            opacity: painted ? 0 : 1, transition: "opacity 0.45s ease", pointerEvents: painted ? "none" : "auto", zIndex: 5,
             background: "linear-gradient(160deg, #0d1b33 0%, #16324f 55%, #1c4a5e 100%)", borderRadius: 12,
           }}
         >

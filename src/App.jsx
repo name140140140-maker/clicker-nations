@@ -848,11 +848,11 @@ function Flag({ code, size = 20, className }) {
 
 const NAV = [
   { id: "clicker", label: "Clicker", icon: MousePointerClick },
-  { id: "leaderboard", label: "Рейтинг", icon: BarChart3 },
-  { id: "season", label: "Сезон", icon: CalendarDays },
-  { id: "profile", label: "Профіль", icon: User },
-  { id: "shop", label: "Магазин", icon: ShoppingCart },
   { id: "map", label: "Карта", icon: MapIcon },
+  { id: "season", label: "Сезон", icon: CalendarDays },
+  { id: "leaderboard", label: "Рейтинг", icon: BarChart3 },
+  { id: "shop", label: "Магазин", icon: ShoppingCart },
+  { id: "profile", label: "Профіль", icon: User },
 ];
 
 /* ------------------------------------------------------------------ */
@@ -2429,7 +2429,7 @@ function ClickerScreen({
         <div className="cn-energy-bar">
           <div className="cn-energy-fill" style={{ width: energyPct + "%" }} />
         </div>
-        {isEmpty && <div className="cn-energy-empty-note">Енергія відновлюється +1 щосекунди</div>}
+        {isEmpty && <div className="cn-energy-empty-note"><Zap size={13} className="cn-energy-empty-ico" /><span>Енергія відновлюється</span><b>+1 / сек</b></div>}
       </div>
 
       {player.hasPremiumPass && (
@@ -5145,11 +5145,9 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
       )}
 
       <div className="cn-pass-level-list-wrap">
-        <div className="cn-pass-track-labels">
-          <span className="cn-pass-track-label cn-pass-track-label--premium"><Crown size={12} /> Premium нагороди</span>
-          <span className="cn-pass-track-label cn-pass-track-label--free"><Gift size={12} /> Безкоштовні нагороди</span>
-        </div>
-        <div className="cn-pass-level-list">
+        <div className="cn-pass-level-list" style={{ "--cn-pass-n": FREE_PASS_REWARDS.length }}>
+          <span className="cn-pass-track-label cn-pass-track-label--premium cn-pass-track-label--row1"><Crown size={12} /> Premium нагороди</span>
+          <span className="cn-pass-track-label cn-pass-track-label--free cn-pass-track-label--row4"><Gift size={12} /> Безкоштовні нагороди</span>
           {FREE_PASS_REWARDS.map((freeReward, idx) => {
             const premReward = PREMIUM_PASS_REWARDS[idx];
             const lvl = freeReward.level;
@@ -5730,7 +5728,17 @@ function GlobalStyles() {
       .cn-energy-text { font-size: 16px; color: #FFFFFF; font-weight: 700; }
       .cn-energy-bar { width: 100%; height: 14px; border-radius: 999px; background: rgba(255,255,255,0.06); overflow: hidden; border: 1px solid rgba(255,255,255,0.08); box-shadow: inset 0 0 10px rgba(0,0,0,0.35); }
       .cn-energy-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #FBBF24, #34D399 55%, #22D3EE); box-shadow: 0 0 12px rgba(34,211,238,0.5); transition: width 0.4s ease; }
-      .cn-energy-empty-note { text-align: center; font-size: 11px; color: #F87171; margin-top: 6px; }
+      .cn-energy-empty-note {
+        display: inline-flex; align-items: center; gap: 7px; align-self: center; margin-top: 8px;
+        padding: 6px 14px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
+        color: #FDE9C4; background: linear-gradient(135deg, rgba(251,146,60,0.18), rgba(var(--cn-accent-rgb),0.14));
+        border: 1px solid rgba(251,146,60,0.45); box-shadow: 0 0 14px rgba(251,146,60,0.18), inset 0 0 10px rgba(255,255,255,0.04);
+        animation: cn-energy-note-in 0.3s ease, cn-energy-note-pulse 2s ease-in-out 0.3s infinite;
+      }
+      .cn-energy-empty-note b { color: #FBBF24; font-weight: 800; font-family: 'Space Grotesk', sans-serif; }
+      .cn-energy-empty-ico { color: #FBBF24; flex-shrink: 0; }
+      @keyframes cn-energy-note-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+      @keyframes cn-energy-note-pulse { 0%,100% { box-shadow: 0 0 10px rgba(251,146,60,0.14); } 50% { box-shadow: 0 0 20px rgba(251,146,60,0.34); } }
       .cn-autoclicker-block { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; margin-top: 10px; gap: 4px; }
       .cn-autoclicker-toggle {
         display: flex; align-items: center; gap: 6px; justify-content: center;
@@ -6082,15 +6090,23 @@ function GlobalStyles() {
       .cn-pass-track-label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
       .cn-pass-track-label--premium { color: #FDE68A; }
       .cn-pass-level-list {
-        display: flex; flex-direction: row; gap: 8px; overflow-x: auto; overflow-y: hidden;
+        display: grid; grid-template-columns: repeat(var(--cn-pass-n, 51), 76px); grid-template-rows: auto auto auto auto auto;
+        column-gap: 8px; row-gap: 6px; overflow-x: auto; overflow-y: hidden;
         padding: 4px 2px 10px 2px; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
       }
       .cn-pass-level-list::-webkit-scrollbar { height: 5px; }
       .cn-pass-level-list::-webkit-scrollbar-thumb { background: rgba(var(--cn-accent-rgb),0.4); border-radius: 999px; }
-      .cn-pass-level-col {
-        display: flex; flex-direction: column; align-items: stretch; gap: 6px;
-        flex: 0 0 auto; width: 76px; scroll-snap-align: start;
+      .cn-pass-level-col { display: contents; }
+      .cn-pass-level-col > :nth-child(1) { grid-row: 2; }
+      .cn-pass-level-col > :nth-child(2) { grid-row: 3; }
+      .cn-pass-level-col > :nth-child(3) { grid-row: 5; }
+      .cn-pass-track-label--row1, .cn-pass-track-label--row4 {
+        grid-column: 1 / -1; justify-self: start; position: sticky; left: 2px; z-index: 1;
+        padding: 3px 9px; border-radius: 999px; background: rgba(3,8,20,0.55); border: 1px solid rgba(148,163,184,0.2);
+        font-size: 10px; font-weight: 800; letter-spacing: 0.02em;
       }
+      .cn-pass-track-label--row1 { grid-row: 1; }
+      .cn-pass-track-label--row4 { grid-row: 4; margin-top: 4px; color: #93C5FD; }
       .cn-pass-level-col--current .cn-pass-level-badge {
         box-shadow: 0 0 0 2px var(--cn-accent-bright), 0 0 10px rgba(var(--cn-accent-rgb),0.6);
       }
