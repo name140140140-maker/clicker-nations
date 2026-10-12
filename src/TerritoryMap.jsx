@@ -4,6 +4,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson } from "./map/cities.js";
 import { cityZones } from "./map/geo.js";
+import { waterTexture, landTexture } from "./map/textures.js";
 
 // КАРТА ТЕРРИТОРІЙ
 // Лише адміністративні області й їхні кордони — без реальних держав і прапорів.
@@ -23,8 +24,8 @@ const MAX_ZOOM = 12;
 const SOURCE_MAX_ZOOM = 8;
 
 export const MAP_COLORS = {
-  water: "#0c2236",
-  free: "#a9b4a3",
+  water: "#17608f",
+  free: "#7fa66a",
   border: "#0b1620",
   borderInternal: "#33424d",
   mine: "#ffffff",
@@ -48,8 +49,8 @@ const pop = ["get", "p"];
 // Прозорість від 0 на порозі масштабу до 1 через 0.7 рівня зуму.
 const fadeIn = (z) => ["interpolate", ["linear"], ["zoom"], z, 0, z + 0.7, 1];
 const CITY_TIERS = [
-  { id: "a", filter: ["all", notFb, isCap, [">=", pop, 4000000]], minzoom: 2.3 },
-  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", ["!", isCap], [">=", pop, 6000000]]]], minzoom: 3.4 },
+  { id: "a", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 4000000]], [">=", pop, 12000000]]], minzoom: 2.3 },
+  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", [">=", pop, 6000000], ["<", pop, 12000000]]]], minzoom: 3.4 },
   { id: "c", filter: ["all", notFb, ["any", ["all", isCap, ["<", pop, 1500000]], ["all", [">=", pop, 3000000], ["<", pop, 6000000], ["!", isCap]]]], minzoom: 4.4 },
   { id: "e", filter: ["all", notFb, ["!", isCap], [">=", pop, 1000000], ["<", pop, 3000000]], minzoom: 5.4 },
   { id: "f", filter: ["all", notFb, ["!", isCap], ["<", pop, 1000000], ["any", [">=", pop, 300000], ["==", ["get", "cap"], 1]]], minzoom: 6.6 },
@@ -261,6 +262,15 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           ? ["all", ["!=", ownerA, ownerB], ["any", ["==", ownerA, mine], ["==", ownerB, mine]]]
           : false;
 
+        // Текстури: хвилі на воді та трава/рельєф на суші (генеруються в коді).
+        try {
+          const wt = waterTexture(MAP_COLORS.water);
+          const lt = landTexture();
+          if (!map.hasImage("water-tex")) map.addImage("water-tex", wt.data, { pixelRatio: 2 });
+          if (!map.hasImage("land-tex")) map.addImage("land-tex", lt.data, { pixelRatio: 2 });
+          map.setPaintProperty("bg", "background-pattern", "water-tex");
+        } catch (err) { console.warn("Текстури карти недоступні:", err); }
+
         map.addLayer({
           id: "regions-fill",
           type: "fill",
@@ -270,6 +280,18 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             "fill-opacity": ["case", ["==", regionOwner, ""], 0.92, OWNER_OPACITY],
           },
         });
+        // Текстура суші: виразна на вільних територіях, ледь помітна на зайнятих.
+        if (map.hasImage("land-tex")) {
+          map.addLayer({
+            id: "regions-texture",
+            type: "fill",
+            source: "regions",
+            paint: {
+              "fill-pattern": "land-tex",
+              "fill-opacity": ["case", ["==", regionOwner, ""], 0.85, 0.28],
+            },
+          });
+        }
         // Підсвітка вибраної області (режим вибору й перегляду).
         map.addLayer({
           id: "regions-selected",
