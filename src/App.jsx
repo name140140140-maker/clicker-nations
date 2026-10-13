@@ -59,7 +59,7 @@ import {
   Landmark,
   BarChart2,
 } from "lucide-react";
-import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
+import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
 import { fmtPopulation } from "./map/cities";
 import {
@@ -318,6 +318,8 @@ function findAllyWar(wars, alliances, myCountry) {
 /* Shared: declare a war, with exclusivity checks + mail + news. Returns { ok, reason, war? } */
 async function declareWarAction(attackerCode, defenderCode, city) {
   if (attackerCode === defenderCode) return { ok: false, reason: "Не можна нападати на себе" };
+  const blocked = attackBlockReason(await loadDiplomacy(), attackerCode, defenderCode);
+  if (blocked) return { ok: false, reason: blocked };
   const wars = await getWars();
   if (countryAtWar(wars, attackerCode)) return { ok: false, reason: "Твоя країна вже веде війну" };
   if (countryAtWar(wars, defenderCode)) return { ok: false, reason: "Ця країна вже веде іншу війну" };
@@ -550,6 +552,153 @@ function areAllies(alliances, a, b) {
   return alliances.some((pair) => (pair[0] === a && pair[1] === b) || (pair[0] === b && pair[1] === a));
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Дипломатія: союзи, пакти про ненапад, 4-годинна заборона нападу      */
+/*  Кожна угода — окремий запис dip:<тип>:<пара>, тож паралельні         */
+/*  зміни не затирають одна одну.                                        */
+/* ------------------------------------------------------------------ */
+
+const DIP_PREFIX = "dip:";
+const TRUCE_MS = 4 * 60 * 60 * 1000;
+const DIP_KIND = {
+  ally: { noun: "союз", title: "Союз", req: "Запит на союз" },
+  pact: { noun: "пакт про ненапад", title: "Пакт про ненапад", req: "Пропозиція пакту про ненапад" },
+};
+
+function pairId(a, b) {
+  return [a, b].sort().join("~");
+}
+
+async function loadDiplomacy() {
+  const out = { allies: [], pacts: [], truces: {}, requests: [] };
+  const entries = await sbStorageListEntries(DIP_PREFIX, true);
+  const brokenAllyPairs = new Set();
+  for (const row of entries || []) {
+    let v;
+    try {
+      v = JSON.parse(row.value);
+    } catch {
+      continue;
+    }
+    if (!v) continue;
+    if (v.kind === "req") {
+      out.requests.push(v);
+      continue;
+    }
+    if (v.kind !== "ally" && v.kind !== "pact") continue;
+    const id = pairId(v.a, v.b);
+    if (v.active) (v.kind === "ally" ? out.allies : out.pacts).push(v);
+    else {
+      if (v.kind === "ally") brokenAllyPairs.add(id);
+      const until = (v.brokenAt || 0) + TRUCE_MS;
+      if (until > Date.now() && until > (out.truces[id] || 0)) out.truces[id] = until;
+    }
+  }
+  // Старі союзи з game-state теж діють, якщо їх не розірвано
+  try {
+    for (const pair of await getAlliances()) {
+      const id = pairId(pair[0], pair[1]);
+      if (!brokenAllyPairs.has(id) && !out.allies.some((x) => pairId(x.a, x.b) === id)) {
+        out.allies.push({ kind: "ally", a: pair[0], b: pair[1], active: true, ts: 0 });
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+function dipRelation(dip, a, b) {
+  const id = pairId(a, b);
+  return {
+    ally: !!dip?.allies.some((x) => pairId(x.a, x.b) === id),
+    pact: !!dip?.pacts.some((x) => pairId(x.a, x.b) === id),
+    truceUntil: dip?.truces?.[id] > Date.now() ? dip.truces[id] : 0,
+  };
+}
+
+/* Причина, чому нападати заборонено (або null, якщо можна) */
+function attackBlockReason(dip, a, b) {
+  const r = dipRelation(dip, a, b);
+  if (r.ally) return "Це ваш союзник — нападати не можна";
+  if (r.pact) return "З цією країною діє пакт про ненапад";
+  if (r.truceUntil) return "Нападати заборонено ще " + fmtDuration(r.truceUntil - Date.now());
+  return null;
+}
+
+async function sendDiplomacyRequest(kind, from, to) {
+  if (from === to) return { ok: false, reason: "Не можна обрати власну країну" };
+  if (!COUNTRY_MAP[to]) return { ok: false, reason: "Країну не знайдено" };
+  const toLeader = await getLeader(to);
+  if (!toLeader) return { ok: false, reason: "У цієї країни немає лідера" };
+  const dip = await loadDiplomacy();
+  const rel = dipRelation(dip, from, to);
+  if (kind === "ally" && rel.ally) return { ok: false, reason: "Ви вже союзники" };
+  if (kind === "pact" && (rel.pact || rel.ally)) return { ok: false, reason: rel.ally ? "Союзникам пакт не потрібен" : "Пакт уже підписано" };
+  if (dip.requests.some((r) => r.status === "pending" && r.type === kind && pairId(r.from, r.to) === pairId(from, to) && Date.now() - r.ts < 24 * 3600 * 1000)) {
+    return { ok: false, reason: "Пропозицію вже надіслано — чекаємо відповіді" };
+  }
+  const id = "q_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const req = { kind: "req", id, type: kind, from, to, status: "pending", ts: Date.now() };
+  await setJSON(DIP_PREFIX + "req:" + id, req, true);
+  const fromName = COUNTRY_MAP[from]?.name || from;
+  await addMail(toLeader, {
+    type: "dip-request",
+    subject: `${DIP_KIND[kind].req} від ${fromName}`,
+    body: `${COUNTRY_MAP[from]?.flag || ""} ${fromName} пропонує ${kind === "ally" ? "укласти союз" : "підписати пакт про ненапад"}. Можна прийняти, відхилити або проігнорувати.`,
+    meta: { requestId: id, kind, fromCountry: from, toCountry: to },
+  });
+  return { ok: true };
+}
+
+async function respondDiplomacyRequest(requestId, accept) {
+  const req = await getJSON(DIP_PREFIX + "req:" + requestId, true, null);
+  if (!req) return { ok: false, reason: "Пропозицію не знайдено" };
+  if (req.status !== "pending") return { ok: false, reason: "На цю пропозицію вже відповіли" };
+  await setJSON(DIP_PREFIX + "req:" + requestId, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
+  if (accept) {
+    await setJSON(DIP_PREFIX + req.type + ":" + pairId(req.from, req.to), { kind: req.type, a: req.from, b: req.to, active: true, ts: Date.now() }, true);
+  }
+  const fromLeader = await getLeader(req.from);
+  if (fromLeader) {
+    const toName = COUNTRY_MAP[req.to]?.name || req.to;
+    await addMail(fromLeader, {
+      type: "info",
+      subject: accept ? `${DIP_KIND[req.type].title} укладено` : "Пропозицію відхилено",
+      body: accept
+        ? `${toName} прийняли вашу пропозицію: ${DIP_KIND[req.type].noun}.`
+        : `${toName} відхилили вашу пропозицію: ${DIP_KIND[req.type].noun}.`,
+    });
+  }
+  return { ok: true };
+}
+
+async function breakDiplomacy(kind, mine, other) {
+  await setJSON(
+    DIP_PREFIX + kind + ":" + pairId(mine, other),
+    { kind, a: mine, b: other, active: false, brokenAt: Date.now(), brokenBy: mine },
+    true
+  );
+  if (kind === "ally") {
+    try {
+      const list = await getAlliances();
+      await saveAlliances(list.filter((pr) => pairId(pr[0], pr[1]) !== pairId(mine, other)));
+    } catch {
+      /* ignore */
+    }
+  }
+  const otherLeader = await getLeader(other);
+  if (otherLeader) {
+    await addMail(otherLeader, {
+      type: "info",
+      subject: kind === "ally" ? "Союз розірвано" : "Пакт розірвано",
+      body: `${COUNTRY_MAP[mine]?.name || mine} розірвали ${DIP_KIND[kind].noun}. Протягом 4 годин нападати одне на одного заборонено.`,
+    });
+  }
+  return { ok: true };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Влада: Рада (радники) + рішення ради                                */
 /* ------------------------------------------------------------------ */
@@ -644,9 +793,7 @@ async function executeCouncilProposal(code, proposal) {
 
 function roleStatusLabel(isLeader, roleField) {
   if (isLeader) return "Лідер країни";
-  if (roleField === "advisor") return "Радник";
-  if (roleField === "rebel") return "Повстанець";
-  return "Звичайний громадянин";
+  return "Громадянин";
 }
 
 function describeCouncilProposal(p) {
@@ -659,46 +806,6 @@ function describeCouncilProposal(p) {
   if (p.type === "kickLeader") return "Усунути лідера країни";
   if (p.type === "kickAdvisor") return `Вигнати з ради: ${p.payload.targetName || "радник"}`;
   return "Рішення ради";
-}
-
-/* Buy a government role (Лідер / Радник / Повстанець) for ROLE_PRICE Power. */
-async function buyCountryRole(me, role, onSetPlayer) {
-  if (!me) return { ok: false, reason: "Помилка" };
-  if ((me.power || 0) < ROLE_PRICE) return { ok: false, reason: `Потрібно ${fmt(ROLE_PRICE)} Power` };
-
-  if (role === "leader") {
-    const existing = await getLeader(me.countryCode);
-    if (existing) return { ok: false, reason: "У країні вже є лідер" };
-    await setLeaderStorage(me.countryCode, me.id);
-    const advisors = await getAdvisors(me.countryCode);
-    if (advisors.includes(me.id)) await saveAdvisors(me.countryCode, advisors.filter((id) => id !== me.id));
-    const updated = { ...me, power: me.power - ROLE_PRICE, role: "leader" };
-    await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-    onSetPlayer(updated);
-    return { ok: true };
-  }
-
-  if (role === "advisor") {
-    const leaderId = await getLeader(me.countryCode);
-    if (leaderId === me.id) return { ok: false, reason: "Ти вже лідер країни" };
-    const advisors = await getAdvisors(me.countryCode);
-    if (advisors.includes(me.id)) return { ok: false, reason: "Ти вже радник" };
-    if (advisors.length >= MAX_ADVISORS) return { ok: false, reason: "У раді вже достатньо радників" };
-    await saveAdvisors(me.countryCode, [...advisors, me.id]);
-    const updated = { ...me, power: me.power - ROLE_PRICE, role: "advisor" };
-    await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-    onSetPlayer(updated);
-    return { ok: true };
-  }
-
-  if (role === "rebel") {
-    const updated = { ...me, power: me.power - ROLE_PRICE, role: "rebel" };
-    await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-    onSetPlayer(updated);
-    return { ok: true };
-  }
-
-  return { ok: false, reason: "Невідома роль" };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1179,8 +1286,8 @@ const TRANSLATIONS = {
   tut4_text: { uk: "Відкрий «Рейтинг», щоб побачити найсильніші країни, найсильніших гравців світу та своїх конкурентів усередині власної держави. Рейтинг формується на основі Power — піднімайся якомога вище.", pl: "Otwórz „Ranking”, aby zobaczyć najsilniejsze kraje, najsilniejszych graczy na świecie oraz swoich rywali w obrębie własnego kraju. Ranking opiera się na Power — wspinaj się jak najwyżej.", de: "Öffne „Rangliste“, um die stärksten Länder, die stärksten Spieler der Welt und deine Konkurrenten im eigenen Land zu sehen. Die Rangliste basiert auf Power — klettere so hoch wie möglich.", ru: "Открой «Рейтинг», чтобы увидеть самые сильные страны, сильнейших игроков мира и своих конкурентов внутри собственной страны. Рейтинг формируется на основе Power — поднимайся как можно выше.", it: "Apri \"Classifica\" per vedere i paesi più forti, i giocatori più forti al mondo e i tuoi rivali all'interno del tuo stesso paese. Le classifiche si basano sul Power — sali il più in alto possibile.", fr: "Ouvrez « Classement » pour voir les pays les plus forts, les joueurs les plus forts au monde, et vos rivaux dans votre propre pays. Le classement se base sur le Power — grimpez le plus haut possible.", en: "Open 'Leaderboard' to see the strongest countries, the strongest players in the world, and your rivals within your own country. Rankings are based on Power — climb as high as you can.", es: "Abre \"Ranking\" para ver los países más fuertes, los jugadores más fuertes del mundo y tus rivales dentro de tu propio país. El ranking se basa en el Power — sube lo más alto posible.", ar: "افتح \"المتصدرون\" لرؤية أقوى الدول وأقوى اللاعبين في العالم ومنافسيك داخل بلدك. يعتمد الترتيب على القوة — اصعد لأعلى ما يمكن." },
   tut5_title: { uk: "Виходь на карту", pl: "Wejdź na mapę", de: "Auf zur Karte", ru: "Выходи на карту", it: "Vai sulla mappa", fr: "Direction la carte", en: "Head to the map", es: "Ve al mapa", ar: "توجّه إلى الخريطة" },
   tut5_text: { uk: "На «Карті» видно адміністративні області світу. Вільні території нічим не контролюються, зайняті належать іншим країнам, а твої власні виділено рамкою. Колір кожної країни обирає її лідер.", en: "The 'Map' shows the world's administrative regions. Free territories are controlled by no one, occupied ones belong to other countries, and your own are outlined. Each country's color is chosen by its leader.", ru: "На «Карте» видны административные области мира. Свободные территории никем не контролируются, занятые принадлежат другим странам, а твои собственные выделены рамкой. Цвет каждой страны выбирает её лидер." },
-  tut6_title: { uk: "Налаштування Штабу", en: "Headquarters Settings", ru: "Настройки штаба" },
-  tut6_text: { uk: "У «Штабі» відкрий «Налаштування», щоб змінити колір своєї країни на карті. Це може робити лише лідер. Нові можливості з'являтимуться з оновленнями.", en: "Open 'Headquarters' → 'Settings' to change your country's color on the map. Only the leader can do this. New features will arrive with updates.", ru: "В «Штабе» открой «Настройки», чтобы изменить цвет своей страны на карте. Это может делать только лидер. Новые возможности будут появляться с обновлениями." },
+  tut6_title: { uk: "Панель управління", en: "Control Panel", ru: "Панель управления" },
+  tut6_text: { uk: "У «Клікері» відкрий Панель управління. Поки що там можна змінити колір своєї країни на карті — це може робити лише лідер. Нові можливості з'являтимуться з оновленнями.", en: "In 'Clicker', open the Control Panel. For now you can change your country's color on the map — only the leader can do that. New features will arrive with updates.", ru: "В «Кликере» открой Панель управления. Пока там можно изменить цвет своей страны на карте — это может делать только лидер. Новые возможности будут появляться с обновлениями." },
   tut10_title: { uk: "Не пропускай сезон", pl: "Nie przegap sezonu", de: "Verpasse die Saison nicht", ru: "Не пропускай сезон", it: "Non perdere la stagione", fr: "Ne manquez pas la saison", en: "Don't miss the season", es: "No te pierdas la temporada", ar: "لا تفوّت الموسم" },
   tut10_text: { uk: "У «Сезоні» є твій Battle Pass, що триває 30 днів. Рівень залежить від кількості кліків — досягнув нового рівня, забирай нагороду і перевіряй сезон регулярно.", pl: "W karcie „Sezon” znajduje się Twój Battle Pass, który trwa 30 dni. Poziom zależy od liczby kliknięć — osiągnij nowy poziom, odbierz nagrodę i zaglądaj do sezonu regularnie.", de: "Im Tab „Saison“ befindet sich dein Battle Pass, der 30 Tage läuft. Dein Level hängt von deinen Klicks ab — erreiche ein neues Level, hol dir die Belohnung und schau regelmäßig in der Saison vorbei.", ru: "На вкладке «Сезон» находится твой Battle Pass, который длится 30 дней. Уровень зависит от количества кликов — достиг нового уровня, забирай награду и регулярно проверяй сезон.", it: "Nella scheda \"Stagione\" trovi il tuo Battle Pass, che dura 30 giorni. Il livello dipende dal numero di tocchi — raggiungi un nuovo livello, ritira il premio e controlla la stagione regolarmente.", fr: "L'onglet « Saison » contient votre Battle Pass, valable 30 jours. Votre niveau dépend de votre nombre de taps — atteignez un nouveau niveau, récupérez la récompense et consultez la saison régulièrement.", en: "The 'Season' tab holds your Battle Pass, which runs for 30 days. Your level depends on your clicks — reach a new level, claim the reward, and check the season regularly.", es: "La pestaña \"Temporada\" contiene tu Battle Pass, que dura 30 días. Tu nivel depende de la cantidad de toques — al alcanzar un nuevo nivel, reclama la recompensa y revisa la temporada con regularidad.", ar: "يحتوي تبويب \"الموسم\" على Battle Pass الخاص بك، ويستمر 30 يومًا. يعتمد مستواك على عدد ضغطاتك — عند بلوغ مستوى جديد، احصل على المكافأة وتفقد الموسم بانتظام." },
   tut11_title: { uk: "Хочеш більше нагород?", pl: "Chcesz więcej nagród?", de: "Willst du mehr Belohnungen?", ru: "Хочешь больше наград?", it: "Vuoi più premi?", fr: "Vous voulez plus de récompenses ?", en: "Want more rewards?", es: "¿Quieres más recompensas?", ar: "هل تريد مكافآت أكثر؟" },
@@ -1696,6 +1803,10 @@ export default function App() {
                 isLeader={isLeader}
                 onChangeCountryColor={changeCountryColor}
                 lang={language}
+                mail={mail}
+                unreadCount={unreadCount}
+                onRefreshMail={refreshMail}
+                onRefreshData={() => refreshGameData(true)}
               />
             )}
             {tab === "profile" && (
@@ -2492,14 +2603,31 @@ function ClickerScreen({
 
 const HQ_SECTIONS = [
   { id: "info", label: "Інформація", Icon: Info, text: "Тут буде докладна інформація про вашу країну: історія, лідер, радники та правила." },
-  { id: "army", label: "Армія", Icon: Swords, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
-  { id: "diplomacy", label: "Дипломатія", Icon: Handshake, text: "Тут будуть союзи, договори та відносини з іншими країнами." },
+  { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
+  { id: "diplomacy", label: "Дипломатія", leaderOnly: true, Icon: Handshake, text: "" },
   { id: "stats", label: "Статистика", Icon: BarChart2, text: "Тут буде статистика країни: розвиток сили, території та внесок гравців." },
+  { id: "mail", label: "Пошта", Icon: Mail, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
 ];
 
-function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk" }) {
+function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData }) {
   const [view, setView] = useState(null); // null | id розділу | "dev"
+  const [pickKind, setPickKind] = useState(null); // null | "ally" | "pact"
+  const [dip, setDip] = useState(null);
+  const [dipMsg, setDipMsg] = useState("");
+  const [lockedMsg, setLockedMsg] = useState("");
+
+  const reloadDip = useCallback(async () => {
+    setDip(await loadDiplomacy());
+  }, []);
+  useEffect(() => {
+    if (view === "diplomacy") reloadDip();
+  }, [view, reloadDip]);
+  useEffect(() => {
+    if (!lockedMsg) return undefined;
+    const tm = setTimeout(() => setLockedMsg(""), 2400);
+    return () => clearTimeout(tm);
+  }, [lockedMsg]);
   const country = COUNTRY_MAP[player.countryCode];
   const color = country?.color || "#3b82f6";
 
@@ -2519,7 +2647,66 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
 
   const leader = (players || []).find((p) => p.id === country?.leaderId);
 
-  const openView = (id) => { cnSfx.navSwitch(); setView(id); };
+  const openView = (id) => {
+    const sec = HQ_SECTIONS.find((x) => x.id === id);
+    if (sec?.leaderOnly && !isLeader) {
+      cnSfx.error();
+      setLockedMsg(`Розділ «${sec.label}» доступний лише лідеру країни`);
+      return;
+    }
+    cnSfx.navSwitch();
+    setDipMsg("");
+    setView(id);
+  };
+
+  const onPickCountry = async (countryId) => {
+    const kind = pickKind;
+    setPickKind(null);
+    const res = await sendDiplomacyRequest(kind, player.countryCode, countryId);
+    if (res.ok) {
+      cnSfx.purchase();
+      setDipMsg(`✓ Пропозицію надіслано лідеру ${COUNTRY_MAP[countryId]?.name || countryId}`);
+    } else {
+      cnSfx.error();
+      setDipMsg("✗ " + res.reason);
+    }
+    reloadDip();
+  };
+
+  if (view === "diplomacy" && pickKind) {
+    return (
+      <div className="cn-hq" style={{ "--hq": color }}>
+        <MapScreen
+          players={players}
+          me={player}
+          loading={false}
+          onRefresh={onRefreshData || (() => {})}
+          nations={nations}
+          lang={lang}
+          dip={dip}
+          pick={{
+            label: pickKind === "ally" ? "Обери країну для союзу" : "Обери країну для пакту про ненапад",
+            onPick: onPickCountry,
+            onCancel: () => setPickKind(null),
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (view === "mail") {
+    return (
+      <div className="cn-hq" style={{ "--hq": color }}>
+        <MailScreen
+          me={player}
+          mail={mail}
+          onBack={() => setView(null)}
+          onRefresh={onRefreshMail || (() => {})}
+          onRefreshGameData={onRefreshData}
+        />
+      </div>
+    );
+  }
 
   if (view) {
     const section = HQ_SECTIONS.find((s) => s.id === view);
@@ -2533,7 +2720,20 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           </button>
           <div className="cn-screen-title">{title}</div>
         </div>
-        {view === "settings" ? (
+        {view === "diplomacy" ? (
+          <DiplomacyPanel
+            me={player}
+            dip={dip}
+            msg={dipMsg}
+            onStartPick={(k) => { setDipMsg(""); setPickKind(k); }}
+            onBreak={async (kind, other) => {
+              await breakDiplomacy(kind, player.countryCode, other);
+              setDipMsg(`✓ ${DIP_KIND[kind].title} з ${COUNTRY_MAP[other]?.name || other} розірвано. 4 години нападати заборонено.`);
+              reloadDip();
+              onRefreshData && onRefreshData();
+            }}
+          />
+        ) : view === "settings" ? (
           <ControlPanel
             player={player}
             isLeader={isLeader}
@@ -2613,19 +2813,127 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       </div>
 
       <div className="cn-hq-grid">
-        {HQ_SECTIONS.map((s, i) => (
-          <button
-            key={s.id}
-            type="button"
-            className={"cn-hq-tile" + (i < 3 ? " cn-hq-tile--third" : " cn-hq-tile--half")}
-            onClick={() => openView(s.id)}
-          >
-            <span className="cn-hq-tile-icon"><s.Icon size={21} /></span>
-            <span className="cn-hq-tile-label">{s.label}</span>
-            {s.id !== "settings" && <span className="cn-hq-soon cn-hq-soon--tile">Скоро</span>}
-          </button>
-        ))}
+        {HQ_SECTIONS.map((s) => {
+          const locked = s.leaderOnly && !isLeader;
+          const soon = ["info", "army", "stats"].includes(s.id);
+          return (
+            <button
+              key={s.id}
+              type="button"
+              className={"cn-hq-tile cn-hq-tile--third" + (locked ? " cn-hq-tile--locked" : "")}
+              onClick={() => openView(s.id)}
+            >
+              <span className="cn-hq-tile-icon"><s.Icon size={21} /></span>
+              <span className="cn-hq-tile-label">{s.label}</span>
+              {locked && <Lock size={12} className="cn-hq-lock" />}
+              {!locked && soon && <span className="cn-hq-soon cn-hq-soon--tile">Скоро</span>}
+              {s.id === "mail" && unreadCount > 0 && <span className="cn-hq-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
+            </button>
+          );
+        })}
       </div>
+      {lockedMsg && <div className="cn-hq-toast">{lockedMsg}</div>}
+    </div>
+  );
+}
+
+
+/* Дипломатія (лише лідер): союзи та пакти про ненапад */
+function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak }) {
+  const [sub, setSub] = useState(null); // null | "allies" | "pacts"
+  const [confirmId, setConfirmId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const mine = me.countryCode;
+
+  const others = (list) =>
+    (list || [])
+      .filter((x) => x.a === mine || x.b === mine)
+      .map((x) => (x.a === mine ? x.b : x.a))
+      .filter((c) => COUNTRY_MAP[c]);
+
+  const doBreak = async (kind, other) => {
+    const id = kind + other;
+    if (confirmId !== id) {
+      setConfirmId(id);
+      return;
+    }
+    setBusy(true);
+    await onBreak(kind, other);
+    setConfirmId(null);
+    setBusy(false);
+  };
+
+  const truces = Object.entries(dip?.truces || {})
+    .filter(([id, until]) => until > Date.now() && id.split("~").includes(mine))
+    .map(([id, until]) => ({ other: id.split("~").find((c) => c !== mine), until }))
+    .filter((x) => COUNTRY_MAP[x.other]);
+
+  const renderList = (kind) => {
+    const list = others(kind === "ally" ? dip?.allies : dip?.pacts);
+    return (
+      <div className="cn-dip-list">
+        {!dip && <div className="cn-lb-empty">Завантаження…</div>}
+        {dip && list.length === 0 && (
+          <div className="cn-lb-empty">{kind === "ally" ? "Союзників поки немає" : "Підписаних пактів поки немає"}</div>
+        )}
+        {list.map((c) => (
+          <div className="cn-dip-row" key={c}>
+            <Flag code={c} size={22} className="cn-country-badge--lg" />
+            <div className="cn-dip-row-name">{COUNTRY_MAP[c].name}</div>
+            <button
+              className={"cn-dev-btn cn-dev-btn--danger" + (confirmId === kind + c ? " cn-dev-btn--confirm" : "")}
+              type="button"
+              disabled={busy}
+              onClick={() => doBreak(kind, c)}
+            >
+              {confirmId === kind + c ? "Підтвердити" : "Розірвати"}
+            </button>
+          </div>
+        ))}
+        {list.length > 0 && <div className="cn-dip-sub">Після розриву нападати на цю країну заборонено ще 4 години.</div>}
+      </div>
+    );
+  };
+
+  if (sub) {
+    return (
+      <div className="cn-dip-menu">
+        <button className="cn-dev-btn" type="button" onClick={() => { setSub(null); setConfirmId(null); }} style={{ alignSelf: "flex-start" }}>
+          <ArrowLeft size={13} /> {sub === "allies" ? "Список союзників" : "Договори"}
+        </button>
+        {msg && <div className="cn-dev-status-msg">{msg}</div>}
+        {renderList(sub === "allies" ? "ally" : "pact")}
+      </div>
+    );
+  }
+
+  const items = [
+    { id: "allies", label: "Список союзників", Icon: Users, run: () => setSub("allies") },
+    { id: "pacts", label: "Договори", Icon: ShieldCheck, run: () => setSub("pacts") },
+    { id: "ally", label: "Підписати союз", Icon: Handshake, run: () => onStartPick("ally") },
+    { id: "pact", label: "Підписати пакт про ненапад", Icon: Ban, run: () => onStartPick("pact") },
+  ];
+  return (
+    <div className="cn-dip-menu">
+      {msg && <div className="cn-dev-status-msg">{msg}</div>}
+      {items.map((it) => (
+        <button key={it.id} type="button" className="cn-hq-tile" onClick={() => { cnSfx.navSwitch(); it.run(); }}>
+          <span className="cn-hq-tile-icon"><it.Icon size={21} /></span>
+          <span className="cn-hq-tile-label">{it.label}</span>
+        </button>
+      ))}
+      {truces.length > 0 && (
+        <div className="cn-dip-list">
+          <div className="cn-dip-sub">Заборона нападу після розриву:</div>
+          {truces.map((x) => (
+            <div className="cn-dip-row" key={x.other}>
+              <Flag code={x.other} size={22} className="cn-country-badge--lg" />
+              <div className="cn-dip-row-name">{COUNTRY_MAP[x.other].name}</div>
+              <span className="cn-dip-sub">ще {fmtDuration(x.until - Date.now())}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -4289,6 +4597,24 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
     [markRead, onRefreshGameData]
   );
 
+  const respondDipRequest = useCallback(
+    async (msg, accept) => {
+      setBusyId(msg.id);
+      const res = await respondDiplomacyRequest(msg.meta.requestId, accept);
+      const list = await getMail(me.id);
+      const resolved = res.ok ? (accept ? "accepted" : "declined") : "stale";
+      await setJSON(
+        MAIL_PREFIX + me.id,
+        list.map((m) => (m.id === msg.id ? { ...m, read: true, resolved, resolvedNote: res.ok ? "" : res.reason } : m)),
+        true
+      );
+      onRefresh();
+      onRefreshGameData && onRefreshGameData();
+      setBusyId(null);
+    },
+    [me.id, onRefresh, onRefreshGameData]
+  );
+
   const respondWarInvite = useCallback(
     async (msg, accept) => {
       setBusyId(msg.id);
@@ -4361,6 +4687,22 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
                       </button>
                     </div>
                   )}
+                  {m.type === "dip-request" && m.meta && (
+                    m.resolved ? (
+                      <div className="cn-mail-resolved">
+                        {m.resolved === "accepted" ? "✓ Прийнято" : m.resolved === "declined" ? "✗ Відхилено" : m.resolvedNote || "Вже неактуально"}
+                      </div>
+                    ) : (
+                      <div className="cn-mail-actions">
+                        <button className="cn-mail-action cn-mail-action--accept" disabled={busyId === m.id} onClick={() => respondDipRequest(m, true)} type="button">
+                          <Check size={14} /> Прийняти
+                        </button>
+                        <button className="cn-mail-action cn-mail-action--decline" disabled={busyId === m.id} onClick={() => respondDipRequest(m, false)} type="button">
+                          <Ban size={14} /> Відхилити
+                        </button>
+                      </div>
+                    )
+                  )}
                   {m.type === "ally-war-invite" && m.meta && (
                     <div className="cn-mail-actions">
                       <button
@@ -4396,7 +4738,7 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
 /* ------------------------------------------------------------------ */
 
 function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage, maintenance, onSaveMaintenance }) {
-  const [devOpen, setDevOpen] = useState(true);
+  const [adminPlayersOpen, setAdminPlayersOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
   const [countryQuery, setCountryQuery] = useState("");
@@ -4441,12 +4783,12 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
   }, [adminOpen, season, adminPassPriceLoaded, clStored]);
 
   const adminResults = useMemo(() => {
-    if (!adminOpen) return [];
+    if (!adminOpen || !adminPlayersOpen) return [];
     const q = adminQuery.trim().toLowerCase();
     const list = players || [];
     if (!q) return list.slice(0, 25);
     return list.filter((p) => (p.username || "").toLowerCase().includes(q) || p.id.toLowerCase().includes(q)).slice(0, 25);
-  }, [adminOpen, adminQuery, players]);
+  }, [adminOpen, adminPlayersOpen, adminQuery, players]);
 
   const startEditPlayer = (p) => {
     setAdminEditId(p.id);
@@ -4694,7 +5036,11 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
             <div className="cn-dev-panel">
               {adminMsg && <div className="cn-dev-status-msg">{adminMsg}</div>}
 
-              <div className="cn-admin-block-title">Гравці</div>
+              <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setAdminPlayersOpen((o) => !o); }}>
+                <Users size={14} /> Список гравців ({(players || []).length})
+                <ChevronDown size={16} className={"cn-chevron" + (adminPlayersOpen ? " cn-chevron--open" : "")} />
+              </button>
+              {adminPlayersOpen && (<>
               <input
                 className="cn-admin-input"
                 type="text"
@@ -4757,6 +5103,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                 ))}
                 {adminResults.length === 0 && <div className="cn-control-empty">Гравців не знайдено</div>}
               </div>
+              </>)}
 
               <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Дата завершення сезону</div>
               <div className="cn-admin-row">
@@ -4847,85 +5194,79 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                   {maintenance.enabled ? "Вимкнути" : "Увімкнути"}
                 </button>
               </div>
-            </div>
-          )}
 
-          <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setDevOpen((o) => !o); }}>
-            <Bug size={14} /> Developer / Test
-            <ChevronDown size={16} className={"cn-chevron" + (devOpen ? " cn-chevron--open" : "")} />
-          </button>
-
-          {devOpen && (
-        <div className="cn-dev-panel">
-          {!storagePersistenceHealthy && (
-            <div className="cn-dev-warning">
-              ⚠️ Хмарне сховище зараз недоступне. Усе працює в межах цієї сесії, але зміни можуть не зберегтися після перезавантаження.
-            </div>
-          )}
-          <div className="cn-dev-status-row">
-            <UserCog size={13} />
-            Ти {isLeader ? <b className="cn-dev-status-yes">лідер {COUNTRY_MAP[me.countryCode]?.name}</b> : <span>не лідер</span>}
-          </div>
-          <div className="cn-dev-status-row">
-            <Mail size={13} />
-            Повідомлень: <b>{mail ? mail.length : 0}</b> (непрочитаних: <b>{unreadCount || 0}</b>)
-          </div>
-
-          {statusMsg && <div className="cn-dev-status-msg">{statusMsg}</div>}
-
-          <div className="cn-dev-row">
-            <span className="cn-dev-row-label">Країна</span>
-            <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => setCountryPickerOpen((o) => !o)}>
-              Змінити
-            </button>
-          </div>
-          {countryPickerOpen && (
-            <div className="cn-country-dropdown cn-dev-country-dropdown">
-              <div className="cn-country-search-wrap">
-                <Search size={15} className="cn-country-search-icon" />
-                <input
-                  className="cn-country-search"
-                  placeholder="Пошук країни…"
-                  value={countryQuery}
-                  onChange={(e) => setCountryQuery(e.target.value)}
-                />
+              <div className="cn-admin-block-title">Тестові інструменти</div>
+              {!storagePersistenceHealthy && (
+                <div className="cn-dev-warning">
+                  ⚠️ Хмарне сховище зараз недоступне. Усе працює в межах цієї сесії, але зміни можуть не зберегтися після перезавантаження.
+                </div>
+              )}
+              <div className="cn-dev-status-row">
+                <UserCog size={13} />
+                Ти {isLeader ? <b className="cn-dev-status-yes">лідер {COUNTRY_MAP[me.countryCode]?.name}</b> : <span>не лідер</span>}
               </div>
-              <div className="cn-country-dropdown-list">
-                {filteredCountries.map((c) => (
-                  <button key={c.code} type="button" className="cn-country-dropdown-item" onClick={() => devChangeCountry(c.code)}>
-                    <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
-                    <span className="cn-country-dropdown-name">{c.name}</span>
-                  </button>
-                ))}
+              <div className="cn-dev-status-row">
+                <Mail size={13} />
+                Повідомлень: <b>{mail ? mail.length : 0}</b> (непрочитаних: <b>{unreadCount || 0}</b>)
               </div>
+
+              {statusMsg && <div className="cn-dev-status-msg">{statusMsg}</div>}
+
+              <div className="cn-dev-row">
+                <span className="cn-dev-row-label">Країна</span>
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => setCountryPickerOpen((o) => !o)}>
+                  Змінити
+                </button>
+              </div>
+              {countryPickerOpen && (
+                <div className="cn-country-dropdown cn-dev-country-dropdown">
+                  <div className="cn-country-search-wrap">
+                    <Search size={15} className="cn-country-search-icon" />
+                    <input
+                      className="cn-country-search"
+                      placeholder="Пошук країни…"
+                      value={countryQuery}
+                      onChange={(e) => setCountryQuery(e.target.value)}
+                    />
+                  </div>
+                  <div className="cn-country-dropdown-list">
+                    {filteredCountries.map((c) => (
+                      <button key={c.code} type="button" className="cn-country-dropdown-item" onClick={() => devChangeCountry(c.code)}>
+                        <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
+                        <span className="cn-country-dropdown-name">{c.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="cn-dev-row">
+                <span className="cn-dev-row-label">Лідер країни</span>
+                <button className="cn-dev-btn" type="button" disabled={busy || isLeader} onClick={devBecomeLeader}>
+                  {isLeader ? "Ти вже лідер ✓" : "Стати лідером"}
+                </button>
+              </div>
+              <div className="cn-dev-row">
+                <span className="cn-dev-row-label">Тестове повідомлення</span>
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={devTestMessage}>
+                  Створити
+                </button>
+              </div>
+              <div className="cn-dev-row">
+                <span className="cn-dev-row-label">Скинути дані гравця</span>
+                <button
+                  className={"cn-dev-btn cn-dev-btn--danger" + (confirmClear ? " cn-dev-btn--confirm" : "")}
+                  type="button"
+                  disabled={busy}
+                  onClick={devClearStorage}
+                >
+                  <Trash2 size={13} /> {confirmClear ? "Підтвердити" : "Очистити"}
+                </button>
+              </div>
+
             </div>
           )}
 
-          <div className="cn-dev-row">
-            <span className="cn-dev-row-label">Лідер країни</span>
-            <button className="cn-dev-btn" type="button" disabled={busy || isLeader} onClick={devBecomeLeader}>
-              {isLeader ? "Ти вже лідер ✓" : "Стати лідером"}
-            </button>
-          </div>
-          <div className="cn-dev-row">
-            <span className="cn-dev-row-label">Тестове повідомлення</span>
-            <button className="cn-dev-btn" type="button" disabled={busy} onClick={devTestMessage}>
-              Створити
-            </button>
-          </div>
-          <div className="cn-dev-row">
-            <span className="cn-dev-row-label">Скинути дані гравця</span>
-            <button
-              className={"cn-dev-btn cn-dev-btn--danger" + (confirmClear ? " cn-dev-btn--confirm" : "")}
-              type="button"
-              disabled={busy}
-              onClick={devClearStorage}
-            >
-              <Trash2 size={13} /> {confirmClear ? "Підтвердити" : "Очистити"}
-            </button>
-          </div>
-        </div>
-          )}
         </>
       )}
     </div>
@@ -4936,7 +5277,7 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
+function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick = null, dip = null }) {
   const [selected, setSelected] = useState(null); // { rid, name, ownerId }
   const [selectedCity, setSelectedCity] = useState(null); // { city, regionName, ownerId }
   const [leaderName, setLeaderName] = useState(null); // undefined = завантаження
@@ -4982,6 +5323,25 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
     };
   }, [selectedCountry?.id, players]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const relTag = (() => {
+    if (!dip || !selectedCountry || kind !== "occupied") return null;
+    const r = dipRelation(dip, me.countryCode, selectedCountry.id);
+    if (r.ally) return { text: "Союзник", cls: "ally" };
+    if (r.pact) return { text: "Пакт про ненапад", cls: "pact" };
+    if (r.truceUntil) return { text: "Заборона нападу " + fmtDuration(r.truceUntil - Date.now()), cls: "truce" };
+    return null;
+  })();
+  const pickBtn =
+    pick && selectedCountry && kind === "occupied" ? (
+      <button className="cn-primary-btn cn-map-pick-btn" type="button" onClick={() => pick.onPick(selectedCountry.id)}>
+        <span className="cn-primary-btn-label">Обрати: {selectedCountry.name}</span>
+      </button>
+    ) : pick && selected ? (
+      <div className="cn-map-card-sub" style={{ marginTop: 8 }}>
+        {kind === "own" ? "Це твоя країна" : "Обери територію іншої країни"}
+      </div>
+    ) : null;
+
   const goToMine = () => {
     const rid = Object.keys(owners).find((r) => owners[r] === me?.countryCode);
     if (rid && mapRef.current) mapRef.current.flyToRid(rid);
@@ -4996,7 +5356,14 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
         </button>
       </div>
 
-      <div className="cn-map-hint">{t(lang, "nn_map_hint")}</div>
+      {pick ? (
+        <div className="cn-map-pick-banner">
+          <span>{pick.label}</span>
+          <button type="button" className="cn-dev-btn" onClick={pick.onCancel}>Скасувати</button>
+        </div>
+      ) : (
+        <div className="cn-map-hint">{t(lang, "nn_map_hint")}</div>
+      )}
 
       <div className="cn-map-viewport-wrap">
         <div className="cn-tmap-viewport">
@@ -5048,9 +5415,14 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
               <span className="cn-city-importance-bar"><span style={{ width: selectedCity.city.imp + "%" }} /></span>
               <b>{selectedCity.city.imp}%</b>
             </div>
-            <button className="cn-primary-btn cn-city-attack" type="button" disabled>
-              <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
-            </button>
+            {relTag && <div className={"cn-rel-tag cn-rel-tag--" + relTag.cls}>{relTag.text}</div>}
+            {pick ? (
+              pickBtn
+            ) : (
+              <button className="cn-primary-btn cn-city-attack" type="button" disabled>
+                <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -5089,8 +5461,10 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk" }) {
                     </span>
                   </div>
                 </div>
+                {relTag && <div className={"cn-rel-tag cn-rel-tag--" + relTag.cls}>{relTag.text}</div>}
               </>
             )}
+            {pickBtn}
           </div>
         )}
       </div>
@@ -5364,8 +5738,6 @@ function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, isAdvisor, onRefr
         </button>
       </div>
 
-      <RolesShopSection me={me} onSetPlayer={onSetPlayer} isLeader={isLeader} isAdvisor={isAdvisor} onRefreshGameData={onRefreshGameData} />
-
       <div className="cn-control-wip">
         <ShoppingBag size={20} />
         <div>Магазин наповнюється товарами — незабаром тут з'являться нові пропозиції.</div>
@@ -5374,99 +5746,6 @@ function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, isAdvisor, onRefr
       {detailsOpen && (
         <PremiumPassModal onClose={() => setDetailsOpen(false)} me={me} onSetPlayer={onSetPlayer} onGoToSeason={onGoToSeason} />
       )}
-    </div>
-  );
-}
-
-/* Влада: купівля ролей Лідер / Радник / Повстанець за ROLE_PRICE Power. */
-function RolesShopSection({ me, onSetPlayer, isLeader, isAdvisor, onRefreshGameData }) {
-  const [advisorsCount, setAdvisorsCount] = useState(null);
-  const [busyRole, setBusyRole] = useState(null);
-  const [msg, setMsg] = useState("");
-
-  const refreshAdvisorsCount = useCallback(async () => {
-    if (!me) return;
-    const list = await getAdvisors(me.countryCode);
-    setAdvisorsCount(list.length);
-  }, [me]);
-
-  useEffect(() => {
-    refreshAdvisorsCount();
-  }, [refreshAdvisorsCount]);
-
-  if (!me) return null;
-
-  const canAfford = (me.power || 0) >= ROLE_PRICE;
-  const advisorsFull = advisorsCount !== null && advisorsCount >= MAX_ADVISORS;
-
-  const buy = async (role) => {
-    setBusyRole(role);
-    setMsg("");
-    const res = await buyCountryRole(me, role, onSetPlayer);
-    if (res.ok) {
-      cnSfx.purchase();
-      setMsg("✓ Роль придбано!");
-      await refreshAdvisorsCount();
-      if (onRefreshGameData) await onRefreshGameData();
-    } else {
-      cnSfx.error();
-      setMsg("✗ " + res.reason);
-    }
-    setBusyRole(null);
-  };
-
-  const roles = [
-    {
-      id: "leader",
-      label: "Лідер",
-      icon: Crown,
-      desc: "Одноосібно керує країною: оголошує війни, укладає союзи, виганяє радників.",
-      disabled: isLeader,
-      disabledReason: isLeader ? "Ти вже лідер" : "У країні вже є лідер",
-    },
-    {
-      id: "advisor",
-      label: "Радник",
-      icon: UserCog,
-      desc: `Місце в Раді (до ${MAX_ADVISORS} радників). Разом рада може голосувати за війну, союз чи усунення лідера.`,
-      disabled: isLeader || isAdvisor || advisorsFull,
-      disabledReason: isLeader ? "Ти вже лідер" : isAdvisor ? "Ти вже радник" : "У раді вже достатньо радників",
-    },
-    {
-      id: "rebel",
-      label: "Повстанець",
-      icon: Flame,
-      desc: "Особлива роль серед звичайних громадян. Можливості з'являться пізніше.",
-      disabled: me.role === "rebel",
-      disabledReason: "Ти вже повстанець",
-    },
-  ];
-
-  return (
-    <div className="cn-shop-card" style={{ padding: 14 }}>
-      <div className="cn-control-hint" style={{ marginBottom: 10 }}>
-        Влада: купи роль у своїй країні за {fmt(ROLE_PRICE)} Power
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {roles.map((r) => {
-          const Icon = r.icon;
-          const blocked = r.disabled || !canAfford;
-          return (
-            <div key={r.id} className="cn-region-country-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <Icon size={18} />
-                <span className="cn-region-country-name">{r.label}</span>
-                <span style={{ marginLeft: "auto", fontSize: 13, opacity: 0.8 }}>{fmt(ROLE_PRICE)} Power</span>
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>{r.desc}</div>
-              <button className="cn-dev-btn" type="button" disabled={blocked || busyRole === r.id} onClick={() => buy(r.id)}>
-                {busyRole === r.id ? "…" : r.disabled ? r.disabledReason : !canAfford ? "Недостатньо Power" : "Купити"}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      {msg && <div className="cn-dev-status-msg" style={{ marginTop: 8 }}>{msg}</div>}
     </div>
   );
 }
@@ -7072,6 +7351,23 @@ function GlobalStyles() {
       .cn-hq-tile--half { grid-column: span 3; flex-direction: row; }
       .cn-hq-tile-icon { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.14); border: 1px solid rgba(var(--cn-accent-rgb),0.35); }
       .cn-hq-tile-label { font-size: 12px; }
+      .cn-map-pick-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-radius: 12px; font-size: 13px; font-weight: 700; color: #fff; background: rgba(251,191,36,0.16); border: 1px solid rgba(251,191,36,0.55); }
+      .cn-map-pick-btn { margin-top: 10px; padding: 12px; }
+      .cn-rel-tag { display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+      .cn-rel-tag--ally { color: #06121F; background: #34D399; }
+      .cn-rel-tag--pact { color: #06121F; background: #60A5FA; }
+      .cn-rel-tag--truce { color: #06121F; background: #FBBF24; }
+      .cn-dip-list { display: flex; flex-direction: column; gap: 8px; }
+      .cn-dip-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: rgba(6,16,34,0.7); border: 1px solid rgba(var(--cn-accent-rgb),0.3); }
+      .cn-dip-row-name { flex: 1; min-width: 0; font-weight: 700; color: #fff; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cn-dip-sub { font-size: 11px; color: var(--cn-text-dim); }
+      .cn-dip-menu { display: flex; flex-direction: column; gap: 10px; }
+      .cn-dip-menu .cn-hq-tile { flex-direction: row; justify-content: flex-start; padding: 14px; }
+      .cn-mail-resolved { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--cn-text-dim); }
+      .cn-hq-tile--locked { opacity: 0.5; }
+      .cn-hq-lock { position: absolute; top: 7px; right: 7px; color: #FBBF24; }
+      .cn-hq-badge { position: absolute; top: 5px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: #EF4444; color: #fff; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+      .cn-hq-toast { padding: 8px 12px; border-radius: 12px; font-size: 12px; font-weight: 700; text-align: center; color: #fff; background: rgba(251,191,36,0.16); border: 1px solid rgba(251,191,36,0.5); }
       .cn-hq-subhead { display: flex; align-items: center; gap: 10px; }
       .cn-hq-wip { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 34px 20px; border-radius: 20px; background: rgba(6,16,34,0.7); border: 1px dashed rgba(var(--cn-accent-rgb),0.45); }
       .cn-hq-wip-icon { width: 70px; height: 70px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.12); border: 1px solid rgba(var(--cn-accent-rgb),0.4); }
