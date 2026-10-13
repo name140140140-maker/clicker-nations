@@ -54,6 +54,10 @@ import {
   Pencil,
   Copy,
   Image as ImageIcon,
+  Info,
+  TrendingUp,
+  Landmark,
+  BarChart2,
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
@@ -849,8 +853,8 @@ function Flag({ code, size = 20, className }) {
 const NAV = [
   { id: "clicker", label: "Clicker", icon: MousePointerClick },
   { id: "map", label: "Карта", icon: MapIcon },
+  { id: "hq", label: "Штаб", icon: Landmark },
   { id: "season", label: "Сезон", icon: CalendarDays },
-  { id: "leaderboard", label: "Рейтинг", icon: BarChart3 },
   { id: "shop", label: "Магазин", icon: ShoppingCart },
   { id: "profile", label: "Профіль", icon: User },
 ];
@@ -1059,6 +1063,7 @@ const TRANSLATIONS = {
   nav_season: { uk: "Сезон", pl: "Sezon", de: "Saison", ru: "Сезон", it: "Stagione", fr: "Saison", en: "Season", es: "Temporada", ar: "الموسم" },
   nav_profile: { uk: "Профіль", pl: "Profil", de: "Profil", ru: "Профиль", it: "Profilo", fr: "Profil", en: "Profile", es: "Perfil", ar: "الملف" },
   nav_shop: { uk: "Магазин", pl: "Sklep", de: "Shop", ru: "Магазин", it: "Negozio", fr: "Boutique", en: "Shop", es: "Tienda", ar: "المتجر" },
+  nav_hq: { uk: "Штаб", pl: "Sztab", de: "Hauptquartier", ru: "Штаб", it: "Quartier generale", fr: "QG", en: "HQ", es: "Cuartel", ar: "المقر" },
   nav_map: { uk: "Карта", pl: "Mapa", de: "Karte", ru: "Карта", it: "Mappa", fr: "Carte", en: "Map", es: "Mapa", ar: "الخريطة" },
 
   lb_countries: { uk: "Країни", pl: "Kraje", de: "Länder", ru: "Страны", it: "Paesi", fr: "Pays", en: "Countries", es: "Países", ar: "الدول" },
@@ -1174,8 +1179,8 @@ const TRANSLATIONS = {
   tut4_text: { uk: "Відкрий «Рейтинг», щоб побачити найсильніші країни, найсильніших гравців світу та своїх конкурентів усередині власної держави. Рейтинг формується на основі Power — піднімайся якомога вище.", pl: "Otwórz „Ranking”, aby zobaczyć najsilniejsze kraje, najsilniejszych graczy na świecie oraz swoich rywali w obrębie własnego kraju. Ranking opiera się na Power — wspinaj się jak najwyżej.", de: "Öffne „Rangliste“, um die stärksten Länder, die stärksten Spieler der Welt und deine Konkurrenten im eigenen Land zu sehen. Die Rangliste basiert auf Power — klettere so hoch wie möglich.", ru: "Открой «Рейтинг», чтобы увидеть самые сильные страны, сильнейших игроков мира и своих конкурентов внутри собственной страны. Рейтинг формируется на основе Power — поднимайся как можно выше.", it: "Apri \"Classifica\" per vedere i paesi più forti, i giocatori più forti al mondo e i tuoi rivali all'interno del tuo stesso paese. Le classifiche si basano sul Power — sali il più in alto possibile.", fr: "Ouvrez « Classement » pour voir les pays les plus forts, les joueurs les plus forts au monde, et vos rivaux dans votre propre pays. Le classement se base sur le Power — grimpez le plus haut possible.", en: "Open 'Leaderboard' to see the strongest countries, the strongest players in the world, and your rivals within your own country. Rankings are based on Power — climb as high as you can.", es: "Abre \"Ranking\" para ver los países más fuertes, los jugadores más fuertes del mundo y tus rivales dentro de tu propio país. El ranking se basa en el Power — sube lo más alto posible.", ar: "افتح \"المتصدرون\" لرؤية أقوى الدول وأقوى اللاعبين في العالم ومنافسيك داخل بلدك. يعتمد الترتيب على القوة — اصعد لأعلى ما يمكن." },
   tut5_title: { uk: "Виходь на карту", pl: "Wejdź na mapę", de: "Auf zur Karte", ru: "Выходи на карту", it: "Vai sulla mappa", fr: "Direction la carte", en: "Head to the map", es: "Ve al mapa", ar: "توجّه إلى الخريطة" },
   tut5_text: { uk: "На «Карті» видно адміністративні області світу. Вільні території нічим не контролюються, зайняті належать іншим країнам, а твої власні виділено рамкою. Колір кожної країни обирає її лідер.", en: "The 'Map' shows the world's administrative regions. Free territories are controlled by no one, occupied ones belong to other countries, and your own are outlined. Each country's color is chosen by its leader.", ru: "На «Карте» видны административные области мира. Свободные территории никем не контролируются, занятые принадлежат другим странам, а твои собственные выделены рамкой. Цвет каждой страны выбирает её лидер." },
-  tut6_title: { uk: "Панель управління", en: "Control Panel", ru: "Панель управления" },
-  tut6_text: { uk: "У «Клікері» відкрий Панель управління. Поки що там можна змінити колір своєї країни на карті — це може робити лише лідер. Нові можливості з'являтимуться з оновленнями.", en: "In 'Clicker', open the Control Panel. For now you can change your country's color on the map — only the leader can do that. New features will arrive with updates.", ru: "В «Кликере» открой Панель управления. Пока там можно изменить цвет своей страны на карте — это может делать только лидер. Новые возможности будут появляться с обновлениями." },
+  tut6_title: { uk: "Налаштування Штабу", en: "Headquarters Settings", ru: "Настройки штаба" },
+  tut6_text: { uk: "У «Штабі» відкрий «Налаштування», щоб змінити колір своєї країни на карті. Це може робити лише лідер. Нові можливості з'являтимуться з оновленнями.", en: "Open 'Headquarters' → 'Settings' to change your country's color on the map. Only the leader can do this. New features will arrive with updates.", ru: "В «Штабе» открой «Настройки», чтобы изменить цвет своей страны на карте. Это может делать только лидер. Новые возможности будут появляться с обновлениями." },
   tut10_title: { uk: "Не пропускай сезон", pl: "Nie przegap sezonu", de: "Verpasse die Saison nicht", ru: "Не пропускай сезон", it: "Non perdere la stagione", fr: "Ne manquez pas la saison", en: "Don't miss the season", es: "No te pierdas la temporada", ar: "لا تفوّت الموسم" },
   tut10_text: { uk: "У «Сезоні» є твій Battle Pass, що триває 30 днів. Рівень залежить від кількості кліків — досягнув нового рівня, забирай нагороду і перевіряй сезон регулярно.", pl: "W karcie „Sezon” znajduje się Twój Battle Pass, który trwa 30 dni. Poziom zależy od liczby kliknięć — osiągnij nowy poziom, odbierz nagrodę i zaglądaj do sezonu regularnie.", de: "Im Tab „Saison“ befindet sich dein Battle Pass, der 30 Tage läuft. Dein Level hängt von deinen Klicks ab — erreiche ein neues Level, hol dir die Belohnung und schau regelmäßig in der Saison vorbei.", ru: "На вкладке «Сезон» находится твой Battle Pass, который длится 30 дней. Уровень зависит от количества кликов — достиг нового уровня, забирай награду и регулярно проверяй сезон.", it: "Nella scheda \"Stagione\" trovi il tuo Battle Pass, che dura 30 giorni. Il livello dipende dal numero di tocchi — raggiungi un nuovo livello, ritira il premio e controlla la stagione regolarmente.", fr: "L'onglet « Saison » contient votre Battle Pass, valable 30 jours. Votre niveau dépend de votre nombre de taps — atteignez un nouveau niveau, récupérez la récompense et consultez la saison régulièrement.", en: "The 'Season' tab holds your Battle Pass, which runs for 30 days. Your level depends on your clicks — reach a new level, claim the reward, and check the season regularly.", es: "La pestaña \"Temporada\" contiene tu Battle Pass, que dura 30 días. Tu nivel depende de la cantidad de toques — al alcanzar un nuevo nivel, reclama la recompensa y revisa la temporada con regularidad.", ar: "يحتوي تبويب \"الموسم\" على Battle Pass الخاص بك، ويستمر 30 يومًا. يعتمد مستواك على عدد ضغطاتك — عند بلوغ مستوى جديد، احصل على المكافأة وتفقد الموسم بانتظام." },
   tut11_title: { uk: "Хочеш більше нагород?", pl: "Chcesz więcej nagród?", de: "Willst du mehr Belohnungen?", ru: "Хочешь больше наград?", it: "Vuoi più premi?", fr: "Vous voulez plus de récompenses ?", en: "Want more rewards?", es: "¿Quieres más recompensas?", ar: "هل تريد مكافآت أكثر؟" },
@@ -1373,7 +1378,7 @@ export default function App() {
   }, [player, refreshMail]);
 
   useEffect(() => {
-    if (tab === "map" || tab === "clicker" || tab === "profile" || tab === "season") {
+    if (tab === "map" || tab === "clicker" || tab === "profile" || tab === "season" || tab === "hq") {
       refreshGameData(false);
     }
   }, [tab, refreshGameData]);
@@ -1616,7 +1621,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (tab === "leaderboard" || tab === "profile" || tab === "map") {
+    if (tab === "leaderboard" || tab === "profile" || tab === "map" || tab === "hq") {
       refreshLeaderboard(false);
     }
   }, [tab, refreshLeaderboard]);
@@ -1670,7 +1675,7 @@ export default function App() {
                 news={news}
                 countries={nations.countries}
                 onSetPlayer={setPlayer}
-                onChangeCountryColor={changeCountryColor}
+                onOpenLeaderboard={() => setTab("leaderboard")}
               />
             )}
             {tab === "leaderboard" && (
@@ -1679,6 +1684,17 @@ export default function App() {
                 players={mergedPlayers}
                 loading={lbLoading}
                 onRefresh={() => refreshLeaderboard(true)}
+                onBack={() => setTab("clicker")}
+                lang={language}
+              />
+            )}
+            {tab === "hq" && (
+              <HQScreen
+                player={player}
+                players={mergedPlayers}
+                nations={nations}
+                isLeader={isLeader}
+                onChangeCountryColor={changeCountryColor}
                 lang={language}
               />
             )}
@@ -2245,7 +2261,7 @@ function ClickerScreen({
   news,
   countries,
   onSetPlayer,
-  onChangeCountryColor,
+  onOpenLeaderboard,
 }) {
   const country = COUNTRY_MAP[player.countryCode];
   const [effects, setEffects] = useState([]);
@@ -2253,7 +2269,6 @@ function ClickerScreen({
   const [shake, setShake] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
   const [rewardsOpen, setRewardsOpen] = useState(false);
-  const [panelOpen, setPanelOpen] = useState(false);
   const globeRef = useRef(null);
   const lastEffectTsRef = useRef(0);
   const MAX_EFFECTS = 6;
@@ -2358,6 +2373,9 @@ function ClickerScreen({
           <Flag code={country?.code} size={16} /> {country?.name}
         </span>
         <div className="cn-clicker-top-actions">
+          <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.navSwitch(); onOpenLeaderboard && onOpenLeaderboard(); }} aria-label="Рейтинг">
+            <Trophy size={19} />
+          </button>
           <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); setNewsOpen(true); }} aria-label="Новини">
             <Newspaper size={19} />
             {unreadNews && <span className="cn-icon-btn-dot" />}
@@ -2462,22 +2480,152 @@ function ClickerScreen({
         </div>
       </div>
 
-      <button className="cn-control-toggle" type="button" onClick={() => setPanelOpen((o) => !o)}>
-        <Gamepad2 size={16} /> Панель управління
-        <ChevronDown size={16} className={"cn-chevron" + (panelOpen ? " cn-chevron--open" : "")} />
-      </button>
-
-      {panelOpen && (
-        <ControlPanel
-          player={player}
-          isLeader={isLeader}
-          countries={countries}
-          onChangeCountryColor={onChangeCountryColor}
-        />
-      )}
-
       {newsOpen && <NewsModal news={news} onClose={() => setNewsOpen(false)} />}
       {rewardsOpen && <DailyRewardsModal onClose={() => setRewardsOpen(false)} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Штаб (HQ)                                                           */
+/* ------------------------------------------------------------------ */
+
+const HQ_SECTIONS = [
+  { id: "info", label: "Інформація", Icon: Info, text: "Тут буде докладна інформація про вашу країну: історія, лідер, радники та правила." },
+  { id: "army", label: "Армія", Icon: Swords, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
+  { id: "diplomacy", label: "Дипломатія", Icon: Handshake, text: "Тут будуть союзи, договори та відносини з іншими країнами." },
+  { id: "stats", label: "Статистика", Icon: BarChart2, text: "Тут буде статистика країни: розвиток сили, території та внесок гравців." },
+  { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
+];
+
+function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk" }) {
+  const [view, setView] = useState(null); // null | id розділу | "dev"
+  const country = COUNTRY_MAP[player.countryCode];
+  const color = country?.color || "#3b82f6";
+
+  const stats = useMemo(() => {
+    const power = {};
+    let members = 0;
+    for (const p of players || []) {
+      power[p.countryCode] = (power[p.countryCode] || 0) + (p.power || 0);
+      if (p.countryCode === player.countryCode) members += 1;
+    }
+    const ranked = Object.keys(power).sort((a, b) => power[b] - power[a]);
+    const rank = ranked.indexOf(player.countryCode) + 1;
+    let regions = 0;
+    for (const rid in nations?.owners || {}) if (nations.owners[rid] === player.countryCode) regions += 1;
+    return { power: power[player.countryCode] || 0, members, rank, regions };
+  }, [players, nations, player.countryCode]);
+
+  const leader = (players || []).find((p) => p.id === country?.leaderId);
+
+  const openView = (id) => { cnSfx.navSwitch(); setView(id); };
+
+  if (view) {
+    const section = HQ_SECTIONS.find((s) => s.id === view);
+    const title = view === "dev" ? "Розвиток" : section?.label;
+    const Icon = view === "dev" ? TrendingUp : section?.Icon;
+    return (
+      <div className="cn-hq" style={{ "--hq": color }}>
+        <div className="cn-hq-subhead">
+          <button className="cn-refresh-btn" type="button" onClick={() => setView(null)} aria-label="Назад">
+            <ArrowLeft size={16} />
+          </button>
+          <div className="cn-screen-title">{title}</div>
+        </div>
+        {view === "settings" ? (
+          <ControlPanel
+            player={player}
+            isLeader={isLeader}
+            countries={nations?.countries}
+            onChangeCountryColor={onChangeCountryColor}
+          />
+        ) : (
+          <div className="cn-hq-wip">
+            <div className="cn-hq-wip-icon"><Icon size={34} /></div>
+            <div className="cn-hq-wip-title">У розробці</div>
+            <div className="cn-hq-wip-text">
+              {view === "dev"
+                ? "Тут можна буде покращувати країну та відкривати нові можливості."
+                : section?.text}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="cn-hq" style={{ "--hq": color }}>
+      <div className="cn-hq-top">
+        <div className="cn-hq-title">
+          <span className="cn-hq-kicker">ШТАБ</span>
+          <span className="cn-hq-name">{country?.name || "Країна"}</span>
+        </div>
+        {leader && (
+          <span className="cn-hq-leader"><Crown size={12} /> {leader.username}</span>
+        )}
+      </div>
+
+      <div className="cn-hq-stage">
+        <div className="cn-hq-hero">
+          <svg className="cn-hq-radar" viewBox="0 0 200 200" aria-hidden="true">
+            <defs>
+              <radialGradient id="cn-hq-core" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stopColor="var(--hq)" stopOpacity="0.55" />
+                <stop offset="70%" stopColor="var(--hq)" stopOpacity="0.12" />
+                <stop offset="100%" stopColor="var(--hq)" stopOpacity="0" />
+              </radialGradient>
+              <linearGradient id="cn-hq-sweep" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="var(--hq)" stopOpacity="0" />
+                <stop offset="100%" stopColor="var(--hq)" stopOpacity="0.55" />
+              </linearGradient>
+            </defs>
+            <circle cx="100" cy="100" r="98" fill="url(#cn-hq-core)" />
+            <circle cx="100" cy="100" r="92" className="cn-hq-ring" />
+            <circle cx="100" cy="100" r="68" className="cn-hq-ring cn-hq-ring--dash" />
+            <circle cx="100" cy="100" r="44" className="cn-hq-ring" />
+            {Array.from({ length: 24 }).map((_, i) => (
+              <line key={i} x1="100" y1="6" x2="100" y2={i % 6 === 0 ? 16 : 11} className="cn-hq-tick" transform={`rotate(${i * 15} 100 100)`} />
+            ))}
+            <g className="cn-hq-sweep-g">
+              <path d="M100 100 L100 8 A92 92 0 0 1 178 54 Z" fill="url(#cn-hq-sweep)" />
+            </g>
+          </svg>
+          <div className="cn-hq-core">
+            <Shield size={46} strokeWidth={1.6} />
+            <span className="cn-hq-core-label">{country?.name}</span>
+          </div>
+        </div>
+
+        <button className="cn-hq-dev" type="button" onClick={() => openView("dev")}>
+          <span className="cn-hq-dev-icon"><TrendingUp size={22} /></span>
+          <span className="cn-hq-dev-label">РОЗВИТОК</span>
+          <span className="cn-hq-soon">Скоро</span>
+        </button>
+      </div>
+
+      <div className="cn-hq-chips">
+        <div className="cn-hq-chip"><span>Сила</span><b>{fmt(stats.power)}</b></div>
+        <div className="cn-hq-chip"><span>Області</span><b>{fmt(stats.regions)}</b></div>
+        <div className="cn-hq-chip"><span>Місце</span><b>#{stats.rank || "—"}</b></div>
+        <div className="cn-hq-chip"><span>Гравці</span><b>{fmt(stats.members)}</b></div>
+      </div>
+
+      <div className="cn-hq-grid">
+        {HQ_SECTIONS.map((s, i) => (
+          <button
+            key={s.id}
+            type="button"
+            className={"cn-hq-tile" + (i < 3 ? " cn-hq-tile--third" : " cn-hq-tile--half")}
+            onClick={() => openView(s.id)}
+          >
+            <span className="cn-hq-tile-icon"><s.Icon size={21} /></span>
+            <span className="cn-hq-tile-label">{s.label}</span>
+            {s.id !== "settings" && <span className="cn-hq-soon cn-hq-soon--tile">Скоро</span>}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2625,7 +2773,7 @@ function DailyRewardsModal({ onClose }) {
 /*  Leaderboard screen                                                  */
 /* ------------------------------------------------------------------ */
 
-function LeaderboardScreen({ me, players, loading, onRefresh, lang = "uk" }) {
+function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk" }) {
   const [mode, setMode] = useState("countries"); // countries | global | mycountry
 
   const countriesRanked = useMemo(() => {
@@ -2647,7 +2795,12 @@ function LeaderboardScreen({ me, players, loading, onRefresh, lang = "uk" }) {
   return (
     <div className="cn-lb">
       <div className="cn-lb-header">
-        <div className="cn-screen-title">{t(lang, "nav_leaderboard")}</div>
+        {onBack && (
+          <button className="cn-refresh-btn" onClick={onBack} type="button" aria-label="Назад" style={{ marginRight: 8 }}>
+            <ArrowLeft size={16} />
+          </button>
+        )}
+        <div className="cn-screen-title" style={{ flex: 1 }}>{t(lang, "nav_leaderboard")}</div>
         <button className="cn-refresh-btn" onClick={onRefresh} type="button" aria-label="Refresh">
           <RefreshCw size={16} className={loading ? "cn-spin" : ""} />
         </button>
@@ -6859,6 +7012,71 @@ function GlobalStyles() {
       .cn-soon-title { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 18px; color: var(--cn-text); }
       .cn-soon-badge { font-size: 11px; letter-spacing: 0.1em; color: var(--cn-accent); background: rgba(var(--cn-accent-rgb),0.1); border: 1px solid rgba(var(--cn-accent-rgb),0.3); padding: 4px 12px; border-radius: 999px; }
       .cn-soon-desc { font-size: 13px; color: var(--cn-text-dimmer); max-width: 260px; line-height: 1.5; margin-top: 4px; }
+
+
+      /* ---- Штаб ---- */
+      .cn-hq { display: flex; flex-direction: column; gap: 10px; --hq: #3b82f6; min-height: 100%; }
+      .cn-hq-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .cn-hq-title { display: flex; flex-direction: column; line-height: 1.1; min-width: 0; }
+      .cn-hq-kicker { font-size: 10px; letter-spacing: 0.28em; font-weight: 800; color: var(--hq); }
+      .cn-hq-name { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 800; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cn-hq-leader {
+        display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: #FDE68A;
+        padding: 5px 10px; border-radius: 999px; background: rgba(6,16,34,0.7); border: 1px solid rgba(253,230,138,0.35); white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis;
+      }
+      .cn-hq-stage { display: flex; gap: 10px; align-items: stretch; flex: 1; min-height: 210px; }
+      .cn-hq-hero {
+        position: relative; flex: 1; min-width: 0;
+        border-radius: 24px; display: flex; align-items: center; justify-content: center; overflow: hidden;
+        background: radial-gradient(circle at 50% 45%, rgba(6,16,34,0.35), rgba(3,8,20,0.82));
+        border: 1px solid color-mix(in srgb, var(--hq) 55%, transparent);
+        box-shadow: 0 0 28px color-mix(in srgb, var(--hq) 28%, transparent), inset 0 0 40px color-mix(in srgb, var(--hq) 12%, transparent);
+      }
+      .cn-hq-radar { position: absolute; top: 50%; left: 50%; height: min(94%, 100vw); aspect-ratio: 1 / 1; max-width: 96%; transform: translate(-50%, -50%); }
+      .cn-hq-ring { fill: none; stroke: var(--hq); stroke-opacity: 0.55; stroke-width: 1.2; }
+      .cn-hq-ring--dash { stroke-dasharray: 3 6; stroke-opacity: 0.4; transform-origin: 100px 100px; animation: cn-hq-spin 40s linear infinite reverse; }
+      .cn-hq-tick { stroke: var(--hq); stroke-opacity: 0.6; stroke-width: 1.2; }
+      .cn-hq-sweep-g { transform-origin: 100px 100px; animation: cn-hq-spin 6s linear infinite; }
+      @keyframes cn-hq-spin { to { transform: rotate(360deg); } }
+      .cn-hq-core {
+        position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 0 14px;
+        color: var(--hq); filter: drop-shadow(0 0 14px var(--hq));
+      }
+      .cn-hq-core-label { font-family: 'Space Grotesk', sans-serif; font-size: 13px; font-weight: 800; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.7); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cn-hq-dev {
+        position: relative; width: 76px; flex-shrink: 0; border-radius: 20px; cursor: pointer; padding: 12px 6px;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px;
+        background: linear-gradient(180deg, rgba(251,191,36,0.2), rgba(6,16,34,0.82)); color: #FDE68A;
+        border: 1px solid rgba(251,191,36,0.5); box-shadow: 0 0 18px rgba(251,191,36,0.18);
+      }
+      .cn-hq-dev:active { transform: scale(0.96); }
+      .cn-hq-dev-icon { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(251,191,36,0.16); border: 1px solid rgba(251,191,36,0.5); }
+      .cn-hq-dev-label { font-size: 10px; font-weight: 800; letter-spacing: 0.1em; writing-mode: vertical-rl; transform: rotate(180deg); }
+      .cn-hq-soon { font-size: 9px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #06121F; background: #FBBF24; padding: 2px 7px; border-radius: 999px; }
+      .cn-hq-soon--tile { position: absolute; top: 6px; right: 6px; padding: 1px 6px; font-size: 8px; background: rgba(251,191,36,0.9); }
+      .cn-hq-chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+      .cn-hq-chip {
+        display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 7px 4px; border-radius: 12px;
+        background: rgba(6,16,34,0.7); border: 1px solid rgba(var(--cn-accent-rgb),0.3);
+      }
+      .cn-hq-chip span { font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--cn-text-dimmer); }
+      .cn-hq-chip b { font-family: 'Space Grotesk', sans-serif; font-size: 14px; color: #fff; }
+      .cn-hq-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+      .cn-hq-tile {
+        position: relative; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 6px; border-radius: 16px; cursor: pointer;
+        background: linear-gradient(160deg, rgba(var(--cn-accent-rgb),0.16), rgba(6,16,34,0.82)); color: #E6F0FF;
+        border: 1px solid rgba(var(--cn-accent-rgb),0.4); font-weight: 700; font-size: 12px; transition: transform 0.12s ease;
+      }
+      .cn-hq-tile:active { transform: scale(0.96); }
+      .cn-hq-tile--third { grid-column: span 2; flex-direction: column; gap: 6px; padding: 12px 4px 10px; }
+      .cn-hq-tile--half { grid-column: span 3; flex-direction: row; }
+      .cn-hq-tile-icon { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.14); border: 1px solid rgba(var(--cn-accent-rgb),0.35); }
+      .cn-hq-tile-label { font-size: 12px; }
+      .cn-hq-subhead { display: flex; align-items: center; gap: 10px; }
+      .cn-hq-wip { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 34px 20px; border-radius: 20px; background: rgba(6,16,34,0.7); border: 1px dashed rgba(var(--cn-accent-rgb),0.45); }
+      .cn-hq-wip-icon { width: 70px; height: 70px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.12); border: 1px solid rgba(var(--cn-accent-rgb),0.4); }
+      .cn-hq-wip-title { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 800; color: #fff; }
+      .cn-hq-wip-text { font-size: 13px; line-height: 1.5; color: var(--cn-text-dim); max-width: 280px; }
 
       /* Bottom nav */
       .cn-nav {
