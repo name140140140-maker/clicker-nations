@@ -1437,7 +1437,7 @@ export default function App() {
       setNews(state.news);
       setSeason(state.season && state.season.startedAt ? state.season : await ensureSeasonStarted());
       if (player) {
-        const leaderId = await getLeader(player.countryCode);
+        const leaderId = (await getLeader(player.countryCode)) || COUNTRY_MAP[player.countryCode]?.leaderId || null;
         setIsLeader(leaderId === player.id);
         const advisors = await getAdvisors(player.countryCode);
         setIsAdvisor(advisors.includes(player.id));
@@ -1483,6 +1483,22 @@ export default function App() {
     }, 45000);
     return () => clearInterval(t);
   }, [player, refreshMail]);
+
+  /* Роль лідера визначаємо одразу після входу (а не чекаємо на throttled refreshGameData) */
+  const playerId = player?.id;
+  const playerCountry = player?.countryCode;
+  useEffect(() => {
+    if (!playerId || !playerCountry) return undefined;
+    let cancelled = false;
+    (async () => {
+      let leaderId = await getLeader(playerCountry);
+      if (!leaderId) leaderId = COUNTRY_MAP[playerCountry]?.leaderId || null;
+      if (!cancelled) setIsLeader(leaderId === playerId);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [playerId, playerCountry]);
 
   useEffect(() => {
     if (tab === "map" || tab === "clicker" || tab === "profile" || tab === "season" || tab === "hq") {
