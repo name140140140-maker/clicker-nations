@@ -1208,6 +1208,153 @@ function getTelegramUser() {
   }
 }
 
+/* Ім'я гравця = ім'я в Telegram (ім'я + прізвище, інакше @username) */
+function getTelegramDisplayName() {
+  const u = getTelegramUser();
+  const full = [u?.first_name, u?.last_name].filter(Boolean).join(" ").trim();
+  return (full || u?.username || "Гравець").slice(0, 32);
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  Інформація про гравця для адміна: підключення, пристрій, логи        */
+/*  pinfo:<id> — профіль (IP, пристрій, історія змін, логи)              */
+/*  pseen:<id> — час останньої активності (оновлюється раз на 5 хв)      */
+/*  palog:<id> — дії адміна щодо гравця                                  */
+/* ------------------------------------------------------------------ */
+
+const PINFO_PREFIX = "pinfo:";
+const PSEEN_PREFIX = "pseen:";
+const PALOG_PREFIX = "palog:";
+
+async function fetchNetInfo() {
+  const withTimeout = async (url) => {
+    const ctrl = new AbortController();
+    const tm = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(tm);
+    }
+  };
+  const a = await withTimeout("/api/whoami");
+  if (a && a.ip) return a;
+  const j = await withTimeout("https://ipwho.is/");
+  if (j && j.success !== false && j.ip) {
+    return {
+      ip: j.ip,
+      country: j.country || "",
+      region: j.region || "",
+      city: j.city || "",
+      isp: j.connection?.isp || "",
+      org: j.connection?.org || "",
+      asn: j.connection?.asn ? "AS" + j.connection.asn : "",
+      type: j.type || "",
+    };
+  }
+  return { ip: "", country: "", region: "", city: "", isp: "", org: "", asn: "", type: "" };
+}
+
+async function collectDevice() {
+  const ua = navigator.userAgent || "";
+  const tg = window.Telegram?.WebApp;
+  let model = "";
+  try {
+    const h = await navigator.userAgentData?.getHighEntropyValues?.(["model"]);
+    if (h?.model) model = h.model;
+  } catch {
+    /* ignore */
+  }
+  let os = "";
+  if (/Android/.test(ua)) {
+    os = "Android " + (ua.match(/Android ([\d.]+)/)?.[1] || "");
+    if (!model) {
+      const m = ua.match(/Android [\d.]+; ([^;)]+)/);
+      if (m && m[1].trim() !== "K") model = m[1].trim();
+    }
+  } else if (/iPhone|iPad|iPod/.test(ua)) {
+    os = "iOS " + (ua.match(/OS ([\d_]+)/)?.[1] || "").replace(/_/g, ".");
+    model = /iPad/.test(ua) ? "iPad" : "iPhone";
+  } else if (/Windows/.test(ua)) os = "Windows";
+  else if (/Mac OS X/.test(ua)) os = "macOS";
+  else if (/Linux/.test(ua)) os = "Linux";
+  const client = tg && tg.platform && tg.platform !== "unknown" ? `Telegram ${tg.platform} v${tg.version || "?"}` : "Браузер";
+  let tz = "";
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    /* ignore */
+  }
+  return {
+    device: [model, os.trim()].filter(Boolean).join(" · ") || "Невідомо",
+    os: os.trim(),
+    model,
+    client,
+    screen: `${window.screen?.width || 0}×${window.screen?.height || 0} @${window.devicePixelRatio || 1}x`,
+    lang: navigator.language || "",
+    tz,
+    ua,
+  };
+}
+
+/* Фіксує вхід гравця: поточні IP/пристрій, історію змін і лог подій */
+async function trackSession(p, nameChange) {
+  const tg = getTelegramUser();
+  const [info, net, dev] = await Promise.all([getJSON(PINFO_PREFIX + p.id, true, null), fetchNetInfo(), collectDevice()]);
+  const now = Date.now();
+  const rec = info || { firstSeen: now, history: [], logs: [] };
+  rec.history = rec.history || [];
+  rec.logs = rec.logs || [];
+  rec.tgId = tg?.id || p.telegramId || rec.tgId || null;
+  rec.tgUsername = tg?.username || rec.tgUsername || "";
+  rec.tgName = tg ? [tg.first_name, tg.last_name].filter(Boolean).join(" ") : rec.tgName || "";
+  rec.username = p.username;
+  rec.countryCode = p.countryCode;
+  rec.lastSeen = now;
+  rec.current = { ...net, ...dev, ts: now };
+  const fp = [net.ip, net.isp, dev.device, dev.client].join("|");
+  const last = rec.history[rec.history.length - 1];
+  const addLog = (type, text) => rec.logs.push({ ts: now, type, text });
+  if (!last || last.fp !== fp) {
+    rec.history.push({ ts: now, fp, ip: net.ip, isp: net.isp, org: net.org, country: net.country, city: net.city, device: dev.device, client: dev.client });
+    if (last) {
+      if (net.ip && last.ip !== net.ip) addLog("ip", `Змінилась IP-адреса: ${last.ip || "—"} → ${net.ip}`);
+      if (net.isp && last.isp !== net.isp) addLog("isp", `Змінився провайдер/оператор: ${last.isp || "—"} → ${net.isp}`);
+      if (last.device !== dev.device) addLog("device", `Змінився пристрій: ${last.device || "—"} → ${dev.device}`);
+      if (last.client !== dev.client) addLog("client", `Змінився клієнт: ${last.client || "—"} → ${dev.client}`);
+    } else {
+      addLog("first", `Перша реєстрація даних: ${net.ip || "IP невідомий"} · ${dev.device} · ${dev.client}`);
+    }
+  }
+  if (nameChange) addLog("name", `Змінилось ім'я: «${nameChange.from}» → «${nameChange.to}»`);
+  if (!rec.lastLoginLog || now - rec.lastLoginLog > 10 * 60 * 1000) {
+    addLog("login", `Вхід у гру · ${net.ip || "IP невідомий"} · ${dev.device}`);
+    rec.lastLoginLog = now;
+  }
+  if (rec.logs.length > 150) rec.logs = rec.logs.slice(-150);
+  if (rec.history.length > 60) rec.history = rec.history.slice(-60);
+  await setJSON(PINFO_PREFIX + p.id, rec, true);
+}
+
+async function adminLogAction(playerId, text) {
+  const list = await getJSON(PALOG_PREFIX + playerId, true, []);
+  list.push({ ts: Date.now(), type: "admin", text });
+  await setJSON(PALOG_PREFIX + playerId, list.slice(-100), true);
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return "—";
+  try {
+    return new Date(ts).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return String(ts);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Storage helpers — реальна база даних Supabase замість window.storage */
 /* ------------------------------------------------------------------ */
@@ -1980,6 +2127,39 @@ export default function App() {
     allPlayersRef.current = mergedPlayers;
   }, [mergedPlayers]);
 
+  /* Ім'я = ім'я в Telegram (синхронізується при кожному вході) + запис підключення/пристрою для адміна */
+  const trackedPlayerRef = useRef(null);
+  useEffect(() => {
+    if (!player || isLegacyCountryCode(player.countryCode) || trackedPlayerRef.current === player.id) return undefined;
+    trackedPlayerRef.current = player.id;
+    let nameChange = null;
+    if (getTelegramUser()?.id) {
+      const tgName = getTelegramDisplayName();
+      if (tgName && tgName !== player.username) {
+        nameChange = { from: player.username, to: tgName };
+        setPlayer((prev) => (prev ? { ...prev, username: tgName } : prev));
+        // Зберігаємо вже оновлений запис (трохи згодом, щоб не затерти старим значенням при flush на зміну стану)
+        setTimeout(() => {
+          setPlayer((prev) => {
+            if (prev) scheduleSave(prev);
+            return prev;
+          });
+        }, 800);
+      }
+    }
+    trackSession({ ...player, username: nameChange ? nameChange.to : player.username }, nameChange).catch(() => {});
+    return undefined;
+  }, [player, scheduleSave]);
+
+  const seenPlayerId = player?.id;
+  useEffect(() => {
+    if (!seenPlayerId) return undefined;
+    const beat = () => storageSet(PSEEN_PREFIX + seenPlayerId, String(Date.now()), true);
+    beat();
+    const hb = setInterval(beat, 5 * 60 * 1000);
+    return () => clearInterval(hb);
+  }, [seenPlayerId]);
+
   const playerIdForWar = player?.id;
   const playerCountryForWar = player?.countryCode;
   useEffect(() => {
@@ -2295,7 +2475,7 @@ function BootScreen({ lang = "uk" }) {
     <div className="cn-boot">
       <div className="cn-boot-glow" />
       <Globe2 size={40} className="cn-boot-icon" />
-      <div className="cn-boot-title">CLICKER NATIONS</div>
+      <div className="cn-boot-title">WORLD CLICKER</div>
       <div className="cn-boot-sub">{t(lang, "boot_loading")}</div>
     </div>
   );
@@ -2406,9 +2586,7 @@ function BlockedScreen({ reason }) {
 /* ------------------------------------------------------------------ */
 
 function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, reassign = false, initialName = "" }) {
-  const tgUser = getTelegramUser();
-  const defaultName = initialName || tgUser?.first_name || tgUser?.username || "";
-  const [username, setUsername] = useState(defaultName);
+  const [username] = useState(initialName || getTelegramDisplayName());
   const [step, setStep] = useState("choice"); // choice | list | create
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState(null); // країна, яка чекає підтвердження
@@ -2497,20 +2675,6 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
         </div>
 
         {reassign && <div className="cn-onboard-reassign">{t(lang, "nn_reassign_note")}</div>}
-
-        <div className="cn-field">
-          <label className="cn-label">{t(lang, "onboard_name_label")}</label>
-          <div className="cn-input-icon-wrap">
-            <User size={18} className="cn-input-icon" />
-            <input
-              className="cn-input cn-input--icon"
-              maxLength={20}
-              placeholder={t(lang, "onboard_name_placeholder")}
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </div>
-        </div>
 
         <div className="cn-choice-list">
           <button type="button" className="cn-choice-btn" disabled={!hasName} onClick={() => { cnSfx.toggle(); setStep("list"); }}>
@@ -2615,24 +2779,7 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
         </button>
         <div className="cn-step-title">{t(lang, "nn_create_title")}</div>
       </div>
-      <div className="cn-map-hint cn-map-hint--onboard">{t(lang, "nn_create_hint")}</div>
-
-      <div className="cn-tmap-viewport">
-        <TerritoryMap mode="pick" owners={owners} countries={countries} selectedRid={region?.rid} onSelectRegion={handleSelectRegion} />
-        {toast && <div className="cn-tmap-toast">{toast}</div>}
-      </div>
-
-      <MapLegend lang={lang} />
-
       <div className="cn-create-panel">
-        <div className="cn-create-region">
-          <MapIcon size={15} />
-          {region ? (
-            <span>{t(lang, "nn_region_selected")}: <b>{region.name}</b></span>
-          ) : (
-            <span className="cn-create-region-empty">{t(lang, "nn_create_hint")}</span>
-          )}
-        </div>
         <label className="cn-label">{t(lang, "nn_country_name_label")}</label>
         <input
           className="cn-input"
@@ -2642,12 +2789,29 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
           onChange={(e) => setCountryName(e.target.value)}
         />
         {(nameError || error) && <div className="cn-onboard-blocked-msg">{nameError || error}</div>}
-        <button className="cn-primary-btn" disabled={!canCreate} onClick={createCountryNow} style={{ marginTop: 12 }}>
-          <span className="cn-primary-btn-emoji">🏁</span>
-          <span className="cn-primary-btn-label">{submitting ? t(lang, "onboard_creating_btn") : t(lang, "nn_confirm_btn")}</span>
-          <ChevronRight size={20} className="cn-primary-btn-chevron" />
-        </button>
       </div>
+
+      <div className="cn-create-region" style={{ marginTop: 12, marginBottom: 10 }}>
+        <MapIcon size={15} />
+        {region ? (
+          <span>{t(lang, "nn_region_selected")}: <b>{region.name}</b></span>
+        ) : (
+          <span className="cn-create-region-empty">{t(lang, "nn_create_hint")}</span>
+        )}
+      </div>
+
+      <div className="cn-tmap-viewport">
+        <TerritoryMap mode="pick" owners={owners} countries={countries} selectedRid={region?.rid} onSelectRegion={handleSelectRegion} />
+        {toast && <div className="cn-tmap-toast">{toast}</div>}
+      </div>
+
+      <MapLegend lang={lang} />
+
+      <button className="cn-primary-btn" disabled={!canCreate} onClick={createCountryNow} style={{ marginTop: 4 }}>
+        <span className="cn-primary-btn-emoji">🏁</span>
+        <span className="cn-primary-btn-label">{submitting ? t(lang, "onboard_creating_btn") : t(lang, "nn_confirm_btn")}</span>
+        <ChevronRight size={20} className="cn-primary-btn-chevron" />
+      </button>
     </div>
   );
 }
@@ -4459,9 +4623,11 @@ function ProfileScreen({
             {isLeader && <Crown size={14} className="cn-profile-name-banner-crown" />}
             <div className="cn-profile-name-row">
               <div className="cn-profile-name">{me.username}</div>
-              <button className="cn-profile-edit-btn" type="button" onClick={openRename} aria-label="Змінити ім'я">
-                <Pencil size={13} />
-              </button>
+              {!getTelegramUser()?.id && (
+                <button className="cn-profile-edit-btn" type="button" onClick={openRename} aria-label="Змінити ім'я">
+                  <Pencil size={13} />
+                </button>
+              )}
             </div>
             <button type="button" className="cn-profile-title-pill" onClick={() => setView("titles")}>
               {equippedTitleUnlocked ? equippedTitleUnlocked.label : "Без титулу"}
@@ -5344,6 +5510,254 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
 /*  Settings (Theme + Developer/Test panel)                             */
 /* ------------------------------------------------------------------ */
 
+/* Адмін: окремий екран зі списком гравців і докладною карткою гравця */
+function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack }) {
+  const [query, setQuery] = useState("");
+  const [limit, setLimit] = useState(50);
+  const [selId, setSelId] = useState(null);
+  const [info, setInfo] = useState(undefined); // undefined — вантажиться, null — даних немає
+  const [seen, setSeen] = useState(0);
+  const [adminLog, setAdminLog] = useState([]);
+  const [logLimit, setLogLimit] = useState(20);
+  const [editOpen, setEditOpen] = useState(false);
+  const [power, setPower] = useState("");
+  const [clicks, setClicks] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const list = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const all = [...(players || [])].sort((a, b) => (b.power || 0) - (a.power || 0));
+    if (!q) return all;
+    return all.filter(
+      (p) =>
+        (p.username || "").toLowerCase().includes(q) ||
+        String(p.id).toLowerCase().includes(q) ||
+        String(p.telegramId || "").includes(q) ||
+        (COUNTRY_MAP[p.countryCode]?.name || "").toLowerCase().includes(q)
+    );
+  }, [players, query]);
+
+  const sel = selId ? (players || []).find((p) => p.id === selId) : null;
+
+  useEffect(() => {
+    if (!selId) return undefined;
+    let cancelled = false;
+    setInfo(undefined);
+    setSeen(0);
+    setAdminLog([]);
+    setLogLimit(20);
+    setEditOpen(false);
+    setMsg("");
+    (async () => {
+      const [i, sn, al] = await Promise.all([
+        getJSON(PINFO_PREFIX + selId, true, null),
+        storageGet(PSEEN_PREFIX + selId, true),
+        getJSON(PALOG_PREFIX + selId, true, []),
+      ]);
+      if (cancelled) return;
+      setInfo(i);
+      setSeen(Number(sn) || 0);
+      setAdminLog(al || []);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selId]);
+
+  const saveEdit = async () => {
+    if (!sel) return;
+    setBusy(true);
+    const np = Math.max(0, Math.round(Number(power) || 0));
+    const nc = Math.max(0, Math.round(Number(clicks) || 0));
+    const updated = { ...sel, power: np, totalClicks: nc };
+    await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
+    await adminLogAction(sel.id, `Адмін змінив Power ${fmt(sel.power || 0)} → ${fmt(np)}, кліки ${fmt(sel.totalClicks || 0)} → ${fmt(nc)}`);
+    if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
+    setMsg("✓ Збережено");
+    setEditOpen(false);
+    setAdminLog(await getJSON(PALOG_PREFIX + sel.id, true, []));
+    if (onRefreshGameData) await onRefreshGameData();
+    setBusy(false);
+  };
+
+  const toggleBlock = async () => {
+    if (!sel) return;
+    setBusy(true);
+    const blocked = !sel.blocked;
+    const updated = { ...sel, blocked, blockedReason: blocked ? reason || "Заблоковано адміністрацією" : "" };
+    await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
+    await adminLogAction(sel.id, blocked ? `Адмін заблокував гравця: ${updated.blockedReason}` : "Адмін розблокував гравця");
+    if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
+    setMsg(blocked ? "⛔ Гравця заблоковано" : "✓ Гравця розблоковано");
+    setAdminLog(await getJSON(PALOG_PREFIX + sel.id, true, []));
+    if (onRefreshGameData) await onRefreshGameData();
+    setBusy(false);
+  };
+
+  const Row = ({ label, value }) => (
+    <div className="cn-pl-row">
+      <span className="cn-pl-label">{label}</span>
+      <span className="cn-pl-value">{value === undefined || value === null || value === "" ? "—" : value}</span>
+    </div>
+  );
+
+  if (sel) {
+    const cur = info?.current;
+    const country = COUNTRY_MAP[sel.countryCode];
+    const lastSeen = Math.max(info?.lastSeen || 0, seen || 0);
+    const logs = [...(info?.logs || []), ...adminLog].sort((a, b) => b.ts - a.ts);
+    const history = [...(info?.history || [])].reverse();
+    return (
+      <div className="cn-settings cn-pl">
+        <div className="cn-lb-header">
+          <button className="cn-icon-btn" onClick={() => setSelId(null)} type="button" aria-label="Назад">
+            <ChevronLeft size={18} />
+          </button>
+          <div className="cn-screen-title">{sel.username || "Гравець"}{sel.blocked ? " ⛔" : ""}</div>
+          <div style={{ width: 34 }} />
+        </div>
+        {msg && <div className="cn-dev-status-msg">{msg}</div>}
+
+        <div className="cn-pl-card">
+          <div className="cn-pl-title">Профіль</div>
+          <Row label="Ігровий нікнейм" value={sel.username} />
+          <Row label="Telegram ID" value={sel.telegramId || info?.tgId} />
+          <Row label="Telegram @username" value={info?.tgUsername ? "@" + info.tgUsername : ""} />
+          <Row label="Ім'я в Telegram" value={info?.tgName} />
+          <Row label="ID в грі" value={sel.id} />
+          <Row label="Країна" value={country?.name} />
+          <Row label="Power / кліки" value={`${fmt(sel.power || 0)} / ${fmt(sel.totalClicks || 0)}`} />
+          <Row label="Premium Pass" value={sel.hasPremiumPass ? "Так" : "Ні"} />
+          <Row label="Зареєстрований" value={fmtDateTime(sel.createdAt || info?.firstSeen)} />
+          <Row label="Востаннє заходив" value={lastSeen ? `${fmtDateTime(lastSeen)} (${timeAgo(lastSeen)})` : ""} />
+          {sel.blocked && <Row label="Блокування" value={sel.blockedReason || "Заблоковано"} />}
+        </div>
+
+        <div className="cn-pl-card">
+          <div className="cn-pl-title">Поточне підключення</div>
+          {info === undefined && <div className="cn-control-empty">Завантаження…</div>}
+          {info === null && <div className="cn-control-empty">Даних ще немає: гравець не заходив після оновлення.</div>}
+          {cur && (
+            <>
+              <Row label="IP-адреса" value={cur.ip} />
+              <Row label="Провайдер / оператор" value={cur.isp || cur.org} />
+              <Row label="Організація" value={cur.org && cur.org !== cur.isp ? cur.org : ""} />
+              <Row label="ASN" value={cur.asn} />
+              <Row label="Тип підключення" value={cur.type} />
+              <Row label="Локація (за IP)" value={[cur.city, cur.region, cur.country].filter(Boolean).join(", ")} />
+              <Row label="Пристрій" value={cur.device} />
+              <Row label="Клієнт" value={cur.client} />
+              <Row label="Екран" value={cur.screen} />
+              <Row label="Мова" value={cur.lang} />
+              <Row label="Часовий пояс" value={cur.tz} />
+              <Row label="User-Agent" value={cur.ua} />
+              <Row label="Оновлено" value={fmtDateTime(cur.ts)} />
+            </>
+          )}
+        </div>
+
+        <div className="cn-pl-card">
+          <div className="cn-pl-title">Історія IP / пристроїв ({history.length})</div>
+          {history.length === 0 && <div className="cn-control-empty">Змін поки немає</div>}
+          {history.map((h, i) => (
+            <div className="cn-pl-hist" key={h.ts + "_" + i}>
+              <div className="cn-pl-hist-time">{fmtDateTime(h.ts)}</div>
+              <div>{h.ip || "IP невідомий"} · {h.isp || "провайдер невідомий"}</div>
+              <div className="cn-pl-sub">{[h.city, h.country].filter(Boolean).join(", ")} · {h.device} · {h.client}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="cn-pl-card">
+          <div className="cn-pl-title">Логи ({logs.length})</div>
+          {logs.length === 0 && <div className="cn-control-empty">Подій поки немає</div>}
+          {logs.slice(0, logLimit).map((l, i) => (
+            <div className={"cn-pl-log cn-pl-log--" + l.type} key={l.ts + "_" + i}>
+              <span className="cn-pl-hist-time">{fmtDateTime(l.ts)}</span>
+              <span>{l.text}</span>
+            </div>
+          ))}
+          {logs.length > logLimit && (
+            <button className="cn-dev-btn" type="button" onClick={() => setLogLimit((n) => n + 40)}>Показати ще</button>
+          )}
+        </div>
+
+        <div className="cn-pl-card">
+          <div className="cn-pl-title">Дії</div>
+          {editOpen ? (
+            <div className="cn-admin-edit-form">
+              <label className="cn-admin-field-label">
+                Power
+                <input className="cn-admin-input" type="number" value={power} onChange={(e) => setPower(e.target.value)} />
+              </label>
+              <label className="cn-admin-field-label">
+                Кількість кліків
+                <input className="cn-admin-input" type="number" value={clicks} onChange={(e) => setClicks(e.target.value)} />
+              </label>
+              <div className="cn-admin-edit-actions">
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={saveEdit}>Зберегти</button>
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => setEditOpen(false)}>Скасувати</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {!sel.blocked && (
+                <input className="cn-admin-input" type="text" placeholder="Причина блокування (необов'язково)" value={reason} onChange={(e) => setReason(e.target.value)} />
+              )}
+              <div className="cn-admin-edit-actions">
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => { setPower(String(Math.round(sel.power || 0))); setClicks(String(Math.round(sel.totalClicks || 0))); setEditOpen(true); }}>
+                  Редагувати
+                </button>
+                <button className={"cn-dev-btn" + (sel.blocked ? "" : " cn-dev-btn--danger")} type="button" disabled={busy} onClick={toggleBlock}>
+                  {sel.blocked ? "Розблокувати" : "Заблокувати"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="cn-settings cn-pl">
+      <div className="cn-lb-header">
+        <button className="cn-icon-btn" onClick={onBack} type="button" aria-label="Назад">
+          <ChevronLeft size={18} />
+        </button>
+        <div className="cn-screen-title">Гравці ({(players || []).length})</div>
+        <div style={{ width: 34 }} />
+      </div>
+      <input
+        className="cn-admin-input"
+        type="text"
+        placeholder="Пошук: нікнейм, Telegram ID, країна…"
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setLimit(50); }}
+      />
+      <div className="cn-dip-list" style={{ marginTop: 10 }}>
+        {list.length === 0 && <div className="cn-lb-empty">Гравців не знайдено</div>}
+        {list.slice(0, limit).map((p) => (
+          <button className="cn-pl-item" key={p.id} type="button" onClick={() => { cnSfx.navSwitch(); setSelId(p.id); }}>
+            <Flag code={p.countryCode} size={22} className="cn-country-badge--lg" />
+            <span className="cn-pl-item-main">
+              <span className="cn-pl-item-name">{p.username || p.id}{p.blocked ? " ⛔" : ""}</span>
+              <span className="cn-pl-sub">TG: {p.telegramId || "—"} · {COUNTRY_MAP[p.countryCode]?.name || "—"}</span>
+            </span>
+            <span className="cn-pl-item-power">{fmt(p.power || 0)}</span>
+            <ChevronRight size={16} />
+          </button>
+        ))}
+        {list.length > limit && (
+          <button className="cn-dev-btn" type="button" onClick={() => setLimit((n) => n + 50)}>Показати ще ({list.length - limit})</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage, maintenance, onSaveMaintenance }) {
   const [adminPlayersOpen, setAdminPlayersOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -5615,6 +6029,18 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     flashStatus("✓ Дані скинуто");
   };
 
+  if (adminPlayersOpen && isSuperAdmin()) {
+    return (
+      <AdminPlayersView
+        players={players}
+        me={me}
+        onSetPlayer={onSetPlayer}
+        onRefreshGameData={onRefreshGameData}
+        onBack={() => setAdminPlayersOpen(false)}
+      />
+    );
+  }
+
   return (
     <div className="cn-settings">
       <div className="cn-lb-header">
@@ -5681,74 +6107,10 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
             <div className="cn-dev-panel">
               {adminMsg && <div className="cn-dev-status-msg">{adminMsg}</div>}
 
-              <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.toggle(); setAdminPlayersOpen((o) => !o); }}>
+              <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.navSwitch(); setAdminPlayersOpen(true); }}>
                 <Users size={14} /> Список гравців ({(players || []).length})
-                <ChevronDown size={16} className={"cn-chevron" + (adminPlayersOpen ? " cn-chevron--open" : "")} />
+                <ChevronRight size={16} />
               </button>
-              {adminPlayersOpen && (<>
-              <input
-                className="cn-admin-input"
-                type="text"
-                placeholder="Пошук за нікнеймом або ID…"
-                value={adminQuery}
-                onChange={(e) => setAdminQuery(e.target.value)}
-              />
-              <div className="cn-admin-player-list">
-                {adminResults.map((p) => (
-                  <div className="cn-admin-player-row" key={p.id}>
-                    <div className="cn-admin-player-head">
-                      <span className="cn-admin-player-name">{p.username || p.id}{p.blocked ? " ⛔" : ""}</span>
-                      <span className="cn-admin-player-sub">{fmt(p.power || 0)} Power · {fmt(p.totalClicks || 0)} кліків</span>
-                    </div>
-                    {adminEditId === p.id ? (
-                      <div className="cn-admin-edit-form">
-                        <label className="cn-admin-field-label">
-                          Power
-                          <input
-                            className="cn-admin-input"
-                            type="number"
-                            value={adminEditPower}
-                            onChange={(e) => setAdminEditPower(e.target.value)}
-                          />
-                        </label>
-                        <label className="cn-admin-field-label">
-                          Кількість кліків
-                          <input
-                            className="cn-admin-input"
-                            type="number"
-                            value={adminEditClicks}
-                            onChange={(e) => setAdminEditClicks(e.target.value)}
-                          />
-                        </label>
-                        <div className="cn-admin-edit-actions">
-                          <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => saveAdminPlayerEdit(p)}>
-                            Зберегти
-                          </button>
-                          <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => setAdminEditId(null)}>
-                            Скасувати
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="cn-admin-edit-actions">
-                        <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={() => startEditPlayer(p)}>
-                          Редагувати
-                        </button>
-                        <button
-                          className={"cn-dev-btn" + (p.blocked ? "" : " cn-dev-btn--danger")}
-                          type="button"
-                          disabled={adminBusy}
-                          onClick={() => toggleBlockPlayer(p)}
-                        >
-                          {p.blocked ? "Розблокувати" : "Заблокувати"}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {adminResults.length === 0 && <div className="cn-control-empty">Гравців не знайдено</div>}
-              </div>
-              </>)}
 
               <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Дата завершення сезону</div>
               <div className="cn-admin-row">
@@ -6708,7 +7070,7 @@ function GlobalStyles() {
       .cn-tos-decline-btn:hover { color: var(--cn-text-dim); }
 
       /* Onboarding */
-      .cn-onboard { position: relative; z-index: 1; padding: 28px 20px 40px; max-width: 480px; margin: 0 auto; }
+      .cn-onboard { position: relative; z-index: 1; padding: 28px 20px 40px; max-width: 480px; margin: 0 auto; width: 100%; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
       .cn-onboard-header {
         display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 28px; gap: 8px;
         padding: 28px 20px 24px; border-radius: 24px;
@@ -7790,6 +8152,7 @@ function GlobalStyles() {
       .cn-confirm-actions .cn-dev-btn { flex: 1; justify-content: center; padding: 12px 10px; font-size: 14px; border-radius: 12px; }
       .cn-dev-btn--primary { background: linear-gradient(135deg, var(--cn-accent), var(--cn-accent2)); color: #04101f; border-color: transparent; }
       .cn-onboard--map { max-width: 640px; }
+      .cn-onboard--map .cn-tmap-viewport { height: min(46vh, 460px); min-height: 280px; }
       .cn-map-hint--onboard { margin-top: 0; margin-bottom: 10px; font-size: 13px; color: var(--cn-text-dim); }
       .cn-tmap-viewport {
         position: relative; width: 100%; height: min(58vh, 560px); min-height: 340px; border-radius: 22px; overflow: hidden;
@@ -8103,6 +8466,24 @@ function GlobalStyles() {
       .cn-warhud-declare-text { display: flex; flex-direction: column; gap: 3px; }
       .cn-warhud-declare-text b { font-size: 16px; font-family: 'Space Grotesk', sans-serif; }
       .cn-warhud-declare-text small { font-size: 11.5px; color: var(--cn-text-dim); line-height: 1.35; }
+      .cn-pl { display: flex; flex-direction: column; gap: 10px; }
+      .cn-pl-card { padding: 12px; border-radius: 16px; background: rgba(6,16,34,0.7); border: 1px solid rgba(var(--cn-accent-rgb),0.3); display: flex; flex-direction: column; gap: 6px; }
+      .cn-pl-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 13px; color: #FDE68A; margin-bottom: 2px; }
+      .cn-pl-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; }
+      .cn-pl-label { color: var(--cn-text-dim); flex-shrink: 0; }
+      .cn-pl-value { color: #fff; text-align: right; word-break: break-all; user-select: text; }
+      .cn-pl-sub { font-size: 11.5px; color: var(--cn-text-dim); word-break: break-word; }
+      .cn-pl-hist { padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,0.05); font-size: 12.5px; color: #fff; word-break: break-word; }
+      .cn-pl-hist-time { display: block; font-size: 10.5px; font-weight: 700; color: #FDE68A; }
+      .cn-pl-log { display: flex; flex-direction: column; gap: 1px; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #E6F0FF; border-left: 3px solid rgba(var(--cn-accent-rgb),0.6); background: rgba(255,255,255,0.04); word-break: break-word; }
+      .cn-pl-log--ip, .cn-pl-log--isp, .cn-pl-log--device, .cn-pl-log--client { border-left-color: #FBBF24; }
+      .cn-pl-log--admin { border-left-color: #F87171; }
+      .cn-pl-log--name { border-left-color: #34D399; }
+      .cn-pl-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; cursor: pointer; text-align: left; color: #fff; background: rgba(6,16,34,0.7); border: 1px solid rgba(var(--cn-accent-rgb),0.3); }
+      .cn-pl-item:active { transform: scale(0.98); }
+      .cn-pl-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .cn-pl-item-name { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cn-pl-item-power { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 13px; color: #FBBF24; }
       .cn-mail-resolved { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--cn-text-dim); }
       .cn-hq-tile--locked { opacity: 0.5; }
       .cn-hq-lock { position: absolute; top: 7px; right: 7px; color: #FBBF24; }
