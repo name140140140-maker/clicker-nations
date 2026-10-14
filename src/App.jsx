@@ -747,13 +747,16 @@ async function loadActiveWars() {
   return out;
 }
 
-async function fetchWarTotals(warId) {
+async function fetchWarTotals(warId, myPlayerId = null) {
   const entries = await sbStorageListEntries(WAR_CLICKS_PREFIX + warId + ":", true);
-  const t = { att: 0, def: 0 };
+  const t = { att: 0, def: 0, mine: 0 }; // mine — те, що від мене вже лежить у базі в цій вибірці
   for (const row of entries || []) {
     try {
       const v = JSON.parse(row.value);
-      if (v && (v.side === "att" || v.side === "def")) t[v.side] += v.n || 0;
+      if (v && (v.side === "att" || v.side === "def")) {
+        t[v.side] += v.n || 0;
+        if (myPlayerId && row.key.endsWith(":" + myPlayerId)) t.mine = v.n || 0;
+      }
     } catch {
       /* ignore */
     }
@@ -2027,7 +2030,7 @@ export default function App() {
         const phase = mine ? warPhase(mine) : null;
         if (phase === "battle") {
           await flushClicks(mine);
-          const totals = await fetchWarTotals(mine.id);
+          const totals = await fetchWarTotals(mine.id, playerIdForWar);
           if (!stopped) setWarTotals(totals);
           delay = 3000;
         } else if (phase === "prep") {
@@ -2934,8 +2937,12 @@ function WarHud({ war, me, isLeader, totals, pendingRef }) {
   const canCall = isLeader && (me.countryCode === war.attacker || me.countryCode === war.defender) && phase !== "finish";
   const pend = pendingRef?.current;
   const pn = pend && pend.warId === war.id ? pend.n : 0;
-  const attTotal = (totals?.att || 0) + (mySide === "att" ? pn : 0);
-  const defTotal = (totals?.def || 0) + (mySide === "def" ? pn : 0);
+  /* Свій внесок беремо з локального лічильника, а не з останнього опитування бази:
+     інакше після відправки кліків шкала на мить відскакує до старого значення. */
+  const myLocal = pend && pend.warId === war.id && pend.loaded ? (pend.base || 0) + pn : null;
+  const myDelta = myLocal === null ? pn : myLocal - (totals?.mine || 0);
+  const attTotal = Math.max(0, (totals?.att || 0) + (mySide === "att" ? myDelta : 0));
+  const defTotal = Math.max(0, (totals?.def || 0) + (mySide === "def" ? myDelta : 0));
   const target = war.target || WAR_TARGET;
   const net = attTotal - defTotal;
   const pct = Math.max(0, Math.min(100, (net / target) * 100));
@@ -6075,10 +6082,11 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             selectedRid={selected?.rid}
             onSelectRegion={(r) => {
               setSelectedCity(null);
-              setSelected((prev) => (prev?.rid === r.rid ? null : r));
+              setSelected((prev) => (prev?.rid === r.rid && prev?.ownerId === r.ownerId ? null : r));
             }}
             showCities
             cityOwners={nations?.cityOwners}
+            selectedZoneOwner={selected?.ownerId || null}
             lang={lang}
             selectedCityId={selectedCity ? selectedCity.city.i : null}
             onSelectCity={(sel) => {

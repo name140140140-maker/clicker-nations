@@ -3,7 +3,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson, cityKey } from "./map/cities.js";
-import { cityZones } from "./map/geo.js";
+import { cityZones, pointInPolygon } from "./map/geo.js";
 import { waterTexture, landTexture } from "./map/textures.js";
 
 // КАРТА ТЕРРИТОРІЙ
@@ -132,7 +132,7 @@ function addGeoJsonSource(map, id, blob, options) {
 const worldCache = { model: null, regionsBlob: null, bordersBlob: null };
 
 const TerritoryMap = forwardRef(function TerritoryMap(
-  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null },
+  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -176,6 +176,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     cities: null, // { list, byRid } після завантаження шару міст
     cityColor: new Map(), // індекс міста → колір власника (застосований у feature-state)
     selectedCity: -1,
+    split: new Map(), // rid → { zones: Map(індекс міста → { owner, polys }) } для областей із захопленими містами
   });
   // Актуальні пропси для довгоживучих обробників карти.
   const latest = useRef({});
@@ -350,7 +351,19 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           const idx = Number(top.id);
           const region = w.model.regions[idx];
           if (!region || !latest.current.onSelectRegion) return;
-          latest.current.onSelectRegion({ rid: region.rid, name: region.name, index: idx, ownerId: w.ownerByIndex[idx] || "" });
+          let ownerId = w.ownerByIndex[idx] || "";
+          // Область поділена між країнами: власник = той, чия зона під пальцем
+          const split = w.split.get(region.rid);
+          if (split) {
+            const { lng, lat } = event.lngLat;
+            for (const z of split.zones.values()) {
+              if (z.polys.some((poly) => pointInPolygon(lng, lat, poly))) {
+                ownerId = z.owner;
+                break;
+              }
+            }
+          }
+          latest.current.onSelectRegion({ rid: region.rid, name: region.name, index: idx, ownerId });
         });
         map.on("mouseenter", "regions-fill", () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", "regions-fill", () => { map.getCanvas().style.cursor = ""; });
@@ -453,10 +466,14 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       map.addSource("cities", { type: "geojson", data: citiesGeoJson(data.list) });
       map.addSource("zones", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       // Території захоплених міст: зона міста (діаграма Вороного) фарбується в колір нового власника.
+      map.addSource("selzone", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("captured", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({ id: "captured-fill", type: "fill", source: "captured", paint: { "fill-color": ["get", "c"], "fill-opacity": 0.66 } });
       map.addLayer({ id: "captured-line", type: "line", source: "captured", paint: { "line-color": ["get", "c"], "line-width": 2.2, "line-opacity": 0.95 } });
       // Зони міст усередині вибраної області (прев'ю: де проходитиме лінія фронту між містами)
+      // Підсвітка вибраної території однієї країни в поділеній області
+      map.addLayer({ id: "selzone-fill", type: "fill", source: "selzone", paint: { "fill-color": "#ffffff", "fill-opacity": 0.5 } });
+      map.addLayer({ id: "selzone-line", type: "line", source: "selzone", paint: { "line-color": MAP_COLORS.selected, "line-width": 3 } });
       map.addLayer({
         id: "zones-fill", type: "fill", source: "zones",
         paint: { "fill-color": "#ffffff", "fill-opacity": ["get", "a"] },
@@ -521,25 +538,6 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     if (w.selectedCity >= 0) map.setFeatureState({ source: "cities", id: w.selectedCity }, { sel: true });
   }, [citiesReady, selectedCityId]);
 
-  // Зони міст вибраної області (діаграма Вороного, обрізана межами області).
-  useEffect(() => {
-    const map = mapRef.current;
-    const w = worldRef.current;
-    if (!map || !citiesReady || !w.model || !map.getSource("zones")) return;
-    const src = map.getSource("zones");
-    const idx = selectedRid ? w.model.indexByRid.get(String(selectedRid)) : undefined;
-    const list = idx !== undefined ? w.cities.byRid.get(String(selectedRid)) || [] : [];
-    if (list.length < 2) { src.setData({ type: "FeatureCollection", features: [] }); return; }
-    const polys = w.model.regionPolygons(idx);
-    const zones = cityZones(polys, zoneSites(list, latest.current.cityOwners));
-    const features = [];
-    let n = 0;
-    for (const [k, polysOfCity] of zones) {
-      features.push({ type: "Feature", properties: { k, a: n++ % 2 ? 0.06 : 0.16 }, geometry: { type: "MultiPolygon", coordinates: polysOfCity } });
-    }
-    src.setData({ type: "FeatureCollection", features });
-  }, [citiesReady, selectedRid, cityOwners]);
-
   // Зони захоплених міст (місто належить іншій країні, ніж його область).
   useEffect(() => {
     const map = mapRef.current;
@@ -560,10 +558,17 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       }
     }
     const features = [];
+    w.split = new Map();
     for (const [rid, caps] of byRid) {
       const idx = w.model.indexByRid.get(rid);
       const list = w.cities.byRid.get(rid) || [];
       const zones = cityZones(w.model.regionPolygons(idx), zoneSites(list, cityOwners));
+      const zmap = new Map();
+      for (const [k, polys] of zones) {
+        const city = w.cities.list[k];
+        zmap.set(k, { owner: (city && cityOwners[cityKey(city)]) || w.ownerByIndex[idx] || "", polys });
+      }
+      w.split.set(rid, { zones: zmap });
       for (const c of caps) {
         const geo = zones.get(c.i);
         if (geo) features.push({ type: "Feature", properties: { c: colorOf[cityOwners[cityKey(c)]] }, geometry: { type: "MultiPolygon", coordinates: geo } });
@@ -572,13 +577,51 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     map.getSource("captured").setData({ type: "FeatureCollection", features });
   }, [citiesReady, cityOwners, countries, owners]);
 
+  // Зони міст вибраної області (діаграма Вороного, обрізана межами області) і підсвітка
+  // території однієї країни, якщо область поділена між країнами.
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = worldRef.current;
+    if (!map || !citiesReady || !w.model || !map.getSource("zones")) return;
+    const src = map.getSource("zones");
+    const selSrc = map.getSource("selzone");
+    const empty = { type: "FeatureCollection", features: [] };
+    const rid = selectedRid ? String(selectedRid) : null;
+    const split = rid ? w.split.get(rid) : null;
+    if (split) {
+      src.setData(empty);
+      const regionOwner = w.ownerByIndex[w.model.indexByRid.get(rid)] || "";
+      const want = selectedZoneOwner || regionOwner;
+      const features = [];
+      for (const z of split.zones.values()) {
+        if (z.owner === want) features.push({ type: "Feature", properties: {}, geometry: { type: "MultiPolygon", coordinates: z.polys } });
+      }
+      selSrc.setData({ type: "FeatureCollection", features });
+      return;
+    }
+    selSrc.setData(empty);
+    const idx = rid ? w.model.indexByRid.get(rid) : undefined;
+    const list = idx !== undefined ? w.cities.byRid.get(rid) || [] : [];
+    if (list.length < 2) { src.setData(empty); return; }
+    const polys = w.model.regionPolygons(idx);
+    const zones = cityZones(polys, zoneSites(list, latest.current.cityOwners));
+    const features = [];
+    let n = 0;
+    for (const [k, polysOfCity] of zones) {
+      features.push({ type: "Feature", properties: { k, a: n++ % 2 ? 0.06 : 0.16 }, geometry: { type: "MultiPolygon", coordinates: polysOfCity } });
+    }
+    src.setData({ type: "FeatureCollection", features });
+  }, [citiesReady, selectedRid, selectedZoneOwner, cityOwners, countries, owners]);
+
   // 3. Вибрана область: підсвітка + контур.
   useEffect(() => {
     const map = mapRef.current;
     const w = worldRef.current;
     if (!map || status !== "ready" || !w.model) return;
     const { model } = w;
-    const next = selectedRid ? model.indexByRid.get(String(selectedRid)) ?? -1 : -1;
+    // У поділеній області підсвічується лише територія однієї країни (шар selzone), а не вся область.
+    const isSplit = selectedRid ? w.split.has(String(selectedRid)) : false;
+    const next = selectedRid && !isSplit ? model.indexByRid.get(String(selectedRid)) ?? -1 : -1;
     const prev = w.selectedIndex;
     if (prev === next) return;
     if (prev >= 0) {
@@ -590,7 +633,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       for (const a of model.regionArcs[next]) map.setFeatureState({ source: "borders", id: a }, { h: true });
     }
     w.selectedIndex = next;
-  }, [status, selectedRid]);
+  }, [status, selectedRid, citiesReady, cityOwners, countries, owners]);
 
   const loadPercent = Math.round(loadProgress * 100);
 
