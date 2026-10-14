@@ -839,12 +839,12 @@ async function acceptWarInvite(meta) {
 }
 
 /* Завершення війни: лише один клієнт виконує підсумки (блокування через insert-if-absent) */
-async function finalizeWar(w, players) {
+async function finalizeWar(w, players, forcedWinner = null) {
   const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
   if (lock !== "ok") return false;
   const totals = await fetchWarTotals(w.id);
   const net = totals.att - totals.def;
-  const win = net >= (w.target || WAR_TARGET);
+  const win = forcedWinner ? forcedWinner === "att" : net >= (w.target || WAR_TARGET);
   const winner = win ? w.attacker : w.defender;
   await setJSON(
     WAR_PREFIX + w.id,
@@ -5356,6 +5356,10 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
   const [adminMaintMsg, setAdminMaintMsg] = useState(maintenance.message || "");
   /* Список оновлень: вбудовані записи (changelog.js) + додані адміном (Supabase) */
   const [clStored, setClStored] = useState(null); // null = ще не завантажено
+  const [clOpen, setClOpen] = useState(false);
+  const [adminWars, setAdminWars] = useState(null);
+  const [adminWarMsg, setAdminWarMsg] = useState("");
+  const [adminWarBusy, setAdminWarBusy] = useState(false);
   const [clDate, setClDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [clTitle, setClTitle] = useState("");
   const [clText, setClText] = useState("");
@@ -5376,6 +5380,40 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
       });
     }
   }, [adminOpen, season, adminPassPriceLoaded, clStored]);
+
+  const reloadAdminWars = useCallback(async () => {
+    setAdminWars(await loadActiveWars());
+  }, []);
+  useEffect(() => {
+    if (adminOpen && isSuperAdmin()) reloadAdminWars();
+  }, [adminOpen, reloadAdminWars]);
+
+  const adminWarAction = async (fn, okText) => {
+    setAdminWarBusy(true);
+    try {
+      await fn();
+      setAdminWarMsg("✓ " + okText);
+    } catch (err) {
+      setAdminWarMsg("✗ " + (err?.message || "Помилка"));
+    }
+    await reloadAdminWars();
+    if (onRefreshMail) onRefreshMail();
+    if (onRefreshGameData) onRefreshGameData();
+    setAdminWarBusy(false);
+  };
+  const skipWarPrep = (w) =>
+    adminWarAction(async () => {
+      const now = Date.now();
+      await setJSON(WAR_PREFIX + w.id, { ...w, prepEnd: now, battleEnd: now + WAR_BATTLE_MS }, true);
+    }, "Підготовку завершено, битва почалась");
+  const endWarNow = (w) =>
+    adminWarAction(async () => {
+      await setJSON(WAR_PREFIX + w.id, { ...w, battleEnd: Date.now() - 1 }, true);
+    }, "Війну завершено за поточним балансом (підсумки підрахує гра за кілька секунд)");
+  const setWarWinner = (w, side) =>
+    adminWarAction(async () => {
+      await finalizeWar(w, players, side);
+    }, `Переможець: ${COUNTRY_MAP[side === "att" ? w.attacker : w.defender]?.name || ""}`);
 
   const adminResults = useMemo(() => {
     if (!adminOpen || !adminPlayersOpen) return [];
@@ -5727,7 +5765,53 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                 </button>
               </div>
 
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Список оновлень</div>
+              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Війни</div>
+              {adminWarMsg && <div className="cn-dev-status-msg">{adminWarMsg}</div>}
+              {adminWars === null && <div className="cn-control-empty">Завантаження…</div>}
+              {adminWars && adminWars.length === 0 && <div className="cn-control-empty">Активних воєн немає</div>}
+              {(adminWars || []).map((w) => {
+                const phase = warPhase(w);
+                const mine = warInvolves(w, me.countryCode);
+                return (
+                  <div className="cn-admin-player-row" key={w.id}>
+                    <div className="cn-admin-player-head">
+                      <span className="cn-admin-player-name">
+                        {COUNTRY_MAP[w.attacker]?.name || w.attacker} → {COUNTRY_MAP[w.defender]?.name || w.defender}{mine ? " (твоя)" : ""}
+                      </span>
+                      <span className="cn-admin-player-sub">
+                        {w.cityName} · {phase === "prep" ? "підготовка" : phase === "battle" ? "битва" : "завершується"}
+                      </span>
+                    </div>
+                    <div className="cn-admin-edit-actions" style={{ flexWrap: "wrap" }}>
+                      {phase === "prep" && (
+                        <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => skipWarPrep(w)}>
+                          Завершити підготовку
+                        </button>
+                      )}
+                      {phase === "battle" && (
+                        <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => endWarNow(w)}>
+                          Завершити війну
+                        </button>
+                      )}
+                      <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "att")}>
+                        Переміг: атака
+                      </button>
+                      <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "def")}>
+                        Переміг: захист
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={reloadAdminWars} style={{ marginTop: 6 }}>
+                Оновити список воєн
+              </button>
+
+              <button className="cn-dev-toggle" type="button" style={{ marginTop: 14 }} onClick={() => { cnSfx.toggle(); setClOpen((o) => !o); }}>
+                <Newspaper size={14} /> Список оновлень
+                <ChevronDown size={16} className={"cn-chevron" + (clOpen ? " cn-chevron--open" : "")} />
+              </button>
+              {clOpen && (<>
               <div className="cn-changelog-list">
                 {clStored === null && <div className="cn-control-empty">Завантаження…</div>}
                 {changelogList.map((e) => (
@@ -5767,6 +5851,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                   Додати оновлення
                 </button>
               </div>
+              </>)}
 
               <div className="cn-admin-block-title" style={{ marginTop: 14 }}>
                 Технічний перерив {maintenance.enabled ? "(зараз УВІМКНЕНО 🛠)" : "(зараз вимкнено)"}
