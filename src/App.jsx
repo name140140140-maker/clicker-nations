@@ -59,9 +59,9 @@ import {
   Landmark,
   BarChart2,
 } from "lucide-react";
-import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries } from "./supabaseStorage";
+import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
-import { fmtPopulation } from "./map/cities";
+import { fmtPopulation, loadCities } from "./map/cities";
 import {
   loadNations,
   createCountry,
@@ -71,6 +71,7 @@ import {
   loadChangelog,
   saveChangelog,
   COUNTRY_COLORS,
+  TERRITORY_PREFIX,
   NAME_MIN,
   NAME_MAX,
 } from "./nations";
@@ -697,6 +698,191 @@ async function breakDiplomacy(kind, mine, other) {
     });
   }
   return { ok: true };
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  Війна за місто                                                      */
+/*  war:<id>          — запис війни                                     */
+/*  warc:<id>:<гравець> — внесок гравця (кліки за сторону)              */
+/*  Підготовка 10 хв → битва 1 год. Кліки йдуть на шкалу замість Power.  */
+/*  Атакуючий має набрати баланс (кліки атаки − кліки захисту) ≥ 10 000. */
+/* ------------------------------------------------------------------ */
+
+const WAR_PREFIX = "war:";
+const WAR_CLICKS_PREFIX = "warc:";
+const WAR_PREP_MS = 10 * 60 * 1000;
+const WAR_BATTLE_MS = 60 * 60 * 1000;
+const WAR_TARGET = 10000;
+
+function warInvolves(w, code) {
+  return !!w && (w.attacker === code || w.defender === code || (w.attAllies || []).includes(code) || (w.defAllies || []).includes(code));
+}
+function warSide(w, code) {
+  if (!w) return null;
+  if (w.attacker === code || (w.attAllies || []).includes(code)) return "att";
+  if (w.defender === code || (w.defAllies || []).includes(code)) return "def";
+  return null;
+}
+function warPhase(w, now = Date.now()) {
+  if (!w) return null;
+  if (w.status === "ended") return "ended";
+  if (now < w.prepEnd) return "prep";
+  if (now < w.battleEnd) return "battle";
+  return "finish";
+}
+
+async function loadActiveWars() {
+  const entries = await sbStorageListEntries(WAR_PREFIX, true);
+  const out = [];
+  for (const row of entries || []) {
+    try {
+      const w = JSON.parse(row.value);
+      if (w && w.id && w.status !== "ended") out.push(w);
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
+}
+
+async function fetchWarTotals(warId) {
+  const entries = await sbStorageListEntries(WAR_CLICKS_PREFIX + warId + ":", true);
+  const t = { att: 0, def: 0 };
+  for (const row of entries || []) {
+    try {
+      const v = JSON.parse(row.value);
+      if (v && (v.side === "att" || v.side === "def")) t[v.side] += v.n || 0;
+    } catch {
+      /* ignore */
+    }
+  }
+  return t;
+}
+
+async function mailMany(players, codes, message) {
+  const targets = (players || []).filter((pl) => codes.includes(pl.countryCode));
+  await Promise.all(targets.map((pl) => addMail(pl.id, message).catch(() => null)));
+}
+
+async function declareWar2({ attacker, defender, city, owners, players }) {
+  if (!COUNTRY_MAP[defender]) return { ok: false, reason: "Країну не знайдено" };
+  if (attacker === defender) return { ok: false, reason: "Не можна нападати на себе" };
+  if (owners && owners[city.rid] !== defender) return { ok: false, reason: "Це місто вже не належить цій країні" };
+  const blocked = attackBlockReason(await loadDiplomacy(), attacker, defender);
+  if (blocked) return { ok: false, reason: blocked };
+  const active = await loadActiveWars();
+  if (active.some((w) => warInvolves(w, attacker))) return { ok: false, reason: "Твоя країна вже бере участь у війні" };
+  if (active.some((w) => warInvolves(w, defender))) return { ok: false, reason: "Ця країна вже веде війну" };
+  const now = Date.now();
+  const id = "w_" + now.toString(36) + Math.random().toString(36).slice(2, 5);
+  const war = {
+    id,
+    attacker,
+    defender,
+    cityId: city.id,
+    cityName: city.name,
+    cityRid: city.rid,
+    createdAt: now,
+    prepEnd: now + WAR_PREP_MS,
+    battleEnd: now + WAR_PREP_MS + WAR_BATTLE_MS,
+    attAllies: [],
+    defAllies: [],
+    target: WAR_TARGET,
+    status: "active",
+  };
+  await setJSON(WAR_PREFIX + id, war, true);
+  const an = COUNTRY_MAP[attacker]?.name || attacker;
+  const dn = COUNTRY_MAP[defender]?.name || defender;
+  await mailMany(players, [attacker, defender], {
+    type: "info",
+    subject: `⚔️ Підготовка до війни за ${city.name}`,
+    body: `${an} оголосили війну ${dn}. Битва за місто ${city.name} почнеться через 10 хвилин і триватиме годину. Усі кліки гравців підуть на шкалу битви. Залишайся в грі!`,
+  });
+  return { ok: true, war };
+}
+
+async function inviteWarAlly(war, fromCountry, allyCountry) {
+  const side = warSide(war, fromCountry);
+  if (!side) return { ok: false, reason: "Твоя країна не бере участі у війні" };
+  const active = await loadActiveWars();
+  if (active.some((w) => warInvolves(w, allyCountry))) return { ok: false, reason: "Ця країна вже у війні" };
+  const leaderId = await getLeader(allyCountry);
+  if (!leaderId) return { ok: false, reason: "У країни немає лідера" };
+  const fromName = COUNTRY_MAP[fromCountry]?.name || fromCountry;
+  await addMail(leaderId, {
+    type: "war-invite",
+    subject: `Заклик до війни від ${fromName}`,
+    body: `${COUNTRY_MAP[fromCountry]?.flag || ""} ${fromName} просять допомогти у битві за ${war.cityName} на стороні ${side === "att" ? "атаки" : "захисту"}. Якщо приймеш, гравці твоєї країни кликатимуть за цю сторону.`,
+    meta: { warId: war.id, side, fromCountry, toCountry: allyCountry },
+  });
+  return { ok: true };
+}
+
+async function acceptWarInvite(meta) {
+  const war = await getJSON(WAR_PREFIX + meta.warId, true, null);
+  if (!war || war.status === "ended" || Date.now() >= war.battleEnd) return { ok: false, reason: "Війна вже завершилась" };
+  const active = await loadActiveWars();
+  if (active.some((w) => warInvolves(w, meta.toCountry))) return { ok: false, reason: "Твоя країна вже бере участь у війні" };
+  const key = meta.side === "att" ? "attAllies" : "defAllies";
+  const next = { ...war, [key]: [...(war[key] || []), meta.toCountry] };
+  await setJSON(WAR_PREFIX + war.id, next, true);
+  const fromLeader = await getLeader(meta.fromCountry);
+  if (fromLeader) {
+    await addMail(fromLeader, {
+      type: "info",
+      subject: "Союзник приєднався до війни",
+      body: `${COUNTRY_MAP[meta.toCountry]?.name || meta.toCountry} прийняли заклик і вступили в битву за ${war.cityName}.`,
+    });
+  }
+  return { ok: true };
+}
+
+/* Завершення війни: лише один клієнт виконує підсумки (блокування через insert-if-absent) */
+async function finalizeWar(w, players) {
+  const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
+  if (lock !== "ok") return false;
+  const totals = await fetchWarTotals(w.id);
+  const net = totals.att - totals.def;
+  const win = net >= (w.target || WAR_TARGET);
+  const winner = win ? w.attacker : w.defender;
+  await setJSON(
+    WAR_PREFIX + w.id,
+    { ...w, status: "ended", result: { att: totals.att, def: totals.def, net, winner, endedAt: Date.now() } },
+    true
+  );
+  const an = COUNTRY_MAP[w.attacker]?.name || w.attacker;
+  const dn = COUNTRY_MAP[w.defender]?.name || w.defender;
+  let respawnNote = "";
+  if (win) {
+    await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
+    // Якщо в захисника не лишилось областей — він з'являється у вільному місті
+    const nationsNow = await loadNations();
+    if (nationsNow) {
+      const left = Object.values(nationsNow.owners).filter((c) => c === w.defender).length;
+      if (left === 0) {
+        try {
+          const cities = await loadCities();
+          const free = [...cities.byRid.keys()].filter((rid) => !nationsNow.owners[rid]);
+          if (free.length) {
+            const rid = free[Math.floor(Math.random() * free.length)];
+            if ((await sbStorageInsertIfAbsent(TERRITORY_PREFIX + rid, w.defender, true)) === "ok") {
+              respawnNote = " Країна втратила всі території, тож відроджується у вільному місті.";
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+  const attSide = [w.attacker, ...(w.attAllies || [])];
+  const defSide = [w.defender, ...(w.defAllies || [])];
+  const text = win
+    ? `${an} перемогли в битві за ${w.cityName} (баланс +${fmt(net)}) і забрали місто в ${dn}.${respawnNote}`
+    : `${dn} відбили атаку на ${w.cityName}: баланс ${fmt(Math.max(net, 0))} із ${fmt(w.target || WAR_TARGET)}. ${an} не змогли взяти місто.`;
+  await mailMany(players, [...attSide, ...defSide], { type: "info", subject: win ? `Війна завершена: ${w.cityName} захоплено` : `Війна завершена: ${w.cityName} вистояло`, body: text });
+  return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1348,6 +1534,11 @@ export default function App() {
   const [maintenance, setMaintenance] = useState(EMPTY_GAME_STATE.maintenance);
   const [isLeader, setIsLeader] = useState(false);
   const [isAdvisor, setIsAdvisor] = useState(false);
+  const [war, setWar] = useState(null); // активна війна моєї країни (підготовка або битва)
+  const [warTotals, setWarTotals] = useState({ att: 0, def: 0 });
+  const warRef = useRef(null);
+  const warPendingRef = useRef({ warId: null, n: 0, base: 0, loaded: false });
+  const allPlayersRef = useRef([]);
   const gameDataStaleRef = useRef(0);
   const [showTutorial, setShowTutorial] = useState(false);
   const tutorialCheckedRef = useRef(false);
@@ -1717,9 +1908,22 @@ export default function App() {
         if (curEnergy < 1) {
           return { ...prev, energy: curEnergy, lastEnergyTs: Date.now() };
         }
+        /* Під час битви кліки йдуть на шкалу війни, а не на баланс Power */
+        const w = warRef.current;
+        const inBattle = !!w && warPhase(w) === "battle" && !!warSide(w, prev.countryCode);
+        if (inBattle) {
+          const pend = warPendingRef.current;
+          if (pend.warId !== w.id) {
+            pend.warId = w.id;
+            pend.n = 0;
+            pend.base = 0;
+            pend.loaded = false;
+          }
+          pend.n += 1;
+        }
         const updated = {
           ...prev,
-          power: prev.power + 1,
+          power: inBattle ? prev.power : prev.power + 1,
           totalClicks: prev.totalClicks + 1,
           energy: curEnergy - 1,
           lastEnergyTs: Date.now(),
@@ -1761,6 +1965,82 @@ export default function App() {
 
   const displayedEnergy = player ? getCurrentEnergy(player) : 0;
 
+  /* ---- Війна: оновлення стану, відправка кліків, шкала, підсумки ---- */
+  useEffect(() => {
+    warRef.current = war;
+  }, [war]);
+  useEffect(() => {
+    allPlayersRef.current = mergedPlayers;
+  }, [mergedPlayers]);
+
+  const playerIdForWar = player?.id;
+  const playerCountryForWar = player?.countryCode;
+  useEffect(() => {
+    if (!playerIdForWar || !playerCountryForWar || isLegacyCountryCode(playerCountryForWar)) return undefined;
+    let stopped = false;
+    let timer = null;
+
+    const flushClicks = async (w) => {
+      const pend = warPendingRef.current;
+      if (pend.warId !== w.id) {
+        pend.warId = w.id;
+        pend.n = 0;
+        pend.base = 0;
+        pend.loaded = false;
+      }
+      const key = WAR_CLICKS_PREFIX + w.id + ":" + playerIdForWar;
+      if (!pend.loaded) {
+        const rec = await getJSON(key, true, null);
+        pend.base = rec?.n || 0;
+        pend.loaded = true;
+      }
+      if (pend.n > 0) {
+        const take = pend.n;
+        pend.n = 0;
+        pend.base += take;
+        const ok = await setJSON(key, { side: warSide(w, playerCountryForWar), c: playerCountryForWar, n: pend.base }, true);
+        if (!ok) {
+          pend.base -= take;
+          pend.n += take;
+        }
+      }
+    };
+
+    const tick = async () => {
+      let delay = 12000;
+      try {
+        const wars = await loadActiveWars();
+        let mine = wars.find((w) => warInvolves(w, playerCountryForWar)) || null;
+        if (mine && warPhase(mine) === "finish") {
+          await flushClicks(mine);
+          await finalizeWar(mine, allPlayersRef.current);
+          mine = null;
+          await refreshNations();
+          refreshMail();
+        }
+        if (stopped) return;
+        setWar((prev) => (JSON.stringify(prev) === JSON.stringify(mine) ? prev : mine));
+        const phase = mine ? warPhase(mine) : null;
+        if (phase === "battle") {
+          await flushClicks(mine);
+          const totals = await fetchWarTotals(mine.id);
+          if (!stopped) setWarTotals(totals);
+          delay = 3000;
+        } else if (phase === "prep") {
+          delay = 5000;
+        }
+      } catch {
+        /* повторимо на наступному кроці */
+      }
+      if (!stopped) timer = setTimeout(tick, delay);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [playerIdForWar, playerCountryForWar]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="cn-root" style={THEMES[theme]?.vars}>
       <GlobalStyles />
@@ -1799,6 +2079,9 @@ export default function App() {
                 countries={nations.countries}
                 onSetPlayer={setPlayer}
                 onOpenLeaderboard={() => setTab("leaderboard")}
+                war={war}
+                warTotals={warTotals}
+                warPendingRef={warPendingRef}
               />
             )}
             {tab === "leaderboard" && (
@@ -1823,6 +2106,8 @@ export default function App() {
                 unreadCount={unreadCount}
                 onRefreshMail={refreshMail}
                 onRefreshData={() => refreshGameData(true)}
+                war={war}
+                onWarDeclared={(w) => { setWar(w); setTab("clicker"); }}
               />
             )}
             {tab === "profile" && (
@@ -2389,6 +2674,9 @@ function ClickerScreen({
   countries,
   onSetPlayer,
   onOpenLeaderboard,
+  war = null,
+  warTotals = { att: 0, def: 0 },
+  warPendingRef = null,
 }) {
   const country = COUNTRY_MAP[player.countryCode];
   const [effects, setEffects] = useState([]);
@@ -2514,7 +2802,11 @@ function ClickerScreen({
         </div>
       </div>
 
-      <div className="cn-power-block">
+      {war && warSide(war, player.countryCode) && (
+        <WarHud war={war} me={player} isLeader={isLeader} totals={warTotals} pendingRef={warPendingRef} />
+      )}
+
+      <div className="cn-power-block" style={war && warPhase(war) === "battle" && warSide(war, player.countryCode) ? { display: "none" } : undefined}>
         <div className="cn-power-label">POWER</div>
         <div className="cn-power-value-row">
           <span className="cn-power-dots">····</span>
@@ -2613,31 +2905,190 @@ function ClickerScreen({
   );
 }
 
+
+/* ------------------------------------------------------------------ */
+/*  Війна: інтерфейс у Клікері (підготовка / битва)                      */
+/* ------------------------------------------------------------------ */
+
+function fmtClock(ms) {
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(sec).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function WarHud({ war, me, isLeader, totals, pendingRef }) {
+  const [alliesOpen, setAlliesOpen] = useState(false);
+  const now = Date.now();
+  const phase = warPhase(war, now);
+  const att = COUNTRY_MAP[war.attacker];
+  const def = COUNTRY_MAP[war.defender];
+  const mySide = warSide(war, me.countryCode);
+  const canCall = isLeader && (me.countryCode === war.attacker || me.countryCode === war.defender) && phase !== "finish";
+  const pend = pendingRef?.current;
+  const pn = pend && pend.warId === war.id ? pend.n : 0;
+  const attTotal = (totals?.att || 0) + (mySide === "att" ? pn : 0);
+  const defTotal = (totals?.def || 0) + (mySide === "def" ? pn : 0);
+  const target = war.target || WAR_TARGET;
+  const net = attTotal - defTotal;
+  const pct = Math.max(0, Math.min(100, (net / target) * 100));
+  const mine = pend && pend.warId === war.id ? (pend.base || 0) + pn : 0;
+  const allies = (side) => (side === "att" ? war.attAllies : war.defAllies) || [];
+
+  const sideCard = (kind, code, total) => (
+    <div className={"cn-warside cn-warside--" + kind}>
+      <span className="cn-warside-role">{kind === "att" ? "Атака" : "Захист"}</span>
+      <span className="cn-warside-name">
+        <Flag code={code} size={16} /> {COUNTRY_MAP[code]?.name || "—"}
+      </span>
+      {phase === "battle" && <span className="cn-warside-num">{fmt(total)}</span>}
+      {allies(kind).length > 0 && <span className="cn-warside-allies">+{allies(kind).length} союзн.</span>}
+    </div>
+  );
+
+  return (
+    <div className={"cn-warhud cn-warhud--" + (phase === "prep" ? "prep" : "battle")}>
+      <div className="cn-warhud-kicker">
+        <Swords size={14} /> {phase === "prep" ? "ПІДГОТОВКА ДО ВІЙНИ" : "БИТВА ТРИВАЄ"}
+      </div>
+      <div className="cn-warhud-city">
+        {phase === "prep" ? "Війна за місто" : "Битва за місто"} <b>{war.cityName}</b>
+      </div>
+
+      <div className="cn-warhud-sides">
+        {sideCard("att", war.attacker, attTotal)}
+        <span className="cn-warhud-vs">VS</span>
+        {sideCard("def", war.defender, defTotal)}
+      </div>
+
+      {phase === "prep" && (
+        <div className="cn-warhud-count">
+          Битва почнеться через <b>{fmtClock(war.prepEnd - now)}</b>
+        </div>
+      )}
+
+      {phase === "battle" && (
+        <>
+          <div className="cn-warbar" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
+            <div className="cn-warbar-att" style={{ width: Math.max(pct, 3) + "%" }} />
+            <div className="cn-warbar-spark" style={{ left: Math.max(pct, 3) + "%" }} />
+          </div>
+          <div className="cn-warbar-legend">
+            <span>0</span>
+            <span className="cn-warbar-net">Баланс атаки: {net >= 0 ? "+" : "−"}{fmt(Math.abs(net))} / {fmt(target)}</span>
+            <span>{fmt(target)}</span>
+          </div>
+          <div className="cn-warhud-count">
+            До кінця битви <b>{fmtClock(war.battleEnd - now)}</b>
+          </div>
+          <div className="cn-warhud-mine">
+            {mySide === "att" ? "Кліки йдуть на атаку" : "Кліки йдуть на захист"} · твій внесок: <b>{fmt(mine)}</b>
+          </div>
+        </>
+      )}
+
+      {canCall && (
+        <button className="cn-warhud-btn" type="button" onClick={() => { cnSfx.modalOpen(); setAlliesOpen(true); }}>
+          <Handshake size={15} /> Покликати союзників
+        </button>
+      )}
+      {alliesOpen && <WarAlliesModal war={war} me={me} onClose={() => setAlliesOpen(false)} />}
+    </div>
+  );
+}
+
+function WarAlliesModal({ war, me, onClose }) {
+  const [dip, setDip] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [sent, setSent] = useState({});
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    loadDiplomacy().then(setDip);
+  }, []);
+  const close = () => { cnSfx.modalClose(); onClose(); };
+  const mine = me.countryCode;
+  const list = (dip?.allies || [])
+    .filter((x) => x.a === mine || x.b === mine)
+    .map((x) => (x.a === mine ? x.b : x.a))
+    .filter((c) => COUNTRY_MAP[c] && !warInvolves(war, c));
+
+  const invite = async (code) => {
+    setBusy(code);
+    setMsg("");
+    const res = await inviteWarAlly(war, mine, code);
+    if (res.ok) {
+      cnSfx.purchase();
+      setSent((m) => ({ ...m, [code]: true }));
+    } else {
+      cnSfx.error();
+      setMsg("✗ " + res.reason);
+    }
+    setBusy(null);
+  };
+
+  return (
+    <div className="cn-modal-overlay" onClick={close}>
+      <div className="cn-modal-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="cn-modal-header">
+          <div className="cn-modal-title">
+            <Handshake size={16} /> Покликати союзників
+          </div>
+          <button className="cn-icon-btn" type="button" onClick={close} aria-label="Закрити">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="cn-dip-sub" style={{ marginBottom: 8 }}>
+          Лідер союзника отримає лист у Пошті. Коли він прийме, гравці його країни кликатимуть на вашу сторону.
+        </div>
+        {msg && <div className="cn-dev-status-msg">{msg}</div>}
+        <div className="cn-dip-list">
+          {!dip && <div className="cn-lb-empty">Завантаження…</div>}
+          {dip && list.length === 0 && <div className="cn-lb-empty">Немає союзників, яких можна покликати</div>}
+          {list.map((c) => (
+            <div className="cn-dip-row" key={c}>
+              <Flag code={c} size={22} className="cn-country-badge--lg" />
+              <div className="cn-dip-row-name">{COUNTRY_MAP[c].name}</div>
+              <button className="cn-dev-btn" type="button" disabled={busy === c || sent[c]} onClick={() => invite(c)}>
+                {sent[c] ? "Запрошено ✓" : "Покликати"}
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Штаб (HQ)                                                           */
 /* ------------------------------------------------------------------ */
 
 const HQ_SECTIONS = [
   { id: "info", label: "Інформація", Icon: Info, text: "Тут буде докладна інформація про вашу країну: історія, лідер, радники та правила." },
-  { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
+  { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, noSoon: true, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
   { id: "diplomacy", label: "Дипломатія", leaderOnly: true, Icon: Handshake, text: "" },
   { id: "stats", label: "Статистика", Icon: BarChart2, text: "Тут буде статистика країни: розвиток сили, території та внесок гравців." },
   { id: "mail", label: "Пошта", Icon: Mail, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
 ];
 
-function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData }) {
+function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared }) {
   const [view, setView] = useState(null); // null | id розділу | "dev"
   const [pickKind, setPickKind] = useState(null); // null | "ally" | "pact"
   const [dip, setDip] = useState(null);
   const [dipMsg, setDipMsg] = useState("");
   const [lockedMsg, setLockedMsg] = useState("");
+  const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
+  const [warMsg, setWarMsg] = useState("");
 
   const reloadDip = useCallback(async () => {
     setDip(await loadDiplomacy());
   }, []);
   useEffect(() => {
-    if (view === "diplomacy") reloadDip();
+    if (view === "diplomacy" || view === "army") reloadDip();
   }, [view, reloadDip]);
   useEffect(() => {
     if (!lockedMsg) return undefined;
@@ -2689,6 +3140,59 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     reloadDip();
   };
 
+  const declareOn = async (city) => {
+    const target = warPick?.country;
+    setWarPick(null);
+    const res = await declareWar2({
+      attacker: player.countryCode,
+      defender: target,
+      city,
+      owners: nations?.owners,
+      players,
+    });
+    if (res.ok) {
+      cnSfx.purchase();
+      setWarMsg("");
+      onWarDeclared && onWarDeclared(res.war);
+    } else {
+      cnSfx.error();
+      setWarMsg("✗ " + res.reason);
+    }
+  };
+
+  if (view === "army" && warPick) {
+    return (
+      <div className="cn-hq" style={{ "--hq": color }}>
+        <MapScreen
+          players={players}
+          me={player}
+          loading={false}
+          onRefresh={onRefreshData || (() => {})}
+          nations={nations}
+          lang={lang}
+          dip={dip}
+          pick={{
+            step: warPick.step,
+            country: warPick.country,
+            label: warPick.step === "country" ? "Обери країну, на яку нападаєш" : "Обери місто для атаки",
+            onPick: (cid) => {
+              const block = attackBlockReason(dip, player.countryCode, cid);
+              if (block) {
+                cnSfx.error();
+                setWarMsg("✗ " + block);
+                setWarPick(null);
+                return;
+              }
+              setWarPick({ step: "city", country: cid });
+            },
+            onPickCity: declareOn,
+            onCancel: () => setWarPick(null),
+          }}
+        />
+      </div>
+    );
+  }
+
   if (view === "diplomacy" && pickKind) {
     return (
       <div className="cn-hq" style={{ "--hq": color }}>
@@ -2736,7 +3240,17 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           </button>
           <div className="cn-screen-title">{title}</div>
         </div>
-        {view === "diplomacy" ? (
+        {view === "army" ? (
+          <ArmyPanel
+            war={war}
+            msg={warMsg}
+            onDeclare={async () => {
+              setWarMsg("");
+              setDip(await loadDiplomacy());
+              setWarPick({ step: "country" });
+            }}
+          />
+        ) : view === "diplomacy" ? (
           <DiplomacyPanel
             me={player}
             dip={dip}
@@ -2831,7 +3345,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       <div className="cn-hq-grid">
         {HQ_SECTIONS.map((s) => {
           const locked = s.leaderOnly && !isLeader;
-          const soon = ["info", "army", "stats"].includes(s.id);
+          const soon = ["info", "stats"].includes(s.id);
           return (
             <button
               key={s.id}
@@ -2853,6 +3367,35 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   );
 }
 
+
+
+/* Армія (лише лідер): оголошення війни за місто */
+function ArmyPanel({ war, msg, onDeclare }) {
+  const phase = war ? warPhase(war) : null;
+  return (
+    <div className="cn-dip-menu">
+      {msg && <div className="cn-dev-status-msg">{msg}</div>}
+      {war ? (
+        <div className="cn-warhud cn-warhud--prep">
+          <div className="cn-warhud-kicker"><Swords size={14} /> {phase === "battle" ? "ЙДЕ БИТВА" : "ВІЙНА ТРИВАЄ"}</div>
+          <div className="cn-warhud-city">За місто <b>{war.cityName}</b></div>
+          <div className="cn-dip-sub" style={{ textAlign: "center" }}>
+            {COUNTRY_MAP[war.attacker]?.name} проти {COUNTRY_MAP[war.defender]?.name}. Стеж за ходом битви в розділі «Клікер».
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="cn-warhud-declare" onClick={() => { cnSfx.navSwitch(); onDeclare(); }}>
+          <span className="cn-hq-tile-icon"><Swords size={22} /></span>
+          <span className="cn-warhud-declare-text">
+            <b>Оголосити війну</b>
+            <small>Обери країну й місто на карті. 10 хвилин підготовки, далі година битви.</small>
+          </span>
+        </button>
+      )}
+      <div className="cn-dip-sub">Правила: кліки всіх гравців країн-учасниць під час битви йдуть на шкалу. Атака має набрати баланс (кліки атаки мінус кліки захисту) {fmt(WAR_TARGET)} за годину, інакше місто лишається в захисника.</div>
+    </div>
+  );
+}
 
 /* Дипломатія (лише лідер): союзи та пакти про ненапад */
 function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak }) {
@@ -4631,6 +5174,26 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
     [me.id, onRefresh, onRefreshGameData]
   );
 
+  const respondWarInvite2 = useCallback(
+    async (msg, accept) => {
+      setBusyId(msg.id);
+      let res = { ok: true };
+      if (accept) res = await acceptWarInvite(msg.meta);
+      const list = await getMail(me.id);
+      await setJSON(
+        MAIL_PREFIX + me.id,
+        list.map((m) =>
+          m.id === msg.id ? { ...m, read: true, resolved: res.ok ? (accept ? "accepted" : "declined") : "stale", resolvedNote: res.ok ? "" : res.reason } : m
+        ),
+        true
+      );
+      onRefresh();
+      onRefreshGameData && onRefreshGameData();
+      setBusyId(null);
+    },
+    [me.id, onRefresh, onRefreshGameData]
+  );
+
   const respondWarInvite = useCallback(
     async (msg, accept) => {
       setBusyId(msg.id);
@@ -4702,6 +5265,22 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
                         <Ban size={14} /> Відхилити
                       </button>
                     </div>
+                  )}
+                  {m.type === "war-invite" && m.meta && (
+                    m.resolved ? (
+                      <div className="cn-mail-resolved">
+                        {m.resolved === "accepted" ? "✓ Ви вступили у війну" : m.resolved === "declined" ? "✗ Відхилено" : m.resolvedNote || "Вже неактуально"}
+                      </div>
+                    ) : (
+                      <div className="cn-mail-actions">
+                        <button className="cn-mail-action cn-mail-action--accept" disabled={busyId === m.id} onClick={() => respondWarInvite2(m, true)} type="button">
+                          <Check size={14} /> Прийняти
+                        </button>
+                        <button className="cn-mail-action cn-mail-action--decline" disabled={busyId === m.id} onClick={() => respondWarInvite2(m, false)} type="button">
+                          <Ban size={14} /> Відхилити
+                        </button>
+                      </div>
+                    )
                   )}
                   {m.type === "dip-request" && m.meta && (
                     m.resolved ? (
@@ -5347,8 +5926,22 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
     if (r.truceUntil) return { text: "Заборона нападу " + fmtDuration(r.truceUntil - Date.now()), cls: "truce" };
     return null;
   })();
+  const cityPickBtn =
+    pick && pick.step === "city" && selectedCity && selected?.ownerId === pick.country ? (
+      <button
+        className="cn-primary-btn cn-map-pick-btn"
+        type="button"
+        onClick={() => pick.onPickCity({ id: selectedCity.city.i, name: cityName(selectedCity.city), rid: selectedCity.city.rid })}
+      >
+        <span className="cn-primary-btn-label">⚔️ Напасти на {cityName(selectedCity.city)}</span>
+      </button>
+    ) : pick && pick.step === "city" ? (
+      <div className="cn-map-card-sub" style={{ marginTop: 8 }}>
+        Обери місто країни «{COUNTRY_MAP[pick.country]?.name}»
+      </div>
+    ) : null;
   const pickBtn =
-    pick && selectedCountry && kind === "occupied" ? (
+    pick && pick.step === "city" ? null : pick && selectedCountry && kind === "occupied" ? (
       <button className="cn-primary-btn cn-map-pick-btn" type="button" onClick={() => pick.onPick(selectedCountry.id)}>
         <span className="cn-primary-btn-label">Обрати: {selectedCountry.name}</span>
       </button>
@@ -5433,7 +6026,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             </div>
             {relTag && <div className={"cn-rel-tag cn-rel-tag--" + relTag.cls}>{relTag.text}</div>}
             {pick ? (
-              pickBtn
+              pick.step === "city" ? cityPickBtn : pickBtn
             ) : (
               <button className="cn-primary-btn cn-city-attack" type="button" disabled>
                 <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
@@ -5480,7 +6073,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
                 {relTag && <div className={"cn-rel-tag cn-rel-tag--" + relTag.cls}>{relTag.text}</div>}
               </>
             )}
-            {pickBtn}
+            {pick && pick.step === "city" ? cityPickBtn : pickBtn}
           </div>
         )}
       </div>
@@ -7379,6 +7972,38 @@ function GlobalStyles() {
       .cn-dip-sub { font-size: 11px; color: var(--cn-text-dim); }
       .cn-dip-menu { display: flex; flex-direction: column; gap: 10px; }
       .cn-dip-menu .cn-hq-tile { flex-direction: row; justify-content: flex-start; padding: 14px; }
+      .cn-warhud { align-self: stretch; margin: 4px 58px 0 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 18px; background: linear-gradient(160deg, rgba(127,29,29,0.5), rgba(6,16,34,0.9) 60%); border: 1px solid rgba(248,113,113,0.5); box-shadow: 0 0 22px rgba(239,68,68,0.18); }
+      .cn-warhud--prep { background: linear-gradient(160deg, rgba(120,53,15,0.5), rgba(6,16,34,0.9) 60%); border-color: rgba(251,191,36,0.55); box-shadow: 0 0 22px rgba(251,191,36,0.14); }
+      .cn-warhud-kicker { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.22em; color: #FCA5A5; }
+      .cn-warhud--prep .cn-warhud-kicker { color: #FCD34D; }
+      .cn-warhud-city { text-align: center; font-size: 13px; color: var(--cn-text-dim); }
+      .cn-warhud-city b { display: block; font-family: 'Space Grotesk', sans-serif; font-size: 18px; color: #fff; line-height: 1.15; }
+      .cn-warhud-sides { display: flex; align-items: stretch; gap: 8px; }
+      .cn-warhud-vs { align-self: center; font-size: 11px; font-weight: 800; color: #fff; opacity: 0.7; }
+      .cn-warside { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 7px 9px; border-radius: 12px; }
+      .cn-warside--att { align-items: flex-start; text-align: left; background: rgba(239,68,68,0.16); border: 1px solid rgba(239,68,68,0.5); }
+      .cn-warside--def { align-items: flex-end; text-align: right; background: rgba(59,130,246,0.16); border: 1px solid rgba(59,130,246,0.5); }
+      .cn-warside-role { font-size: 9.5px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; opacity: 0.8; color: #fff; }
+      .cn-warside-name { display: flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: #fff; max-width: 100%; line-height: 1.15; word-break: break-word; }
+      .cn-warside-name svg, .cn-warside-name img, .cn-warside-name .cn-flag { flex-shrink: 0; }
+      .cn-warside-num { font-family: 'Space Grotesk', sans-serif; font-size: 17px; font-weight: 800; color: #fff; }
+      .cn-warside-allies { font-size: 10px; color: var(--cn-text-dim); }
+      .cn-warhud-count { text-align: center; font-size: 12.5px; color: var(--cn-text-dim); }
+      .cn-warhud-count b { color: #FBBF24; font-family: 'Space Grotesk', sans-serif; font-size: 15px; }
+      .cn-warhud-mine { text-align: center; font-size: 11.5px; color: var(--cn-text-dim); }
+      .cn-warhud-mine b { color: #fff; }
+      .cn-warbar { position: relative; height: 18px; border-radius: 999px; overflow: hidden; background: linear-gradient(90deg, #1D4ED8, #3B82F6); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18); }
+      .cn-warbar-att { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #B91C1C, #F87171); transition: width 0.6s ease; }
+      .cn-warbar-spark { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: #fff; box-shadow: 0 0 10px #fff; transition: left 0.6s ease; }
+      .cn-warbar-legend { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: var(--cn-text-dimmer); }
+      .cn-warbar-net { font-size: 12px; font-weight: 800; color: #fff; }
+      .cn-warhud-btn { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; border-radius: 12px; cursor: pointer; font-weight: 800; font-size: 12.5px; color: #fff; background: rgba(var(--cn-accent-rgb),0.22); border: 1px solid rgba(var(--cn-accent-rgb),0.55); }
+      .cn-warhud-btn:active { transform: scale(0.97); }
+      .cn-warhud-declare { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 18px; cursor: pointer; text-align: left; color: #fff; background: linear-gradient(160deg, rgba(185,28,28,0.45), rgba(6,16,34,0.85)); border: 1px solid rgba(248,113,113,0.55); }
+      .cn-warhud-declare:active { transform: scale(0.98); }
+      .cn-warhud-declare-text { display: flex; flex-direction: column; gap: 3px; }
+      .cn-warhud-declare-text b { font-size: 16px; font-family: 'Space Grotesk', sans-serif; }
+      .cn-warhud-declare-text small { font-size: 11.5px; color: var(--cn-text-dim); line-height: 1.35; }
       .cn-mail-resolved { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--cn-text-dim); }
       .cn-hq-tile--locked { opacity: 0.5; }
       .cn-hq-lock { position: absolute; top: 7px; right: 7px; color: #FBBF24; }
