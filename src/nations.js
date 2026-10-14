@@ -10,6 +10,7 @@ import { sbStorageGet, sbStorageSet, sbStorageListEntries, sbStorageInsertIfAbse
 
 export const COUNTRY_PREFIX = "country:";
 export const TERRITORY_PREFIX = "terr:";
+export const CITY_OWN_PREFIX = "cityown:"; // перехоплені міста: cityown:<cityKey> → id країни
 export const CHANGELOG_KEY = "changelog";
 
 /* Обмежена палітра кольорів країн (кожна країна має свій колір; лідер може змінити в Панелі управління). */
@@ -31,9 +32,10 @@ export function newCountryId() {
 
 /* Завантажує всі країни й володіння. Повертає null, якщо база недоступна. */
 export async function loadNations() {
-  const [cEntries, tEntries] = await Promise.all([
+  const [cEntries, tEntries, oEntries] = await Promise.all([
     sbStorageListEntries(COUNTRY_PREFIX, true),
     sbStorageListEntries(TERRITORY_PREFIX, true),
+    sbStorageListEntries(CITY_OWN_PREFIX, true),
   ]);
   if (!cEntries || !tEntries) return null;
   const countries = [];
@@ -52,7 +54,9 @@ export async function loadNations() {
   for (const rid in owners) counts[owners[rid]] = (counts[owners[rid]] || 0) + 1;
   for (const c of countries) c.regionCount = counts[c.id] || 0;
   countries.sort((a, b) => (b.regionCount || 0) - (a.regionCount || 0) || (a.createdAt || 0) - (b.createdAt || 0));
-  return { countries, owners };
+  const cityOwners = {};
+  for (const e of oEntries || []) cityOwners[e.key.slice(CITY_OWN_PREFIX.length)] = e.value;
+  return { countries, owners, cityOwners };
 }
 
 export function pickFreeColor(countries) {

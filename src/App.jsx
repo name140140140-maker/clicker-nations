@@ -61,7 +61,7 @@ import {
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
-import { fmtPopulation, loadCities } from "./map/cities";
+import { fmtPopulation, loadCities, cityKey } from "./map/cities";
 import {
   loadNations,
   createCountry,
@@ -72,6 +72,7 @@ import {
   saveChangelog,
   COUNTRY_COLORS,
   TERRITORY_PREFIX,
+  CITY_OWN_PREFIX,
   NAME_MIN,
   NAME_MAX,
 } from "./nations";
@@ -765,10 +766,10 @@ async function mailMany(players, codes, message) {
   await Promise.all(targets.map((pl) => addMail(pl.id, message).catch(() => null)));
 }
 
-async function declareWar2({ attacker, defender, city, owners, players }) {
+async function declareWar2({ attacker, defender, city, owners, cityOwners, players }) {
   if (!COUNTRY_MAP[defender]) return { ok: false, reason: "Країну не знайдено" };
   if (attacker === defender) return { ok: false, reason: "Не можна нападати на себе" };
-  if (owners && owners[city.rid] !== defender) return { ok: false, reason: "Це місто вже не належить цій країні" };
+  if (owners && ((cityOwners && cityOwners[city.key]) || owners[city.rid]) !== defender) return { ok: false, reason: "Це місто вже не належить цій країні" };
   const blocked = attackBlockReason(await loadDiplomacy(), attacker, defender);
   if (blocked) return { ok: false, reason: blocked };
   const active = await loadActiveWars();
@@ -783,6 +784,7 @@ async function declareWar2({ attacker, defender, city, owners, players }) {
     cityId: city.id,
     cityName: city.name,
     cityRid: city.rid,
+    cityKey: city.key || "",
     createdAt: now,
     prepEnd: now + WAR_PREP_MS,
     battleEnd: now + WAR_PREP_MS + WAR_BATTLE_MS,
@@ -855,19 +857,21 @@ async function finalizeWar(w, players, forcedWinner = null) {
   const dn = COUNTRY_MAP[w.defender]?.name || w.defender;
   let respawnNote = "";
   if (win) {
-    await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
-    // Якщо в захисника не лишилось областей — він з'являється у вільному місті
+    if (w.cityKey) await storageSet(CITY_OWN_PREFIX + w.cityKey, w.attacker, true);
+    else await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
+    // Якщо в захисника не лишилось ні областей, ні міст — він з'являється у вільній області
     const nationsNow = await loadNations();
     if (nationsNow) {
-      const left = Object.values(nationsNow.owners).filter((c) => c === w.defender).length;
-      if (left === 0) {
+      const regionsLeft = Object.values(nationsNow.owners).filter((c) => c === w.defender).length;
+      const citiesLeft = Object.values(nationsNow.cityOwners || {}).filter((c) => c === w.defender).length;
+      if (regionsLeft === 0 && citiesLeft === 0) {
         try {
           const cities = await loadCities();
           const free = [...cities.byRid.keys()].filter((rid) => !nationsNow.owners[rid]);
           if (free.length) {
             const rid = free[Math.floor(Math.random() * free.length)];
             if ((await sbStorageInsertIfAbsent(TERRITORY_PREFIX + rid, w.defender, true)) === "ok") {
-              respawnNote = " Країна втратила всі території, тож відроджується у вільному місті.";
+              respawnNote = " Країна втратила все, тож відроджується у вільній області.";
             }
           }
         } catch {
@@ -3148,6 +3152,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       defender: target,
       city,
       owners: nations?.owners,
+      cityOwners: nations?.cityOwners,
       players,
     });
     if (res.ok) {
@@ -6016,7 +6021,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
       <button
         className="cn-primary-btn cn-map-pick-btn"
         type="button"
-        onClick={() => pick.onPickCity({ id: selectedCity.city.i, name: cityName(selectedCity.city), rid: selectedCity.city.rid })}
+        onClick={() => pick.onPickCity({ id: selectedCity.city.i, name: cityName(selectedCity.city), rid: selectedCity.city.rid, key: cityKey(selectedCity.city) })}
       >
         <span className="cn-primary-btn-label">⚔️ Напасти на {cityName(selectedCity.city)}</span>
       </button>
@@ -6073,6 +6078,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
               setSelected((prev) => (prev?.rid === r.rid ? null : r));
             }}
             showCities
+            cityOwners={nations?.cityOwners}
             lang={lang}
             selectedCityId={selectedCity ? selectedCity.city.i : null}
             onSelectCity={(sel) => {
