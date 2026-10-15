@@ -148,7 +148,7 @@ function applyOfflineAutoClicker(rec) {
 const ENERGY_REGEN_PER_SEC = 1;
 const ID_KEY = "my-player-id";
 const TUTORIAL_KEY = "tutorial-done-v1";
-const TOS_KEY = "tos-accepted-v1";
+const TOS_KEY = "tos-accepted-v2"; // v2: додано пункт про збір персональних даних
 const PLAYER_PREFIX = "players:";
 // Мапінг Telegram ID -> playerId. Гравець зберігається під рандомним genId(),
 // тому щоб серверний webhook міг знайти правильний запис після оплати,
@@ -1536,6 +1536,17 @@ const TRANSLATIONS = {
     es: "Antes de empezar a jugar, revisa los términos: el juego es solo con fines de entretenimiento, los objetos virtuales no tienen valor monetario real, y la administración puede actualizar las reglas. Al aceptar, confirmas tu acuerdo con estos términos.",
     ar: "قبل بدء اللعب، يرجى مراجعة الشروط: اللعبة لأغراض الترفيه فقط، والعناصر الافتراضية ليس لها قيمة نقدية حقيقية، ويجوز للإدارة تحديث القواعد. بالموافقة، فإنك تؤكد موافقتك على هذه الشروط.",
   },
+  tos_privacy: {
+    uk: "Збір персональних даних: гра збирає й зберігає дані твого акаунта Telegram (ідентифікатор, ім'я, @username), ігровий прогрес і дії в грі, а також технічні дані підключення (IP-адресу, приблизну геолокацію, провайдера й час входу). Ці дані потрібні для роботи гри, рейтингів, захисту від шахрайства й підтримки. Вони зберігаються в базі даних гри та доступні лише адміністрації. Погоджуючись, ти даєш згоду на таку обробку даних.",
+    pl: "Gromadzenie danych osobowych: gra gromadzi i przechowuje dane Twojego konta Telegram (identyfikator, imię, @username), postęp i działania w grze oraz dane techniczne połączenia (adres IP, przybliżoną lokalizację, dostawcę internetu i czas logowania). Dane te są potrzebne do działania gry, rankingów, ochrony przed nadużyciami i wsparcia. Są przechowywane w bazie danych gry i dostępne tylko dla administracji. Akceptując, wyrażasz zgodę na takie przetwarzanie danych.",
+    de: "Erhebung personenbezogener Daten: Das Spiel erfasst und speichert die Daten deines Telegram-Kontos (ID, Name, @username), deinen Spielfortschritt und deine Aktionen sowie technische Verbindungsdaten (IP-Adresse, ungefähren Standort, Anbieter und Anmeldezeit). Diese Daten werden für den Spielbetrieb, Ranglisten, Missbrauchsschutz und Support benötigt. Sie werden in der Spieldatenbank gespeichert und sind nur für die Verwaltung zugänglich. Mit der Zustimmung willigst du in diese Datenverarbeitung ein.",
+    ru: "Сбор персональных данных: игра собирает и хранит данные твоего аккаунта Telegram (идентификатор, имя, @username), игровой прогресс и действия в игре, а также технические данные подключения (IP-адрес, примерную геолокацию, провайдера и время входа). Эти данные нужны для работы игры, рейтингов, защиты от мошенничества и поддержки. Они хранятся в базе данных игры и доступны только администрации. Соглашаясь, ты даёшь согласие на такую обработку данных.",
+    it: "Raccolta di dati personali: il gioco raccoglie e conserva i dati del tuo account Telegram (ID, nome, @username), i progressi e le azioni di gioco e i dati tecnici di connessione (indirizzo IP, posizione approssimativa, provider e orario di accesso). Questi dati servono per il funzionamento del gioco, le classifiche, la protezione da abusi e l'assistenza. Sono conservati nel database del gioco e accessibili solo all'amministrazione. Accettando, acconsenti a tale trattamento dei dati.",
+    fr: "Collecte de données personnelles : le jeu collecte et conserve les données de votre compte Telegram (identifiant, nom, @username), votre progression et vos actions en jeu, ainsi que des données techniques de connexion (adresse IP, localisation approximative, fournisseur d'accès et heure de connexion). Ces données sont nécessaires au fonctionnement du jeu, aux classements, à la lutte contre la fraude et à l'assistance. Elles sont stockées dans la base de données du jeu et accessibles uniquement à l'administration. En acceptant, vous consentez à ce traitement des données.",
+    en: "Personal data collection: the game collects and stores your Telegram account data (ID, name, @username), your game progress and in-game actions, and technical connection data (IP address, approximate location, internet provider and login time). This data is needed to run the game, rankings, fraud protection and support. It is stored in the game's database and is accessible only to the administration. By accepting, you consent to this processing of data.",
+    es: "Recopilación de datos personales: el juego recopila y almacena los datos de tu cuenta de Telegram (ID, nombre, @username), tu progreso y acciones en el juego, y datos técnicos de conexión (dirección IP, ubicación aproximada, proveedor de internet y hora de acceso). Estos datos son necesarios para el funcionamiento del juego, las clasificaciones, la protección contra fraudes y el soporte. Se almacenan en la base de datos del juego y solo son accesibles para la administración. Al aceptar, consientes este tratamiento de datos.",
+    ar: "جمع البيانات الشخصية: تجمع اللعبة وتخزّن بيانات حسابك في تيليجرام (المعرّف والاسم و@username) وتقدمك وأفعالك داخل اللعبة، إضافةً إلى بيانات الاتصال التقنية (عنوان IP والموقع التقريبي ومزوّد الإنترنت ووقت الدخول). هذه البيانات لازمة لتشغيل اللعبة والتصنيفات والحماية من الاحتيال والدعم. تُحفظ في قاعدة بيانات اللعبة ولا يطّلع عليها سوى الإدارة. بالموافقة، فإنك توافق على هذه المعالجة للبيانات.",
+  },
   tos_accept: { uk: "Погоджуюсь і граю", pl: "Zgadzam się i gram", de: "Zustimmen und spielen", ru: "Соглашаюсь и играю", it: "Accetto e gioco", fr: "J'accepte et je joue", en: "Agree and play", es: "Aceptar y jugar", ar: "أوافق وألعب" },
   tos_decline: { uk: "Не погоджуюсь", pl: "Nie zgadzam się", de: "Ablehnen", ru: "Не соглашаюсь", it: "Non accetto", fr: "Je refuse", en: "Decline", es: "Rechazar", ar: "أرفض" },
   tos_declined_title: { uk: "Гру не розпочато", pl: "Gra nie została rozpoczęta", de: "Spiel nicht gestartet", ru: "Игра не начата", it: "Gioco non avviato", fr: "Jeu non démarré", en: "Game not started", es: "Juego no iniciado", ar: "لم تبدأ اللعبة" },
@@ -2470,11 +2481,23 @@ function TutorialModal({ onClose, lang = "uk" }) {
 /*  Boot screen                                                         */
 /* ------------------------------------------------------------------ */
 
+/* Логотип гри: глобус із літерою W посередині. Малюється SVG, колір береться з акценту теми. */
+function GameLogo({ size = 40, className }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <circle cx="32" cy="32" r="27" fill="currentColor" fillOpacity="0.14" stroke="currentColor" strokeWidth="3" />
+      <ellipse cx="32" cy="32" rx="11" ry="27" stroke="currentColor" strokeWidth="1.6" strokeOpacity="0.4" />
+      <path d="M5.5 32h53" stroke="currentColor" strokeWidth="1.6" strokeOpacity="0.4" />
+      <path d="M17 21l6.5 21.5L32 28l8.5 14.5L47 21" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function BootScreen({ lang = "uk" }) {
   return (
     <div className="cn-boot">
       <div className="cn-boot-glow" />
-      <Globe2 size={40} className="cn-boot-icon" />
+      <GameLogo size={56} className="cn-boot-icon" />
       <div className="cn-boot-title">WORLD CLICKER</div>
       <div className="cn-boot-sub">{t(lang, "boot_loading")}</div>
     </div>
@@ -2490,7 +2513,7 @@ function LanguageSelectScreen({ lang, onSetLanguage, onContinue }) {
     <div className="cn-tos-screen">
       <div className="cn-tos-glow" />
       <div className="cn-tos-card">
-        <Globe2 size={36} className="cn-tos-icon" />
+        <GameLogo size={48} className="cn-tos-icon" />
         <div className="cn-tos-title">{t(lang, "lang_select_title")}</div>
         <div className="cn-tos-body">{t(lang, "lang_select_sub")}</div>
         <div className="cn-lang-select-grid">
@@ -2533,6 +2556,7 @@ function TosGateScreen({ lang, onAccept, onDecline }) {
         <ScrollText size={36} className="cn-tos-icon" />
         <div className="cn-tos-title">{t(lang, "tos_title")}</div>
         <div className="cn-tos-body">{t(lang, "tos_body")}</div>
+        <div className="cn-tos-body cn-tos-privacy">{t(lang, "tos_privacy")}</div>
         <div className="cn-tos-actions">
           <button className="cn-primary-btn" type="button" onClick={onAccept}>
             <span className="cn-primary-btn-label">{t(lang, "tos_accept")}</span>
@@ -2669,7 +2693,7 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
     return (
       <div className="cn-onboard">
         <div className="cn-onboard-header">
-          <Globe2 size={40} className="cn-onboard-icon" />
+          <GameLogo size={56} className="cn-onboard-icon" />
           <div className="cn-onboard-title">WORLD CLICKER</div>
           <div className="cn-onboard-sub">{t(lang, "onboard_sub")}</div>
         </div>
@@ -4661,7 +4685,7 @@ function ProfileScreen({
         <div className="cn-profile-stats-divider" />
 
         <button className="cn-profile-stats-item" type="button" onClick={() => setCountryPickerOpen(true)}>
-          <span className="cn-profile-stats-icon"><Globe2 size={18} /></span>
+          <span className="cn-profile-stats-icon"><GameLogo size={18} /></span>
           <span className="cn-profile-stats-text">
             <span className="cn-profile-stats-label">Країна</span>
             <span className="cn-profile-stats-value cn-profile-stats-value--country">
@@ -4795,7 +4819,7 @@ function ProfileScreen({
           <div className="cn-modal-sheet" onClick={(e) => e.stopPropagation()}>
             <div className="cn-modal-header">
               <div className="cn-modal-title">
-                <Globe2 size={16} /> Змінити країну
+                <GameLogo size={16} /> Змінити країну
               </div>
               <button className="cn-icon-btn" type="button" onClick={() => setCountryPickerOpen(false)} aria-label="Закрити">
                 <X size={16} />
@@ -5035,7 +5059,7 @@ function PlayerPeekModal({ player, players, onClose }) {
           <div className="cn-profile-stats-divider" />
 
           <div className="cn-profile-stats-item cn-profile-stats-item--static">
-            <span className="cn-profile-stats-icon"><Globe2 size={18} /></span>
+            <span className="cn-profile-stats-icon"><GameLogo size={18} /></span>
             <span className="cn-profile-stats-text">
               <span className="cn-profile-stats-label">Країна</span>
               <span className="cn-profile-stats-value cn-profile-stats-value--country">
@@ -6070,7 +6094,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
       </div>
 
       <div className="cn-settings-section-title">
-        <Globe2 size={14} /> {t(lang, "settings_language")}
+        <GameLogo size={14} /> {t(lang, "settings_language")}
       </div>
       <div className="cn-lang-grid">
         {LANGUAGES.map((l) => (
@@ -7062,6 +7086,7 @@ function GlobalStyles() {
         text-shadow: 0 0 20px rgba(var(--cn-accent-rgb),0.3);
       }
       .cn-tos-body { font-size: 13.5px; line-height: 1.6; color: var(--cn-text-dim); }
+      .cn-tos-privacy { margin-top: 10px; }
       .cn-tos-actions { width: 100%; display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
       .cn-tos-decline-btn {
         background: transparent; border: none; color: var(--cn-text-dimmer); font-size: 13px;
