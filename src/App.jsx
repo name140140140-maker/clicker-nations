@@ -148,7 +148,7 @@ function applyOfflineAutoClicker(rec) {
 const ENERGY_REGEN_PER_SEC = 1;
 const ID_KEY = "my-player-id";
 const TUTORIAL_KEY = "tutorial-done-v1";
-const TOS_KEY = "tos-accepted-v2"; // v2: додано пункт про збір персональних даних
+const TOS_KEY = "tos-accepted-v2"; // v2: оновлена угода (згадка про персональні дані)
 const PLAYER_PREFIX = "players:";
 // Мапінг Telegram ID -> playerId. Гравець зберігається під рандомним genId(),
 // тому щоб серверний webhook міг знайти правильний запис після оплати,
@@ -1526,26 +1526,15 @@ const TRANSLATIONS = {
 
   tos_title: { uk: "Угода користувача", pl: "Umowa użytkownika", de: "Nutzungsvereinbarung", ru: "Пользовательское соглашение", it: "Accordo utente", fr: "Accord utilisateur", en: "User Agreement", es: "Acuerdo de usuario", ar: "اتفاقية المستخدم" },
   tos_body: {
-    uk: "Перш ніж почати гру, будь ласка, ознайомся з умовами: гра призначена для розважальних цілей, віртуальні предмети не мають реальної грошової вартості, а адміністрація може оновлювати правила гри. Погоджуючись, ти підтверджуєш згоду з цими умовами.",
-    pl: "Zanim zaczniesz grać, zapoznaj się z warunkami: gra ma charakter rozrywkowy, przedmioty wirtualne nie mają realnej wartości pieniężnej, a administracja może aktualizować zasady gry. Akceptując, potwierdzasz zgodę na te warunki.",
-    de: "Bevor du spielst, lies bitte die Bedingungen: Das Spiel dient der Unterhaltung, virtuelle Gegenstände haben keinen realen Geldwert, und die Regeln können von der Verwaltung aktualisiert werden. Mit der Zustimmung akzeptierst du diese Bedingungen.",
-    ru: "Прежде чем начать игру, ознакомься с условиями: игра предназначена для развлечения, виртуальные предметы не имеют реальной денежной стоимости, а администрация может обновлять правила игры. Соглашаясь, ты подтверждаешь согласие с этими условиями.",
-    it: "Prima di iniziare a giocare, leggi i termini: il gioco è a scopo di intrattenimento, gli oggetti virtuali non hanno valore monetario reale e l'amministrazione può aggiornare le regole. Accettando confermi di essere d'accordo con questi termini.",
-    fr: "Avant de commencer à jouer, veuillez lire les conditions : le jeu est destiné au divertissement, les objets virtuels n'ont pas de valeur monétaire réelle, et l'administration peut mettre à jour les règles. En acceptant, vous confirmez votre accord.",
-    en: "Before you start playing, please review the terms: the game is for entertainment purposes only, virtual items have no real monetary value, and the administration may update the rules. By accepting, you confirm your agreement with these terms.",
-    es: "Antes de empezar a jugar, revisa los términos: el juego es solo con fines de entretenimiento, los objetos virtuales no tienen valor monetario real, y la administración puede actualizar las reglas. Al aceptar, confirmas tu acuerdo con estos términos.",
-    ar: "قبل بدء اللعب، يرجى مراجعة الشروط: اللعبة لأغراض الترفيه فقط، والعناصر الافتراضية ليس لها قيمة نقدية حقيقية، ويجوز للإدارة تحديث القواعد. بالموافقة، فإنك تؤكد موافقتك على هذه الشروط.",
-  },
-  tos_privacy: {
-    uk: "Збір персональних даних: гра збирає й зберігає дані твого акаунта Telegram (ідентифікатор, ім'я, @username), ігровий прогрес і дії в грі, а також технічні дані підключення (IP-адресу, приблизну геолокацію, провайдера й час входу). Ці дані потрібні для роботи гри, рейтингів, захисту від шахрайства й підтримки. Вони зберігаються в базі даних гри та доступні лише адміністрації. Погоджуючись, ти даєш згоду на таку обробку даних.",
-    pl: "Gromadzenie danych osobowych: gra gromadzi i przechowuje dane Twojego konta Telegram (identyfikator, imię, @username), postęp i działania w grze oraz dane techniczne połączenia (adres IP, przybliżoną lokalizację, dostawcę internetu i czas logowania). Dane te są potrzebne do działania gry, rankingów, ochrony przed nadużyciami i wsparcia. Są przechowywane w bazie danych gry i dostępne tylko dla administracji. Akceptując, wyrażasz zgodę na takie przetwarzanie danych.",
-    de: "Erhebung personenbezogener Daten: Das Spiel erfasst und speichert die Daten deines Telegram-Kontos (ID, Name, @username), deinen Spielfortschritt und deine Aktionen sowie technische Verbindungsdaten (IP-Adresse, ungefähren Standort, Anbieter und Anmeldezeit). Diese Daten werden für den Spielbetrieb, Ranglisten, Missbrauchsschutz und Support benötigt. Sie werden in der Spieldatenbank gespeichert und sind nur für die Verwaltung zugänglich. Mit der Zustimmung willigst du in diese Datenverarbeitung ein.",
-    ru: "Сбор персональных данных: игра собирает и хранит данные твоего аккаунта Telegram (идентификатор, имя, @username), игровой прогресс и действия в игре, а также технические данные подключения (IP-адрес, примерную геолокацию, провайдера и время входа). Эти данные нужны для работы игры, рейтингов, защиты от мошенничества и поддержки. Они хранятся в базе данных игры и доступны только администрации. Соглашаясь, ты даёшь согласие на такую обработку данных.",
-    it: "Raccolta di dati personali: il gioco raccoglie e conserva i dati del tuo account Telegram (ID, nome, @username), i progressi e le azioni di gioco e i dati tecnici di connessione (indirizzo IP, posizione approssimativa, provider e orario di accesso). Questi dati servono per il funzionamento del gioco, le classifiche, la protezione da abusi e l'assistenza. Sono conservati nel database del gioco e accessibili solo all'amministrazione. Accettando, acconsenti a tale trattamento dei dati.",
-    fr: "Collecte de données personnelles : le jeu collecte et conserve les données de votre compte Telegram (identifiant, nom, @username), votre progression et vos actions en jeu, ainsi que des données techniques de connexion (adresse IP, localisation approximative, fournisseur d'accès et heure de connexion). Ces données sont nécessaires au fonctionnement du jeu, aux classements, à la lutte contre la fraude et à l'assistance. Elles sont stockées dans la base de données du jeu et accessibles uniquement à l'administration. En acceptant, vous consentez à ce traitement des données.",
-    en: "Personal data collection: the game collects and stores your Telegram account data (ID, name, @username), your game progress and in-game actions, and technical connection data (IP address, approximate location, internet provider and login time). This data is needed to run the game, rankings, fraud protection and support. It is stored in the game's database and is accessible only to the administration. By accepting, you consent to this processing of data.",
-    es: "Recopilación de datos personales: el juego recopila y almacena los datos de tu cuenta de Telegram (ID, nombre, @username), tu progreso y acciones en el juego, y datos técnicos de conexión (dirección IP, ubicación aproximada, proveedor de internet y hora de acceso). Estos datos son necesarios para el funcionamiento del juego, las clasificaciones, la protección contra fraudes y el soporte. Se almacenan en la base de datos del juego y solo son accesibles para la administración. Al aceptar, consientes este tratamiento de datos.",
-    ar: "جمع البيانات الشخصية: تجمع اللعبة وتخزّن بيانات حسابك في تيليجرام (المعرّف والاسم و@username) وتقدمك وأفعالك داخل اللعبة، إضافةً إلى بيانات الاتصال التقنية (عنوان IP والموقع التقريبي ومزوّد الإنترنت ووقت الدخول). هذه البيانات لازمة لتشغيل اللعبة والتصنيفات والحماية من الاحتيال والدعم. تُحفظ في قاعدة بيانات اللعبة ولا يطّلع عليها سوى الإدارة. بالموافقة، فإنك توافق على هذه المعالجة للبيانات.",
+    uk: "Гра розважальна, віртуальні предмети не мають реальної вартості. Гра збирає персональні дані, потрібні для її роботи. Погоджуючись, ти приймаєш ці умови.",
+    pl: "Gra ma charakter rozrywkowy, przedmioty wirtualne nie mają realnej wartości. Gra zbiera dane osobowe potrzebne do jej działania. Akceptując, przyjmujesz te warunki.",
+    de: "Das Spiel dient der Unterhaltung, virtuelle Gegenstände haben keinen realen Wert. Das Spiel erhebt personenbezogene Daten, die für den Betrieb nötig sind. Mit der Zustimmung akzeptierst du diese Bedingungen.",
+    ru: "Игра развлекательная, виртуальные предметы не имеют реальной стоимости. Игра собирает персональные данные, необходимые для её работы. Соглашаясь, ты принимаешь эти условия.",
+    it: "Il gioco è di intrattenimento, gli oggetti virtuali non hanno valore reale. Il gioco raccoglie dati personali necessari al suo funzionamento. Accettando, accetti questi termini.",
+    fr: "Le jeu est un divertissement, les objets virtuels n'ont aucune valeur réelle. Le jeu collecte des données personnelles nécessaires à son fonctionnement. En acceptant, vous acceptez ces conditions.",
+    en: "The game is for entertainment, virtual items have no real value. The game collects personal data needed for it to work. By accepting, you agree to these terms.",
+    es: "El juego es de entretenimiento, los objetos virtuales no tienen valor real. El juego recopila datos personales necesarios para su funcionamiento. Al aceptar, aceptas estos términos.",
+    ar: "اللعبة للترفيه، والعناصر الافتراضية ليس لها قيمة حقيقية. تجمع اللعبة بيانات شخصية لازمة لعملها. بالموافقة، فإنك تقبل هذه الشروط.",
   },
   tos_accept: { uk: "Погоджуюсь і граю", pl: "Zgadzam się i gram", de: "Zustimmen und spielen", ru: "Соглашаюсь и играю", it: "Accetto e gioco", fr: "J'accepte et je joue", en: "Agree and play", es: "Aceptar y jugar", ar: "أوافق وألعب" },
   tos_decline: { uk: "Не погоджуюсь", pl: "Nie zgadzam się", de: "Ablehnen", ru: "Не соглашаюсь", it: "Non accetto", fr: "Je refuse", en: "Decline", es: "Rechazar", ar: "أرفض" },
@@ -2556,7 +2545,6 @@ function TosGateScreen({ lang, onAccept, onDecline }) {
         <ScrollText size={36} className="cn-tos-icon" />
         <div className="cn-tos-title">{t(lang, "tos_title")}</div>
         <div className="cn-tos-body">{t(lang, "tos_body")}</div>
-        <div className="cn-tos-body cn-tos-privacy">{t(lang, "tos_privacy")}</div>
         <div className="cn-tos-actions">
           <button className="cn-primary-btn" type="button" onClick={onAccept}>
             <span className="cn-primary-btn-label">{t(lang, "tos_accept")}</span>
@@ -7086,7 +7074,6 @@ function GlobalStyles() {
         text-shadow: 0 0 20px rgba(var(--cn-accent-rgb),0.3);
       }
       .cn-tos-body { font-size: 13.5px; line-height: 1.6; color: var(--cn-text-dim); }
-      .cn-tos-privacy { margin-top: 10px; }
       .cn-tos-actions { width: 100%; display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
       .cn-tos-decline-btn {
         background: transparent; border: none; color: var(--cn-text-dimmer); font-size: 13px;
