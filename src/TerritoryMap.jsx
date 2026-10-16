@@ -132,7 +132,7 @@ function addGeoJsonSource(map, id, blob, options) {
 const worldCache = { model: null, regionsBlob: null, bordersBlob: null };
 
 const TerritoryMap = forwardRef(function TerritoryMap(
-  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null },
+  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null, onPointPick = null, overlay = null },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -180,7 +180,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
   });
   // Актуальні пропси для довгоживучих обробників карти.
   const latest = useRef({});
-  latest.current = { onSelectRegion, owners, countries, myCountryId, mode, onSelectCity, lang, cityOwners };
+  latest.current = { onSelectRegion, owners, countries, myCountryId, mode, onSelectCity, lang, cityOwners, onPointPick };
 
   useImperativeHandle(ref, () => ({
     flyToRid(rid) {
@@ -190,6 +190,17 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       const idx = model.indexByRid.get(String(rid));
       if (idx === undefined) return;
       fitRegion(map, model, [idx], 5.5);
+    },
+    flyTo(lng, lat, zoom = 5) {
+      const map = mapRef.current;
+      if (map) map.flyTo({ center: [lng, lat], zoom, duration: 800 });
+    },
+    // Скільки кілометрів у одному пікселі на поточному масштабі (для прив'язки кліків і радіусів).
+    getPxKm() {
+      const map = mapRef.current;
+      if (!map) return 5;
+      const lat = map.getCenter().lat;
+      return (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, map.getZoom() + 1) / 1000;
     },
   }));
 
@@ -330,8 +341,47 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           },
         });
 
+        // Ігрові об'єкти (бізнеси, ППО, маршрути дронів): один GeoJSON-джерело "ovl", малюється поверх областей.
+        map.addSource("ovl", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+        map.addLayer({ id: "ovl-zone-fill", type: "fill", source: "ovl", filter: ["==", ["get", "kind"], "zone"], paint: { "fill-color": ["get", "c"], "fill-opacity": 0.16 } });
+        map.addLayer({ id: "ovl-zone-line", type: "line", source: "ovl", filter: ["==", ["get", "kind"], "zone"], paint: { "line-color": ["get", "c"], "line-width": 2, "line-dasharray": [2, 2], "line-opacity": 0.9 } });
+        map.addLayer({ id: "ovl-route", type: "line", source: "ovl", filter: ["==", ["get", "kind"], "route"], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "c"], "line-width": 3, "line-dasharray": [1.5, 1.5], "line-opacity": 0.95 } });
+        map.addLayer({
+          id: "ovl-points", type: "circle", source: "ovl", filter: ["==", ["geometry-type"], "Point"],
+          paint: { "circle-radius": ["get", "r"], "circle-color": ["get", "c"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 2, "circle-opacity": 0.95 },
+        });
+        map.addLayer({
+          id: "ovl-labels", type: "symbol", source: "ovl", filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "t"], ""]],
+          layout: { "text-field": ["get", "t"], "text-font": LABEL_FONT, "text-size": 11, "text-offset": [0, 1.7], "text-anchor": "top", "text-allow-overlap": true },
+          paint: { "text-color": "#ffffff", "text-halo-color": "rgba(5,12,28,0.9)", "text-halo-width": 1.6 },
+        });
+
         map.on("click", (event) => {
           const w = worldRef.current;
+          // Режим вибору точки (бізнес, ППО, маршрут дрона): віддаємо координати й власника території під пальцем.
+          if (latest.current.onPointPick) {
+            const t0 = map.queryRenderedFeatures(event.point, { layers: ["regions-fill"] })[0];
+            let ownerId = "";
+            let rid = "";
+            if (t0 && t0.id !== undefined && w.model) {
+              const i0 = Number(t0.id);
+              const r0 = w.model.regions[i0];
+              if (r0) {
+                rid = r0.rid;
+                ownerId = w.ownerByIndex[i0] || "";
+                const sp = w.split.get(r0.rid);
+                if (sp) {
+                  for (const z of sp.zones.values()) {
+                    if (z.polys.some((poly) => pointInPolygon(event.lngLat.lng, event.lngLat.lat, poly))) { ownerId = z.owner; break; }
+                  }
+                }
+              }
+            }
+            const lat0 = event.lngLat.lat;
+            const pxKm = (156543.03392 * Math.cos((lat0 * Math.PI) / 180)) / Math.pow(2, map.getZoom() + 1) / 1000;
+            latest.current.onPointPick({ lng: event.lngLat.lng, lat: lat0, ownerId, rid, pxKm });
+            return;
+          }
           // місто має пріоритет: хіт-зона трохи більша за маркер (зручно пальцем)
           const cityLayers = CITY_TIERS.map((t) => "cities-dot-" + t.id).filter((id) => map.getLayer(id));
           if (cityLayers.length && w.cities) {
@@ -386,6 +436,21 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Ігрові об'єкти: оновлюємо дані джерела "ovl" (бізнеси, ППО, дрон) і тримаємо їх над шарами міст.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== "ready") return;
+    const src = map.getSource("ovl");
+    if (src) src.setData(overlay || { type: "FeatureCollection", features: [] });
+  }, [overlay, status]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== "ready") return;
+    for (const id of ["ovl-zone-fill", "ovl-zone-line", "ovl-route", "ovl-points", "ovl-labels"]) {
+      if (map.getLayer(id)) map.moveLayer(id);
+    }
+  }, [citiesReady, status]);
 
   // 2. Власники й кольори → feature-state областей та їхніх кордонів (лише змінені).
   useEffect(() => {

@@ -78,6 +78,7 @@ import {
 } from "./nations";
 import { BUILTIN_CHANGELOG } from "./changelog";
 import MaintenanceScreen from "./MaintenanceScreen";
+import { TestWarMapScreen, loadTestWar, saveTestWar, EMPTY_TW, MAX_OBJECTS, BIZ_MAX_HP, DRONE_DAMAGE, AA_RADIUS_KM } from "./testWar";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
@@ -3254,12 +3255,25 @@ function WarAlliesModal({ war, me, onClose }) {
 /* ------------------------------------------------------------------ */
 
 const HQ_SECTIONS = [
-  { id: "info", label: "Інформація", Icon: Info, text: "Тут буде докладна інформація про вашу країну: історія, лідер, радники та правила." },
+  { id: "dev", label: "Розвиток", Icon: TrendingUp, text: "Тут можна буде покращувати країну та відкривати нові можливості." },
   { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, noSoon: true, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
   { id: "diplomacy", label: "Дипломатія", leaderOnly: true, Icon: Handshake, text: "" },
-  { id: "stats", label: "Статистика", Icon: BarChart2, text: "Тут буде статистика країни: розвиток сили, території та внесок гравців." },
-  { id: "mail", label: "Пошта", Icon: Mail, text: "" },
+  { id: "economy", label: "Економіка", Icon: Coins, text: "" },
+  { id: "info", label: "Інформація", Icon: Info, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
+];
+// Підрозділи «Інформації» (раніше були окремими кнопками Штабу)
+const HQ_SUB = [
+  { id: "mail", label: "Пошта", Icon: Mail },
+  { id: "stats", label: "Статистика", Icon: BarChart2 },
+];
+// Підрозділи «Армії»
+const ARMY_SUBS = [
+  { id: "sabotage", label: "Диверсія", Icon: Flame, text: "Тут будуть диверсії проти інших країн." },
+  { id: "sanctions", label: "Санкції", Icon: Ban, text: "Тут можна буде накладати санкції на інші країни." },
+  { id: "intel", label: "Розвідка", Icon: Search, text: "Тут буде розвідка: інформація про війська й економіку інших країн." },
+  { id: "defense", label: "Оборона", Icon: Shield, text: "" },
+  { id: "arsenal", label: "Арсенал", Icon: Zap, text: "" },
 ];
 
 function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared }) {
@@ -3270,6 +3284,18 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const [lockedMsg, setLockedMsg] = useState("");
   const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
   const [warMsg, setWarMsg] = useState("");
+  const [armySub, setArmySub] = useState(null); // null | id підрозділу Армії
+  const [tw, setTw] = useState(EMPTY_TW); // тестові бізнеси й ППО
+  const [twAction, setTwAction] = useState(null); // null | "business" | "aa" | "drone"
+  useEffect(() => {
+    let cancelled = false;
+    loadTestWar().then((d) => { if (!cancelled) setTw(d); });
+    return () => { cancelled = true; };
+  }, []);
+  const changeTw = useCallback((d) => {
+    setTw(d);
+    saveTestWar(d);
+  }, []);
 
   const reloadDip = useCallback(async () => {
     setDip(await loadDiplomacy());
@@ -3310,7 +3336,16 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     }
     cnSfx.navSwitch();
     setDipMsg("");
+    setArmySub(null);
     setView(id);
+  };
+  const goBack = () => {
+    if (view === "mail" || view === "stats") setView("info");
+    else if (view === "army" && armySub) setArmySub(null);
+    else {
+      setArmySub(null);
+      setView(null);
+    }
   };
 
   const onPickCountry = async (countryId) => {
@@ -3347,6 +3382,14 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       setWarMsg("✗ " + res.reason);
     }
   };
+
+  if (twAction) {
+    return (
+      <div className="cn-hq" style={{ "--hq": color }}>
+        <TestWarMapScreen action={twAction} me={player} nations={nations} lang={lang} data={tw} onChange={changeTw} onClose={() => setTwAction(null)} />
+      </div>
+    );
+  }
 
   if (view === "army" && warPick) {
     return (
@@ -3408,7 +3451,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
         <MailScreen
           me={player}
           mail={mail}
-          onBack={() => setView(null)}
+          onBack={() => setView("info")}
           onRefresh={onRefreshMail || (() => {})}
           onRefreshGameData={onRefreshData}
         />
@@ -3417,13 +3460,14 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   }
 
   if (view) {
-    const section = HQ_SECTIONS.find((s) => s.id === view);
-    const title = view === "dev" ? "Розвиток" : section?.label;
-    const Icon = view === "dev" ? TrendingUp : section?.Icon;
+    const section = [...HQ_SECTIONS, ...HQ_SUB].find((s) => s.id === view);
+    const armySubInfo = view === "army" ? ARMY_SUBS.find((x) => x.id === armySub) : null;
+    const title = armySubInfo ? armySubInfo.label : section?.label;
+    const Icon = section?.Icon;
     return (
       <div className="cn-hq" style={{ "--hq": color }}>
         <div className="cn-hq-subhead">
-          <button className="cn-refresh-btn" type="button" onClick={() => setView(null)} aria-label="Назад">
+          <button className="cn-refresh-btn" type="button" onClick={goBack} aria-label="Назад">
             <ArrowLeft size={16} />
           </button>
           <div className="cn-screen-title">{title}</div>
@@ -3432,12 +3476,28 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           <ArmyPanel
             war={war}
             msg={warMsg}
+            sub={armySub}
+            onSub={(id) => { cnSfx.navSwitch(); setArmySub(id); }}
+            tw={tw}
+            onTwAction={(a) => { cnSfx.navSwitch(); setTwAction(a); }}
             onDeclare={async () => {
               setWarMsg("");
               setDip(await loadDiplomacy());
               setWarPick({ step: "country" });
             }}
           />
+        ) : view === "economy" ? (
+          <EconomyPanel tw={tw} onCreateBusiness={() => { cnSfx.navSwitch(); setTwAction("business"); }} />
+        ) : view === "info" ? (
+          <InfoPanel
+            country={country}
+            leader={leader}
+            stats={stats}
+            unreadCount={unreadCount}
+            onOpen={(id) => { cnSfx.navSwitch(); setView(id); }}
+          />
+        ) : view === "stats" ? (
+          <CountryStatsPanel stats={stats} />
         ) : view === "diplomacy" ? (
           <DiplomacyPanel
             me={player}
@@ -3462,11 +3522,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           <div className="cn-hq-wip">
             <div className="cn-hq-wip-icon"><Icon size={34} /></div>
             <div className="cn-hq-wip-title">У розробці</div>
-            <div className="cn-hq-wip-text">
-              {view === "dev"
-                ? "Тут можна буде покращувати країну та відкривати нові можливості."
-                : section?.text}
-            </div>
+            <div className="cn-hq-wip-text">{section?.text}</div>
           </div>
         )}
       </div>
@@ -3515,12 +3571,6 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
             <span className="cn-hq-core-label">{country?.name}</span>
           </div>
         </div>
-
-        <button className="cn-hq-dev" type="button" onClick={() => openView("dev")}>
-          <span className="cn-hq-dev-icon"><TrendingUp size={22} /></span>
-          <span className="cn-hq-dev-label">РОЗВИТОК</span>
-          <span className="cn-hq-soon">Скоро</span>
-        </button>
       </div>
 
       <div className="cn-hq-chips">
@@ -3533,7 +3583,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       <div className="cn-hq-grid">
         {HQ_SECTIONS.map((s) => {
           const locked = s.leaderOnly && !isLeader;
-          const soon = ["info", "stats"].includes(s.id);
+          const soon = s.id === "dev";
           return (
             <button
               key={s.id}
@@ -3545,7 +3595,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
               <span className="cn-hq-tile-label">{s.label}</span>
               {locked && <Lock size={12} className="cn-hq-lock" />}
               {!locked && soon && <span className="cn-hq-soon cn-hq-soon--tile">Скоро</span>}
-              {s.id === "mail" && unreadCount > 0 && <span className="cn-hq-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
+              {s.id === "info" && unreadCount > 0 && <span className="cn-hq-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
             </button>
           );
         })}
@@ -3557,9 +3607,52 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
 
 
 
-/* Армія (лише лідер): оголошення війни за місто */
-function ArmyPanel({ war, msg, onDeclare }) {
+/* Плитка-рядок для меню розділів Армії/Економіки */
+function HqRowTile({ Icon, label, hint, onClick, badge }) {
+  return (
+    <button type="button" className="cn-hq-tile cn-tw-tile" onClick={onClick}>
+      <span className="cn-hq-tile-icon"><Icon size={21} /></span>
+      <span className="cn-tw-tile-text">
+        <span className="cn-hq-tile-label">{label}</span>
+        {hint && <small>{hint}</small>}
+      </span>
+      {badge != null && <span className="cn-tw-badge">{badge}</span>}
+      <ChevronRight size={16} className="cn-tw-chev" />
+    </button>
+  );
+}
+
+/* Армія (лише лідер): війна за місто, Диверсія, Санкції, Розвідка, Оборона, Арсенал */
+function ArmyPanel({ war, msg, onDeclare, sub, onSub, tw, onTwAction }) {
   const phase = war ? warPhase(war) : null;
+  if (sub === "defense") {
+    return (
+      <div className="cn-dip-menu">
+        <HqRowTile Icon={Shield} label="Створити ППО" hint={`Постав ППО на карті. Радіус дії ${AA_RADIUS_KM} км`} onClick={() => onTwAction("aa")} />
+        <div className="cn-tw-line">ППО встановлено: <b>{tw.aa.length}/{MAX_OBJECTS}</b></div>
+        <div className="cn-dip-sub">ППО збиває дрони, що влітають у її зону. Тестова механіка.</div>
+      </div>
+    );
+  }
+  if (sub === "arsenal") {
+    return (
+      <div className="cn-dip-menu">
+        <HqRowTile Icon={Send} label="Запустити Дрон" hint="Режими: прокласти маршрут або керувати самостійно" onClick={() => onTwAction("drone")} />
+        <div className="cn-tw-line">Бізнесів-цілей: <b>{tw.biz.length}</b></div>
+        <div className="cn-dip-sub">Влучання дрона віднімає {DRONE_DAMAGE} ХП бізнесу. Тестова механіка.</div>
+      </div>
+    );
+  }
+  const soonSub = ARMY_SUBS.find((x) => x.id === sub);
+  if (soonSub) {
+    return (
+      <div className="cn-hq-wip">
+        <div className="cn-hq-wip-icon"><soonSub.Icon size={34} /></div>
+        <div className="cn-hq-wip-title">У розробці</div>
+        <div className="cn-hq-wip-text">{soonSub.text}</div>
+      </div>
+    );
+  }
   return (
     <div className="cn-dip-menu">
       {msg && <div className="cn-dev-status-msg">{msg}</div>}
@@ -3580,7 +3673,64 @@ function ArmyPanel({ war, msg, onDeclare }) {
           </span>
         </button>
       )}
+      {ARMY_SUBS.map((x) => (
+        <HqRowTile key={x.id} Icon={x.Icon} label={x.label} onClick={() => onSub(x.id)} />
+      ))}
       <div className="cn-dip-sub">Правила: кліки всіх гравців країн-учасниць під час битви йдуть на шкалу. Атака має набрати баланс (кліки атаки мінус кліки захисту) {fmt(WAR_TARGET)} за годину, інакше місто лишається в захисника.</div>
+    </div>
+  );
+}
+
+/* Економіка: бізнеси (тестова механіка) */
+function EconomyPanel({ tw, onCreateBusiness }) {
+  return (
+    <div className="cn-dip-menu">
+      <HqRowTile Icon={Coins} label="Створити бізнес" hint={`Обери місце на карті. Кожен бізнес має ${BIZ_MAX_HP} ХП`} onClick={onCreateBusiness} />
+      <div className="cn-tw-line">Мої бізнеси: <b>{tw.biz.length}/{MAX_OBJECTS}</b></div>
+      {tw.biz.length === 0 && <div className="cn-lb-empty">Бізнесів поки немає</div>}
+      <div className="cn-dip-list">
+        {tw.biz.map((b, i) => (
+          <div className="cn-dip-row" key={b.id}>
+            <span className="cn-hq-tile-icon" style={{ width: 32, height: 32 }}><Coins size={16} /></span>
+            <div className="cn-dip-row-name">Бізнес #{i + 1}</div>
+            <span className="cn-tw-hp"><span className="cn-tw-hp-fill" style={{ width: Math.max(0, (b.hp / BIZ_MAX_HP) * 100) + "%" }} /></span>
+            <b className="cn-tw-hp-num">{b.hp}/{BIZ_MAX_HP}</b>
+          </div>
+        ))}
+      </div>
+      <div className="cn-dip-sub">Тестова механіка: бізнеси бачиш лише ти.</div>
+    </div>
+  );
+}
+
+/* Інформація: Пошта, Статистика та коротко про країну */
+function InfoPanel({ country, leader, stats, unreadCount, onOpen }) {
+  return (
+    <div className="cn-dip-menu">
+      <HqRowTile Icon={Mail} label="Пошта" badge={unreadCount > 0 ? (unreadCount > 9 ? "9+" : unreadCount) : null} onClick={() => onOpen("mail")} />
+      <HqRowTile Icon={BarChart2} label="Статистика" onClick={() => onOpen("stats")} />
+      <div className="cn-dip-list">
+        <div className="cn-dip-row"><div className="cn-dip-row-name">Країна</div><b className="cn-tw-hp-num">{country?.name || "—"}</b></div>
+        <div className="cn-dip-row"><div className="cn-dip-row-name">Лідер</div><b className="cn-tw-hp-num">{leader?.username || "—"}</b></div>
+        <div className="cn-dip-row"><div className="cn-dip-row-name">Гравців</div><b className="cn-tw-hp-num">{fmt(stats.members)}</b></div>
+      </div>
+    </div>
+  );
+}
+
+/* Статистика країни */
+function CountryStatsPanel({ stats }) {
+  const rows = [
+    ["Сила країни", fmt(stats.power)],
+    ["Місце у світі", "#" + (stats.rank || "—")],
+    ["Області", fmt(stats.regions)],
+    ["Гравці", fmt(stats.members)],
+  ];
+  return (
+    <div className="cn-dip-list">
+      {rows.map(([l, v]) => (
+        <div className="cn-dip-row" key={l}><div className="cn-dip-row-name">{l}</div><b className="cn-tw-hp-num">{v}</b></div>
+      ))}
     </div>
   );
 }
@@ -8377,6 +8527,27 @@ function GlobalStyles() {
 
 
       /* ---- Штаб ---- */
+      /* ---- Тестова механіка: бізнес, ППО, дрон ---- */
+      .cn-tw-tile { justify-content: flex-start !important; text-align: left; gap: 12px !important; padding: 12px 14px !important; }
+      .cn-tw-tile-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+      .cn-tw-tile-text small { font-size: 11px; font-weight: 500; color: var(--cn-text-dim); line-height: 1.3; }
+      .cn-tw-chev { opacity: 0.6; flex-shrink: 0; }
+      .cn-tw-badge { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; color: #fff; background: #ef4444; }
+      .cn-tw-line { font-size: 13px; color: var(--cn-text-dim); }
+      .cn-tw-line b { color: #fff; }
+      .cn-tw-hp { width: 70px; height: 8px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow: hidden; flex-shrink: 0; }
+      .cn-tw-hp-fill { display: block; height: 100%; background: linear-gradient(90deg, #ef4444, #22c55e); border-radius: 999px; }
+      .cn-tw-hp-num { color: #fff; font-size: 13px; white-space: nowrap; }
+      .cn-tw-panel { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+      .cn-tw-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+      .cn-tw-go { width: auto; padding: 10px 18px; }
+      .cn-tw-mode { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 18px; cursor: pointer; text-align: left; color: #fff; background: linear-gradient(160deg, rgba(var(--cn-accent-rgb),0.22), rgba(6,16,34,0.85)); border: 1px solid rgba(var(--cn-accent-rgb),0.45); }
+      .cn-tw-mode:active { transform: scale(0.98); }
+      .cn-tw-mode-ic { width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.16); border: 1px solid rgba(var(--cn-accent-rgb),0.4); }
+      .cn-tw-result { padding: 12px 14px; border-radius: 14px; font-size: 14px; font-weight: 700; color: #fff; }
+      .cn-tw-result--ok { background: rgba(21,128,61,0.35); border: 1px solid rgba(74,222,128,0.5); }
+      .cn-tw-result--bad { background: rgba(127,29,29,0.4); border: 1px solid rgba(248,113,113,0.5); }
+      .cn-tmap-toast.cn-tw-toast--ok { color: #DCFCE7; background: rgba(21,128,61,0.92); border-color: rgba(74,222,128,0.5); }
       .cn-hq { display: flex; flex-direction: column; gap: 10px; --hq: #3b82f6; min-height: 100%; }
       .cn-hq-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
       .cn-hq-title { display: flex; flex-direction: column; line-height: 1.1; min-width: 0; }
