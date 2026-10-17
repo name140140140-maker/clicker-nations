@@ -8319,7 +8319,7 @@ function GlobalStyles() {
       .cn-tmap-viewport {
         position: relative; width: 100%; height: min(58vh, 560px); min-height: 340px; border-radius: 22px; overflow: hidden;
         border: 1px solid rgba(var(--cn-accent-rgb),0.45); background: #0c2236; touch-action: none;
-        box-shadow: 0 0 0 1px rgba(var(--cn-accent-rgb),0.12), 0 16px 44px rgba(0,0,0,0.5);
+        box-shadow: 0 0 0 1px rgba(var(--cn-accent-rgb),0.12), 0 0 26px rgba(60,150,255,0.35), 0 16px 44px rgba(0,0,0,0.5);
       }
       .cn-map-viewport-wrap .cn-tmap-viewport { height: min(62vh, 620px); }
       .cn-tmap-toast {

@@ -24,12 +24,14 @@ const MAX_ZOOM = 12;
 const SOURCE_MAX_ZOOM = 8;
 
 export const MAP_COLORS = {
-  water: "#17608f",
-  free: "#7fa66a",
-  border: "#0b1620",
-  borderInternal: "#33424d",
+  water: "#1457c2", // яскравий мультяшний океан
+  free: "#6fd01f", // насичений салатовий мох
+  border: "#0b2412",
+  borderInternal: "#2f7a14",
   mine: "#ffffff",
   selected: "#ffd54a",
+  coast: "#e6ff8f", // світла облямівка узбережжя
+  glow: "#4fb0ff", // блакитне сяйво навколо суші
 };
 
 const OWNER_OPACITY = 0.9;
@@ -300,7 +302,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             source: "regions",
             paint: {
               "fill-pattern": "land-tex",
-              "fill-opacity": ["case", ["==", regionOwner, ""], 0.85, 0.28],
+              "fill-opacity": ["case", ["==", regionOwner, ""], 0.9, 0.34],
             },
           });
         }
@@ -327,6 +329,15 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             "line-opacity": ["interpolate", ["linear"], ["zoom"], 2.2, 0, 4, 0.75],
           },
         });
+        // Блакитне сяйво вздовж узбережжя (як ореол навколо планети на референсі).
+        map.addLayer({
+          id: "coast-glow",
+          type: "line",
+          source: "borders",
+          filter: ["==", ["get", "two"], 0],
+          layout: { "line-join": "round", "line-cap": "round" },
+          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 4, "line-opacity": 0.4 },
+        });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
         // рамка власної території, контур вибраної області.
         map.addLayer({
@@ -335,9 +346,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "borders",
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
-            "line-color": ["case", isHighlighted, MAP_COLORS.selected, mineEdge, MAP_COLORS.mine, MAP_COLORS.border],
-            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isCoast, 0.7, ["!=", ownerA, ownerB], 1.5, 0],
-            "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isCoast, 0.6, 0.9],
+            "line-color": ["case", isHighlighted, MAP_COLORS.selected, mineEdge, MAP_COLORS.mine, isCoast, MAP_COLORS.coast, MAP_COLORS.border],
+            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isCoast, 1.3, ["!=", ownerA, ownerB], 1.5, 0],
+            "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isCoast, 0.85, 0.9],
           },
         });
 

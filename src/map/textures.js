@@ -30,84 +30,89 @@ function wrapDraw(size, x, y, r, draw) {
   }
 }
 
-/* Вода: насичений синій з ледь помітними хвилями та світлими відблисками. */
-export function waterTexture(baseColor = "#17608f") {
+// Нерівна «мазкова» пляма: многокутник із випадковим радіусом (виглядає як мазок пензля).
+function blob(g, x, y, r, rand, fill) {
+  const n = 16;
+  g.beginPath();
+  for (let k = 0; k <= n; k++) {
+    const a = (k / n) * Math.PI * 2;
+    const rr = r * (0.8 + rand() * 0.35);
+    const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr * 0.8;
+    if (k === 0) g.moveTo(px, py);
+    else g.lineTo(px, py);
+  }
+  g.closePath();
+  g.fillStyle = fill;
+  g.fill();
+}
+
+/* Вода: насичений яскраво-синій мультяшний океан із мазковою (малярською) текстурою. */
+export function waterTexture(baseColor = "#1457c2") {
   const size = 128;
   const c = makeCanvas(size);
   const g = c.getContext("2d");
   g.fillStyle = baseColor;
   g.fillRect(0, 0, size, size);
   const rand = rng(7);
-  // м'які плями глибини
-  for (let i = 0; i < 10; i++) {
-    const x = rand() * size, y = rand() * size, r = 18 + rand() * 26;
-    const dark = rand() < 0.5;
+  // великі м'які плями глибини: темніший і світліший синій
+  for (let i = 0; i < 9; i++) {
+    const x = rand() * size, y = rand() * size, r = 22 + rand() * 28;
+    const dark = rand() < 0.55;
     wrapDraw(size, x, y, r, (X, Y) => {
       const grad = g.createRadialGradient(X, Y, 0, X, Y, r);
-      grad.addColorStop(0, dark ? "rgba(5,30,60,0.22)" : "rgba(120,200,255,0.12)");
+      grad.addColorStop(0, dark ? "rgba(6,38,130,0.30)" : "rgba(70,170,255,0.20)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
       g.fillStyle = grad;
       g.fillRect(X - r, Y - r, r * 2, r * 2);
     });
   }
-  // хвилі: короткі дуги
-  g.lineCap = "round";
-  for (let i = 0; i < 26; i++) {
-    const x = rand() * size, y = rand() * size, w = 8 + rand() * 12;
-    const alpha = 0.10 + rand() * 0.14, lw = 1 + rand() * 0.8;
-    wrapDraw(size, x, y, w, (X, Y) => {
-      g.strokeStyle = `rgba(190,230,255,${alpha})`;
-      g.lineWidth = lw;
-      g.beginPath();
-      g.moveTo(X - w, Y);
-      g.quadraticCurveTo(X - w / 2, Y - 3, X, Y);
-      g.quadraticCurveTo(X + w / 2, Y + 3, X + w, Y);
-      g.stroke();
-    });
+  // дрібні мазки пензля
+  for (let i = 0; i < 70; i++) {
+    const x = rand() * size, y = rand() * size, r = 4 + rand() * 9;
+    const dark = rand() < 0.5;
+    const a = 0.05 + rand() * 0.09;
+    wrapDraw(size, x, y, r, (X, Y) => blob(g, X, Y, r, rand, dark ? `rgba(8,45,150,${a})` : `rgba(90,185,255,${a})`));
   }
   return { size, data: g.getImageData(0, 0, size, size) };
 }
 
-/* Суша: прозора плитка з травою, плямами та крапками — накладається на колір області. */
+/* Суша: прозора плитка з моховою/пензлевою текстурою — накладається на колір області
+   (на вільних землях це яскраво-салатовий мультяшний мох, на зайнятих — ледь помітна). */
 export function landTexture() {
   const size = 128;
   const c = makeCanvas(size);
   const g = c.getContext("2d");
   const rand = rng(21);
-  for (let i = 0; i < 14; i++) {
-    const x = rand() * size, y = rand() * size, r = 16 + rand() * 24;
+  for (let i = 0; i < 12; i++) {
+    const x = rand() * size, y = rand() * size, r = 20 + rand() * 26;
     const light = rand() < 0.5;
     wrapDraw(size, x, y, r, (X, Y) => {
       const grad = g.createRadialGradient(X, Y, 0, X, Y, r);
-      grad.addColorStop(0, light ? "rgba(235,250,190,0.22)" : "rgba(25,60,25,0.22)");
+      grad.addColorStop(0, light ? "rgba(214,255,110,0.30)" : "rgba(20,100,10,0.28)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
       g.fillStyle = grad;
       g.fillRect(X - r, Y - r, r * 2, r * 2);
     });
   }
+  // «моховий» ворс: багато дрібних плямок двох відтінків
+  for (let i = 0; i < 150; i++) {
+    const x = rand() * size, y = rand() * size, r = 2 + rand() * 5;
+    const light = rand() < 0.5;
+    const a = 0.16 + rand() * 0.2;
+    wrapDraw(size, x, y, r, (X, Y) => blob(g, X, Y, r, rand, light ? `rgba(220,255,120,${a})` : `rgba(25,110,12,${a})`));
+  }
   g.lineCap = "round";
-  for (let i = 0; i < 260; i++) {
-    const x = rand() * size, y = rand() * size, len = 2.5 + rand() * 4;
-    const ang = -Math.PI / 2 + (rand() - 0.5) * 0.9;
-    const dark = rand() < 0.6;
-    const a = 0.2 + rand() * 0.2;
+  for (let i = 0; i < 120; i++) {
+    const x = rand() * size, y = rand() * size, len = 2 + rand() * 4;
+    const ang = rand() * Math.PI * 2;
+    const a = 0.14 + rand() * 0.16;
     wrapDraw(size, x, y, len, (X, Y) => {
-      g.strokeStyle = dark ? `rgba(30,70,30,${a})` : `rgba(225,245,170,${a})`;
+      g.strokeStyle = `rgba(235,255,150,${a})`;
       g.lineWidth = 0.9;
       g.beginPath();
       g.moveTo(X, Y);
       g.lineTo(X + Math.cos(ang) * len, Y + Math.sin(ang) * len);
       g.stroke();
-    });
-  }
-  for (let i = 0; i < 40; i++) {
-    const x = rand() * size, y = rand() * size;
-    const a = 0.08 + rand() * 0.1;
-    wrapDraw(size, x, y, 2, (X, Y) => {
-      g.fillStyle = `rgba(255,255,255,${a})`;
-      g.beginPath();
-      g.arc(X, Y, 0.9, 0, Math.PI * 2);
-      g.fill();
     });
   }
   return { size, data: g.getImageData(0, 0, size, size) };
