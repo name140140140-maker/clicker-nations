@@ -204,7 +204,9 @@ async function addMail(playerId, message) {
 }
 
 const GAME_STATE_KEY = "game-state";
-const SEASON_DURATION_DAYS = 30;
+const SEASON_DURATION_DAYS = 50;
+// Версія сезону: при зміні тривалості/нагород сезон стартує заново, а прогрес Battle Pass гравців обнуляється.
+const SEASON_REV = 2;
 const EMPTY_GAME_STATE = {
   wars: [],
   alliances: [],
@@ -212,7 +214,7 @@ const EMPTY_GAME_STATE = {
   cityControl: {},
   cityDefense: {},
   news: [],
-  season: { seasonNumber: 1, durationDays: SEASON_DURATION_DAYS, startedAt: null },
+  season: { seasonNumber: 1, durationDays: SEASON_DURATION_DAYS, startedAt: null, rev: SEASON_REV },
   advisors: {}, // { [countryCode]: [playerId, ...] } — Рада (до MAX_ADVISORS)
   councilProposals: {}, // { [countryCode]: [proposal, ...] }
   rebellions: [], // повстання проти лідера/радника всередині країни
@@ -277,12 +279,13 @@ async function addNews(text) {
 }
 
 /* Season: shared across all players. First player to load it after it's
-   unset kicks off the 30-day timer for everyone. */
+   unset (or after a new season revision) kicks off the 50-day timer for everyone. */
 async function ensureSeasonStarted() {
   const state = await loadGameState();
   const season = state.season || EMPTY_GAME_STATE.season;
-  if (season.startedAt) return season;
-  const started = { ...season, startedAt: Date.now() };
+  if (season.startedAt && season.rev === SEASON_REV) return season;
+  // Новий сезон (50 днів): стартує одразу для всіх гравців.
+  const started = { seasonNumber: season.seasonNumber || 1, durationDays: SEASON_DURATION_DAYS, startedAt: Date.now(), rev: SEASON_REV };
   const updated = await saveGameStatePart({ season: started });
   return updated.season;
 }
@@ -1630,7 +1633,7 @@ const TRANSLATIONS = {
   tut6_title: { uk: "Панель управління", en: "Control Panel", ru: "Панель управления" },
   tut6_text: { uk: "У «Клікері» відкрий Панель управління. Поки що там можна змінити колір своєї країни на карті — це може робити лише лідер. Нові можливості з'являтимуться з оновленнями.", en: "In 'Clicker', open the Control Panel. For now you can change your country's color on the map — only the leader can do that. New features will arrive with updates.", ru: "В «Кликере» открой Панель управления. Пока там можно изменить цвет своей страны на карте — это может делать только лидер. Новые возможности будут появляться с обновлениями." },
   tut10_title: { uk: "Не пропускай сезон", pl: "Nie przegap sezonu", de: "Verpasse die Saison nicht", ru: "Не пропускай сезон", it: "Non perdere la stagione", fr: "Ne manquez pas la saison", en: "Don't miss the season", es: "No te pierdas la temporada", ar: "لا تفوّت الموسم" },
-  tut10_text: { uk: "У «Сезоні» є твій Battle Pass, що триває 30 днів. Рівень залежить від кількості кліків — досягнув нового рівня, забирай нагороду і перевіряй сезон регулярно.", pl: "W karcie „Sezon” znajduje się Twój Battle Pass, który trwa 30 dni. Poziom zależy od liczby kliknięć — osiągnij nowy poziom, odbierz nagrodę i zaglądaj do sezonu regularnie.", de: "Im Tab „Saison“ befindet sich dein Battle Pass, der 30 Tage läuft. Dein Level hängt von deinen Klicks ab — erreiche ein neues Level, hol dir die Belohnung und schau regelmäßig in der Saison vorbei.", ru: "На вкладке «Сезон» находится твой Battle Pass, который длится 30 дней. Уровень зависит от количества кликов — достиг нового уровня, забирай награду и регулярно проверяй сезон.", it: "Nella scheda \"Stagione\" trovi il tuo Battle Pass, che dura 30 giorni. Il livello dipende dal numero di tocchi — raggiungi un nuovo livello, ritira il premio e controlla la stagione regolarmente.", fr: "L'onglet « Saison » contient votre Battle Pass, valable 30 jours. Votre niveau dépend de votre nombre de taps — atteignez un nouveau niveau, récupérez la récompense et consultez la saison régulièrement.", en: "The 'Season' tab holds your Battle Pass, which runs for 30 days. Your level depends on your clicks — reach a new level, claim the reward, and check the season regularly.", es: "La pestaña \"Temporada\" contiene tu Battle Pass, que dura 30 días. Tu nivel depende de la cantidad de toques — al alcanzar un nuevo nivel, reclama la recompensa y revisa la temporada con regularidad.", ar: "يحتوي تبويب \"الموسم\" على Battle Pass الخاص بك، ويستمر 30 يومًا. يعتمد مستواك على عدد ضغطاتك — عند بلوغ مستوى جديد، احصل على المكافأة وتفقد الموسم بانتظام." },
+  tut10_text: { uk: "У «Сезоні» є твій Battle Pass, що триває 50 днів. Рівень залежить від кількості кліків — досягнув нового рівня, забирай нагороду і перевіряй сезон регулярно.", pl: "W karcie „Sezon” znajduje się Twój Battle Pass, który trwa 50 dni. Poziom zależy od liczby kliknięć — osiągnij nowy poziom, odbierz nagrodę i zaglądaj do sezonu regularnie.", de: "Im Tab „Saison“ befindet sich dein Battle Pass, der 50 Tage läuft. Dein Level hängt von deinen Klicks ab — erreiche ein neues Level, hol dir die Belohnung und schau regelmäßig in der Saison vorbei.", ru: "На вкладке «Сезон» находится твой Battle Pass, который длится 50 дней. Уровень зависит от количества кликов — достиг нового уровня, забирай награду и регулярно проверяй сезон.", it: "Nella scheda \"Stagione\" trovi il tuo Battle Pass, che dura 50 giorni. Il livello dipende dal numero di tocchi — raggiungi un nuovo livello, ritira il premio e controlla la stagione regolarmente.", fr: "L'onglet « Saison » contient votre Battle Pass, valable 50 jours. Votre niveau dépend de votre nombre de taps — atteignez un nouveau niveau, récupérez la récompense et consultez la saison régulièrement.", en: "The 'Season' tab holds your Battle Pass, which runs for 50 days. Your level depends on your clicks — reach a new level, claim the reward, and check the season regularly.", es: "La pestaña \"Temporada\" contiene tu Battle Pass, que dura 50 días. Tu nivel depende de la cantidad de toques — al alcanzar un nuevo nivel, reclama la recompensa y revisa la temporada con regularidad.", ar: "يحتوي تبويب \"الموسم\" على Battle Pass الخاص بك، ويستمر 50 يومًا. يعتمد مستواك على عدد ضغطاتك — عند بلوغ مستوى جديد، احصل على المكافأة وتفقد الموسم بانتظام." },
   tut11_title: { uk: "Хочеш більше нагород?", pl: "Chcesz więcej nagród?", de: "Willst du mehr Belohnungen?", ru: "Хочешь больше наград?", it: "Vuoi più premi?", fr: "Vous voulez plus de récompenses ?", en: "Want more rewards?", es: "¿Quieres más recompensas?", ar: "هل تريد مكافآت أكثر؟" },
   tut11_text: { uk: "У сезоні є безкоштовна та Premium-лінії нагород. Premium Pass відкриває додаткові нагороди, титули та значки — але він необов'язковий, грати й розвиватися можна і без нього.", pl: "Sezon ma darmową i Premium ścieżkę nagród. Przepustka Premium odblokowuje dodatkowe nagrody, tytuły i odznaki — jest jednak opcjonalna, możesz grać i rozwijać się bez niej.", de: "Die Saison hat eine kostenlose und eine Premium-Belohnungsspur. Der Premium-Pass schaltet zusätzliche Belohnungen, Titel und Abzeichen frei — er ist optional, du kannst auch ohne ihn spielen und fortschreiten.", ru: "В сезоне есть бесплатная и Premium-линия наград. Premium Pass открывает дополнительные награды, титулы и значки — но он необязателен, играть и развиваться можно и без него.", it: "La stagione ha una traccia gratuita e una Premium. Il Premium Pass sblocca premi extra, titoli e badge — ma è facoltativo, puoi giocare e progredire anche senza.", fr: "La saison propose une piste gratuite et une piste Premium. Le Pass Premium débloque des récompenses supplémentaires, des titres et des badges — mais il est facultatif, vous pouvez jouer et progresser sans lui.", en: "The season has a free and a Premium reward track. The Premium Pass unlocks extra rewards, titles, and badges — but it's optional, you can play and progress without it.", es: "La temporada tiene una vía gratuita y otra Premium. El Pase Premium desbloquea recompensas extra, títulos e insignias — pero es opcional, puedes jugar y progresar sin él.", ar: "يحتوي الموسم على مسار مجاني ومسار مميز. يفتح الاشتراك المميز مكافآت إضافية وألقابًا وشارات — لكنه اختياري، ويمكنك اللعب والتقدم من دونه." },
   tut12_title: { uk: "Створи свій профіль", pl: "Stwórz swój profil", de: "Erstelle dein Profil", ru: "Создай свой профиль", it: "Crea il tuo profilo", fr: "Créez votre profil", en: "Set up your profile", es: "Crea tu perfil", ar: "أنشئ ملفك الشخصي" },
@@ -1781,7 +1784,7 @@ export default function App() {
       await refreshNations();
       const state = await loadGameState();
       setNews(state.news);
-      setSeason(state.season && state.season.startedAt ? state.season : await ensureSeasonStarted());
+      setSeason(state.season && state.season.startedAt && state.season.rev === SEASON_REV ? state.season : await ensureSeasonStarted());
       if (player) {
         const leaderId = (await getLeader(player.countryCode)) || COUNTRY_MAP[player.countryCode]?.leaderId || null;
         setIsLeader(leaderId === player.id);
@@ -1921,11 +1924,19 @@ export default function App() {
           try {
             let rec = JSON.parse(raw);
             rec = applyOfflineAutoClicker(rec);
+            // Новий сезон: обнуляємо прогрес Battle Pass (кліки рахуються від поточного значення)
+            const passMigrated = migratePass(rec);
+            const needsPassSave = passMigrated !== rec;
+            rec = passMigrated;
             setPlayer(rec);
             if (rec.__offlineCredited) {
               const { __offlineCredited, ...clean } = rec;
               await storageSet(PLAYER_PREFIX + id, JSON.stringify(clean), true);
               rec = clean;
+            }
+            if (needsPassSave) {
+              const { __offlineCredited: _oc, ...cleanRec } = rec;
+              await storageSet(PLAYER_PREFIX + id, JSON.stringify(cleanRec), true);
             }
             // Бекфіл: у старих записах ще немає telegramId — доклеюємо
             // поле й мапінг, інакше сервер не зможе видати Premium Pass.
@@ -1987,7 +1998,10 @@ export default function App() {
           energy: MAX_ENERGY,
           lastEnergyTs: Date.now(),
           createdAt: Date.now(),
+          points: 0,
           hasPremiumPass: false,
+          passRev: PASS_REV,
+          passBaseClicks: 0,
           passClaimedFree: [],
           passClaimedPremium: [],
           unlockedIcons: [],
@@ -1995,6 +2009,7 @@ export default function App() {
           unlockedBadges: [],
         };
       }
+      rec = migratePass(rec);
       if (isCreator) rec.role = "leader";
       await storageSet(ID_KEY, id, false);
       await storageSet(PLAYER_PREFIX + id, JSON.stringify(rec), true);
@@ -3073,13 +3088,17 @@ function ClickerScreen({
       )}
 
       <div className="cn-stats-row">
-        <div className="cn-stat-chip">
-          <span className="cn-stat-chip-dots">⁚⁚</span>
+        <div className="cn-stat-chip cn-stat-chip--half">
           <div className="cn-stat-chip-body">
             <span className="cn-stat-chip-label">TOTAL CLICKS</span>
             <span className="cn-stat-chip-value">{fmt(player.totalClicks)}</span>
           </div>
-          <span className="cn-stat-chip-dots">⁚⁚</span>
+        </div>
+        <div className="cn-stat-chip cn-stat-chip--half cn-stat-chip--points">
+          <div className="cn-stat-chip-body">
+            <span className="cn-stat-chip-label"><Coins size={12} /> POINTS</span>
+            <span className="cn-stat-chip-value">{fmt(player.points || 0)}</span>
+          </div>
         </div>
       </div>
 
@@ -4256,6 +4275,7 @@ const TITLES = [
   { id: "leader", label: "Лідер Країни", req: (me, ctx) => !!ctx.isLeader },
   { id: "patriot", label: "Патріот", req: (me) => Date.now() - (me.createdAt || Date.now()) >= 7 * 86400000 },
   { id: "top30", label: "Топ-30 Світу", req: (me, ctx) => typeof ctx.globalRank === "number" && ctx.globalRank <= 30 },
+  { id: "recruit", label: "Новобранець", req: (me) => (me.unlockedTitles || []).includes("recruit") },
   { id: "peasant", label: "Селянин", req: (me) => (me.unlockedTitles || []).includes("peasant") },
   { id: "warrior", label: "Воїн", req: (me) => (me.unlockedTitles || []).includes("warrior") },
   { id: "knight", label: "Лицар", req: (me) => (me.unlockedTitles || []).includes("knight") },
@@ -4333,89 +4353,143 @@ async function toggleBadge(me, id, onSetPlayer) {
 /*  Battle Pass / Premium Pass                                         */
 /* ------------------------------------------------------------------ */
 
-const BATTLE_PASS_LEVELS = 51;
-const PASS_MILESTONE_LEVELS = [1, 11, 21, 31, 41, 51];
+const PASS_MAX_LEVEL = 50; // рівні 0–50 (51 рівень)
+const BATTLE_PASS_LEVELS = PASS_MAX_LEVEL + 1; // кількість рівнів у проході
+// Версія проходу = версія сезону. У гравців зі старою версією прогрес і отримані нагороди обнуляються.
+const PASS_REV = SEASON_REV;
 
-function passClicksForLevel(level) {
-  return 20 + level * 15;
-}
+/* Сумарна кількість кліків сезону, потрібна для рівня N (рівень 0 — 0 кліків). */
+const PASS_LEVEL_THRESHOLDS = [
+  0, 50, 100, 200, 300, 450, 600, 800, 1000, 1250, 1500, 1850, 2200, 2550, 2950, 3350, 3750, 4200, 4650, 5100, 5600,
+  6150, 6700, 7300, 7900, 8500, 9150, 9800, 10450, 11100, 11800, 12500, 13250, 14000, 14750, 15550, 16350, 17150, 18000,
+  18850, 19700, 20600, 21500, 22400, 23350, 24300, 25350, 26450, 27600, 28800, 30000,
+];
 
-const PASS_LEVEL_THRESHOLDS = (() => {
-  let cum = 0;
-  const arr = [0];
-  for (let lvl = 1; lvl <= BATTLE_PASS_LEVELS; lvl++) {
-    cum += passClicksForLevel(lvl);
-    arr.push(cum);
-  }
-  return arr;
-})();
-
-function currentPassLevel(totalClicks) {
-  const clicks = totalClicks || 0;
+function currentPassLevel(passClicks) {
+  const clicks = passClicks || 0;
   let lvl = 0;
-  for (let i = 1; i <= BATTLE_PASS_LEVELS; i++) {
+  for (let i = 1; i <= PASS_MAX_LEVEL; i++) {
     if (clicks >= PASS_LEVEL_THRESHOLDS[i]) lvl = i;
     else break;
   }
   return lvl;
 }
 
-/* Power amounts for the "free" track; premium track is always exactly 2x. */
-const FREE_POWER_BY_LEVEL = {
-  2: 5000, 3: 10000, 4: 15000, 5: 20000, 6: 25000, 7: 30000, 8: 35000, 9: 40000, 10: 45000,
-  12: 50000, 13: 55000, 14: 60000, 15: 65000, 16: 70000, 17: 75000, 18: 80000, 19: 85000, 20: 90000,
-  22: 100000, 23: 110000, 24: 120000, 25: 130000, 26: 140000, 27: 150000, 28: 160000, 29: 170000, 30: 180000,
-  32: 200000, 33: 220000, 34: 240000, 35: 260000, 36: 280000, 37: 300000, 38: 320000, 39: 340000, 40: 360000,
-  42: 380000, 43: 400000, 44: 420000, 45: 440000, 46: 460000, 47: 470000, 48: 480000, 49: 490000, 50: 500000,
-};
+/* Кліки, зараховані в Battle Pass поточного сезону (від моменту початку сезону для гравця). */
+function passClicks(me) {
+  if (!me || me.passRev !== PASS_REV) return 0;
+  return Math.max(0, (me.totalClicks || 0) - (me.passBaseClicks || 0));
+}
 
-/* Title rewards: level 1 = Селянин/Воїн, level 21 = Лицар/Золотий Лицар, level 41 = Принц/Король */
-const PASS_TITLE_LEVELS = {
-  1: { free: { titleId: "peasant", label: "Селянин" }, premium: { titleId: "warrior", label: "Воїн" } },
-  21: { free: { titleId: "knight", label: "Лицар" }, premium: { titleId: "golden_knight", label: "Золотий Лицар" } },
-  41: { free: { titleId: "prince", label: "Принц" }, premium: { titleId: "king", label: "Король" } },
-};
+/* Нагороди, які гравець уже забрав у цьому сезоні. */
+function passClaimedList(me, track) {
+  if (!me || me.passRev !== PASS_REV) return [];
+  return (track === "premium" ? me.passClaimedPremium : me.passClaimedFree) || [];
+}
 
-/* Profile-photo rewards echo the same title tiers at levels 11 / 31 / 51 */
-const PASS_ICON_LEVELS = {
-  11: {
-    free: { iconId: "avatar_peasant", img: AVATAR_WANDERER, label: "Селянин" },
-    premium: { iconId: "avatar_warrior", img: AVATAR_KNIGHT_BLUE, label: "Воїн" },
-  },
-  31: {
-    free: { iconId: "avatar_knight", img: AVATAR_KNIGHT_BANNER, label: "Лицар" },
-    premium: { iconId: "avatar_golden_knight", img: AVATAR_KNIGHT_GOLD, label: "Золотий Лицар" },
-  },
-  51: {
-    free: { iconId: "avatar_prince", img: AVATAR_CROWN_PILLOW, label: "Принц" },
-    premium: { iconId: "avatar_king", img: AVATAR_KING_CROWNED, label: "Король" },
-  },
+/* Новий сезон: обнуляємо прогрес проходу, відлік кліків іде від поточного значення. */
+function migratePass(me) {
+  if (!me || me.passRev === PASS_REV) return me;
+  return { ...me, passRev: PASS_REV, passBaseClicks: me.totalClicks || 0, passClaimedFree: [], passClaimedPremium: [], points: me.points || 0 };
+}
+
+/* Таблиця нагород: [free, premium] для кожного рівня 0–50.
+   Типи: p — Points (кількість), t — титул, b — банер профілю, a — аватар (фото профілю).
+   Титули, банери й фото профілю поки в розробці: нагорода записується гравцю, а самі розділи з'являться пізніше. */
+const PASS_REWARD_TABLE = [
+  [["t", "Новобранець"], ["t", "Воїн"]], // 0
+  [["p", 1500], ["p", 3000]], // 1
+  [["p", 2500], ["p", 5000]], // 2
+  [["p", 3000], ["p", 6000]], // 3
+  [["p", 3500], ["p", 7000]], // 4
+  [["p", 3500], ["p", 7000]], // 5
+  [["b", "Перший прапор"], ["b", "Прапор воїна"]], // 6
+  [["p", 5000], ["p", 10000]], // 7
+  [["p", 5500], ["p", 11000]], // 8
+  [["p", 6500], ["p", 13000]], // 9
+  [["a", "Рекрут"], ["a", "Воїн"]], // 10
+  [["p", 6500], ["p", 13000]], // 11
+  [["p", 7500], ["p", 15000]], // 12
+  [["p", 8000], ["p", 16000]], // 13
+  [["p", 8500], ["p", 17000]], // 14
+  [["p", 9500], ["p", 19000]], // 15
+  [["b", "Кам'яна фортеця"], ["b", "Герб ордену"]], // 16
+  [["p", 12500], ["p", 25000]], // 17
+  [["p", 13500], ["p", 27000]], // 18
+  [["p", 15500], ["p", 31000]], // 19
+  [["t", "Лицар"], ["t", "Золотий Лицар"]], // 20
+  [["p", 12500], ["p", 25000]], // 21
+  [["p", 13500], ["p", 27000]], // 22
+  [["p", 15500], ["p", 31000]], // 23
+  [["p", 16500], ["p", 33000]], // 24
+  [["p", 18500], ["p", 37000]], // 25
+  [["p", 19500], ["p", 39000]], // 26
+  [["p", 21500], ["p", 43000]], // 27
+  [["p", 23000], ["p", 46000]], // 28
+  [["p", 24000], ["p", 48000]], // 29
+  [["a", "Лицар"], ["a", "Золотий Лицар"]], // 30
+  [["p", 18000], ["p", 36000]], // 31
+  [["p", 19000], ["p", 38000]], // 32
+  [["p", 21000], ["p", 42000]], // 33
+  [["p", 23000], ["p", 46000]], // 34
+  [["p", 24000], ["p", 48000]], // 35
+  [["p", 25000], ["p", 50000]], // 36
+  [["p", 27000], ["p", 54000]], // 37
+  [["p", 29000], ["p", 58000]], // 38
+  [["p", 30000], ["p", 60000]], // 39
+  [["t", "Принц"], ["t", "Король"]], // 40
+  [["p", 24000], ["p", 48000]], // 41
+  [["p", 25000], ["p", 50000]], // 42
+  [["p", 27000], ["p", 54000]], // 43
+  [["b", "Князівський прапор"], ["b", "Королівський трон"]], // 44
+  [["p", 30000], ["p", 60000]], // 45
+  [["p", 33000], ["p", 66000]], // 46
+  [["p", 36000], ["p", 72000]], // 47
+  [["p", 42000], ["p", 84000]], // 48
+  [["p", 50000], ["p", 100000]], // 49
+  [["a", "Принц"], ["a", "Король"]], // 50
+];
+
+const PASS_TITLE_IDS = {
+  "Новобранець": "recruit",
+  "Воїн": "warrior",
+  "Лицар": "knight",
+  "Золотий Лицар": "golden_knight",
+  "Принц": "prince",
+  "Король": "king",
+};
+const PASS_ICON_DEFS = {
+  "Рекрут": { iconId: "avatar_recruit", img: AVATAR_WANDERER },
+  "Воїн": { iconId: "avatar_warrior", img: AVATAR_KNIGHT_BLUE },
+  "Лицар": { iconId: "avatar_knight", img: AVATAR_KNIGHT_BANNER },
+  "Золотий Лицар": { iconId: "avatar_golden_knight", img: AVATAR_KNIGHT_GOLD },
+  "Принц": { iconId: "avatar_prince", img: AVATAR_CROWN_PILLOW },
+  "Король": { iconId: "avatar_king", img: AVATAR_KING_CROWNED },
+};
+const PASS_BANNER_DEFS = {
+  "Перший прапор": { bannerId: "pass_first_flag", img: BANNER_MEADOW },
+  "Прапор воїна": { bannerId: "pass_warrior_flag", img: BANNER_MARCH },
+  "Кам'яна фортеця": { bannerId: "pass_stone_fortress", img: BANNER_CLIFFSIDE },
+  "Герб ордену": { bannerId: "pass_order_crest", img: BANNER_CAMPFIRE },
+  "Князівський прапор": { bannerId: "pass_prince_flag", img: BANNER_GRAND_CASTLE },
+  "Королівський трон": { bannerId: "pass_royal_throne", img: BANNER_KINGS_VIEW },
 };
 
 function buildPassTrack(track) {
-  const rewards = [];
-  for (let level = 1; level <= BATTLE_PASS_LEVELS; level++) {
-    const titleInfo = PASS_TITLE_LEVELS[level];
-    if (titleInfo) {
-      const t = titleInfo[track];
-      rewards.push({ level, type: "title", titleId: t.titleId, label: t.label });
-      continue;
-    }
-    const iconInfo = PASS_ICON_LEVELS[level];
-    if (iconInfo) {
-      const ic = iconInfo[track];
-      rewards.push({ level, type: "icon", iconId: ic.iconId, img: ic.img, label: ic.label });
-      continue;
-    }
-    const freeAmt = FREE_POWER_BY_LEVEL[level] || 0;
-    const amt = track === "free" ? freeAmt : freeAmt * 2;
-    rewards.push({ level, type: "power", amount: amt });
-  }
-  return rewards;
+  const idx = track === "premium" ? 1 : 0;
+  return PASS_REWARD_TABLE.map((pair, level) => {
+    const [kind, v] = pair[idx];
+    if (kind === "p") return { level, type: "points", amount: v };
+    if (kind === "t") return { level, type: "title", titleId: PASS_TITLE_IDS[v], label: v };
+    if (kind === "a") return { level, type: "icon", iconId: PASS_ICON_DEFS[v].iconId, img: PASS_ICON_DEFS[v].img, label: v };
+    return { level, type: "banner", bannerId: PASS_BANNER_DEFS[v].bannerId, img: PASS_BANNER_DEFS[v].img, label: v };
+  });
 }
 
 const FREE_PASS_REWARDS = buildPassTrack("free");
 const PREMIUM_PASS_REWARDS = buildPassTrack("premium");
+// Рівні з особливими нагородами (титул/банер/аватар) виділяються в списку.
+const PASS_MILESTONE_LEVELS = FREE_PASS_REWARDS.filter((r) => r.type !== "points").map((r) => r.level);
 
 function passRewardByLevel(track, level) {
   const list = track === "premium" ? PREMIUM_PASS_REWARDS : FREE_PASS_REWARDS;
@@ -4423,8 +4497,10 @@ function passRewardByLevel(track, level) {
 }
 
 function applyPassReward(updated, reward) {
-  if (reward.type === "power") {
-    updated.power = (updated.power || 0) + reward.amount;
+  if (reward.type === "points") {
+    updated.points = (updated.points || 0) + reward.amount;
+  } else if (reward.type === "banner") {
+    updated.unlockedPassBanners = Array.from(new Set([...(updated.unlockedPassBanners || []), reward.bannerId]));
   } else if (reward.type === "icon") {
     updated.unlockedIcons = Array.from(new Set([...(updated.unlockedIcons || []), reward.iconId]));
   } else if (reward.type === "title") {
@@ -4436,24 +4512,24 @@ function applyPassReward(updated, reward) {
 
 async function claimPassReward(me, track, level, onSetPlayer) {
   const claimedKey = track === "premium" ? "passClaimedPremium" : "passClaimedFree";
-  const already = (me[claimedKey] || []).includes(level);
-  if (already) return;
-  const lvl = currentPassLevel(me.totalClicks || 0);
-  if (level > lvl) return;
+  const claimed = passClaimedList(me, track);
+  if (claimed.includes(level)) return;
+  if (level > currentPassLevel(passClicks(me))) return;
   if (track === "premium" && !me.hasPremiumPass) return;
   const reward = passRewardByLevel(track, level);
   if (!reward) return;
-  const updated = { ...me, [claimedKey]: [...(me[claimedKey] || []), level] };
+  const base = migratePass(me);
+  const updated = { ...base, [claimedKey]: [...passClaimedList(base, track), level] };
   applyPassReward(updated, reward);
   await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
   onSetPlayer(updated);
 }
 
 async function claimAllPassRewards(me, onSetPlayer) {
-  const lvl = currentPassLevel(me.totalClicks || 0);
-  const updated = { ...me };
+  const lvl = currentPassLevel(passClicks(me));
+  const updated = { ...migratePass(me) };
   let changed = false;
-  const freeClaimed = new Set(updated.passClaimedFree || []);
+  const freeClaimed = new Set(passClaimedList(updated, "free"));
   for (const r of FREE_PASS_REWARDS) {
     if (r.level <= lvl && !freeClaimed.has(r.level)) {
       freeClaimed.add(r.level);
@@ -4463,7 +4539,7 @@ async function claimAllPassRewards(me, onSetPlayer) {
   }
   updated.passClaimedFree = Array.from(freeClaimed);
   if (updated.hasPremiumPass) {
-    const premClaimed = new Set(updated.passClaimedPremium || []);
+    const premClaimed = new Set(passClaimedList(updated, "premium"));
     for (const r of PREMIUM_PASS_REWARDS) {
       if (r.level <= lvl && !premClaimed.has(r.level)) {
         premClaimed.add(r.level);
@@ -6175,7 +6251,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     }
     setBusy(true);
     try {
-      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify({ ...me, power: 0, totalClicks: 0, energy: MAX_ENERGY, lastEnergyTs: Date.now() }), true);
+      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify({ ...me, power: 0, points: 0, passBaseClicks: 0, totalClicks: 0, energy: MAX_ENERGY, lastEnergyTs: Date.now() }), true);
       await setJSON(MAIL_PREFIX + me.id, [], true);
       await saveWars([]);
       await saveAlliances([]);
@@ -6724,11 +6800,12 @@ function formatCountdown(ms) {
 }
 
 function passRewardVisual(reward) {
-  if (reward.type === "power") return { kind: "power" };
+  if (reward.type === "points") return { kind: "points" };
+  if (reward.type === "banner") return { kind: "banner", img: reward.img, label: reward.label };
   if (reward.type === "icon") return { kind: "icon", img: reward.img, label: reward.label };
   if (reward.type === "title") return { kind: "title", label: reward.label };
   if (reward.type === "badge") return { kind: "badge", label: reward.label, Icon: reward.Icon };
-  return { kind: "power" };
+  return { kind: "points" };
 }
 
 function PassRewardCell({ track, reward, unlockedLevel, claimed, hasPremium, onClaim }) {
@@ -6738,14 +6815,23 @@ function PassRewardCell({ track, reward, unlockedLevel, claimed, hasPremium, onC
   const visual = passRewardVisual(reward);
 
   let content;
-  if (visual.kind === "power") {
+  if (visual.kind === "points") {
     content = (
       <>
         <span className="cn-pass-reward-icon">
-          <Shield size={18} />
+          <Coins size={18} />
         </span>
         <span className="cn-pass-reward-amount">+{fmt(reward.amount)}</span>
-        <span className="cn-pass-reward-label">Сила</span>
+        <span className="cn-pass-reward-label">Points</span>
+      </>
+    );
+  } else if (visual.kind === "banner") {
+    content = (
+      <>
+        <span className="cn-pass-reward-icon cn-pass-reward-icon--banner">
+          <img src={visual.img} alt={visual.label} />
+        </span>
+        <span className="cn-pass-reward-label">{visual.label}</span>
       </>
     );
   } else if (visual.kind === "icon") {
@@ -6825,18 +6911,18 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
   const endsAt = startedAt + durationDays * 24 * 60 * 60 * 1000;
   const remaining = endsAt - now;
 
-  const totalClicks = me.totalClicks || 0;
+  const totalClicks = passClicks(me);
   const level = currentPassLevel(totalClicks);
-  const nextThreshold = PASS_LEVEL_THRESHOLDS[Math.min(level + 1, BATTLE_PASS_LEVELS)];
+  const nextThreshold = PASS_LEVEL_THRESHOLDS[Math.min(level + 1, PASS_MAX_LEVEL)];
   const prevThreshold = PASS_LEVEL_THRESHOLDS[level];
   const progressPct =
-    level >= BATTLE_PASS_LEVELS
+    level >= PASS_MAX_LEVEL
       ? 100
       : Math.max(0, Math.min(100, ((totalClicks - prevThreshold) / (nextThreshold - prevThreshold)) * 100));
-  const clicksToNext = level >= BATTLE_PASS_LEVELS ? 0 : Math.max(0, nextThreshold - totalClicks);
+  const clicksToNext = level >= PASS_MAX_LEVEL ? 0 : Math.max(0, nextThreshold - totalClicks);
 
-  const freeClaimed = me.passClaimedFree || [];
-  const premClaimed = me.passClaimedPremium || [];
+  const freeClaimed = passClaimedList(me, "free");
+  const premClaimed = passClaimedList(me, "premium");
   const hasClaimable =
     FREE_PASS_REWARDS.some((r) => r.level <= level && !freeClaimed.includes(r.level)) ||
     (me.hasPremiumPass && PREMIUM_PASS_REWARDS.some((r) => r.level <= level && !premClaimed.includes(r.level)));
@@ -6859,7 +6945,7 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
       <div className="cn-pass-summary">
         <div className="cn-pass-summary-top">
           <div className="cn-pass-summary-level">
-            Рівень {level}/{BATTLE_PASS_LEVELS}
+            Рівень {level}/{PASS_MAX_LEVEL}
           </div>
           {hasClaimable && (
             <button
@@ -6875,7 +6961,7 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
           <div className="cn-pass-track-fill" style={{ width: progressPct + "%" }} />
         </div>
         <div className="cn-pass-summary-sub">
-          {level >= BATTLE_PASS_LEVELS
+          {level >= PASS_MAX_LEVEL
             ? "Прохід повністю пройдено!"
             : `До наступного рівня: ${fmt(clicksToNext)} кліків`}
         </div>
@@ -6888,7 +6974,7 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
           </div>
           <div className="cn-pass-promo-text">
             <div className="cn-pass-promo-title">PREMIUM PASS</div>
-            <div className="cn-pass-promo-desc">2× сили, ексклюзивні аватарки, титули та значки</div>
+            <div className="cn-pass-promo-desc">2× Points, ексклюзивні аватарки, титули та банери</div>
           </div>
           <button
             className="cn-pass-buy-btn"
@@ -7437,7 +7523,13 @@ function GlobalStyles() {
       .cn-admin-field-label { font-size: 10.5px; color: #8FA6C4; display: flex; flex-direction: column; gap: 3px; }
       .cn-admin-edit-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-      .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; }
+      .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; gap: 10px; }
+      .cn-stat-chip--half { flex: 1; min-width: 0; padding: 12px 10px; }
+      .cn-stat-chip--half .cn-stat-chip-label { display: inline-flex; align-items: center; gap: 5px; }
+      .cn-stat-chip--half .cn-stat-chip-value { font-size: 21px; }
+      .cn-stat-chip--points { border-color: rgba(251,191,36,0.55); box-shadow: 0 0 16px rgba(251,191,36,0.18); }
+      .cn-stat-chip--points .cn-stat-chip-label { color: #FDE68A; }
+      .cn-pass-reward-icon--banner img { width: 44px; height: 26px; border-radius: 6px; object-fit: cover; display: block; }
       .cn-stat-chip {
         display: flex; align-items: center; gap: 16px;
         padding: 14px 26px; border-radius: 18px; min-width: 260px; justify-content: center;
