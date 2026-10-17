@@ -5,6 +5,7 @@ import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson, cityKey } from "./map/cities.js";
 import { cityZones, pointInPolygon } from "./map/geo.js";
 import { waterTexture, landTexture } from "./map/textures.js";
+import { geoLabelsGeoJson } from "./map/geoLabels.js";
 
 // КАРТА ТЕРРИТОРІЙ
 // Лише адміністративні області й їхні кордони — без реальних держав і прапорів.
@@ -60,6 +61,17 @@ const CITY_TIERS = [
   { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 8.5 }, // області без реального міста: точка з назвою області
 ];
 const labelField = (lang) => (lang === "uk" ? ["get", "u"] : ["get", "n"]);
+
+
+// Підписи природних об'єктів (океани, моря, гори, пустелі…): 4 рівні за важливістю, чим важливіше — тим раніше з'являється.
+const GEO_TIERS = [
+  { tier: 1, minzoom: 0, maxzoom: 6.5, size: 16, spacing: 0.32, upper: true },
+  { tier: 2, minzoom: 1.8, maxzoom: 8.5, size: 13, spacing: 0.16, upper: false },
+  { tier: 3, minzoom: 2.9, maxzoom: 24, size: 11.5, spacing: 0.08, upper: false },
+  { tier: 4, minzoom: 4.2, maxzoom: 24, size: 10.5, spacing: 0.05, upper: false },
+];
+const geoIsWater = ["in", ["get", "k"], ["literal", ["o", "s", "g", "t", "l"]]];
+const geoIsCont = ["==", ["get", "k"], "c"];
 
 const STAGE_WEIGHTS = { topology: 0.55, model: 0.3, geojson: 0.15 };
 
@@ -352,6 +364,40 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           },
         });
 
+        // Підписи природних об'єктів: під містами й ігровими об'єктами, але над областями.
+        try {
+        map.addSource("geolabels", { type: "geojson", data: geoLabelsGeoJson() });
+        for (const g of GEO_TIERS) {
+          map.addLayer({
+            id: "geolabels-" + g.tier,
+            type: "symbol",
+            source: "geolabels",
+            minzoom: g.minzoom,
+            maxzoom: g.maxzoom,
+            filter: ["==", ["get", "tier"], g.tier],
+            layout: {
+              "text-field": labelField(latest.current.lang),
+              "text-font": LABEL_FONT,
+              "text-size": g.size,
+              "text-letter-spacing": g.spacing,
+              "text-transform": g.upper ? "uppercase" : "none",
+              "text-max-width": g.tier === 1 ? 12 : 7,
+              "text-rotate": ["get", "rot"],
+              "text-rotation-alignment": "map",
+              "text-pitch-alignment": "map",
+              "text-padding": 4,
+              "symbol-sort-key": ["-", 0, ["get", "tier"]],
+            },
+            paint: {
+              "text-color": ["case", geoIsWater, "#dcefff", geoIsCont, "rgba(255,255,255,0.9)", "#f8ffd9"],
+              "text-halo-color": ["case", geoIsWater, "rgba(6,40,120,0.85)", geoIsCont, "rgba(10,50,20,0.75)", "rgba(24,78,10,0.9)"],
+              "text-halo-width": 1.6,
+              "text-opacity": ["interpolate", ["linear"], ["zoom"], g.minzoom, 0, g.minzoom + 0.7, g.tier === 1 || g.tier === 2 ? 0.92 : 0.88],
+            },
+          });
+        }
+        } catch (err) { console.warn("Підписи природних об'єктів недоступні:", err); }
+
         // Ігрові об'єкти (бізнеси, ППО, маршрути дронів): один GeoJSON-джерело "ovl", малюється поверх областей.
         map.addSource("ovl", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         map.addLayer({ id: "ovl-zone-fill", type: "fill", source: "ovl", filter: ["==", ["get", "kind"], "zone"], paint: { "fill-color": ["get", "c"], "fill-opacity": 0.16 } });
@@ -462,6 +508,13 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       if (map.getLayer(id)) map.moveLayer(id);
     }
   }, [citiesReady, status]);
+
+  // Мова підписів природних об'єктів.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== "ready") return;
+    for (const g of GEO_TIERS) if (map.getLayer("geolabels-" + g.tier)) map.setLayoutProperty("geolabels-" + g.tier, "text-field", labelField(lang));
+  }, [lang, status]);
 
   // 2. Власники й кольори → feature-state областей та їхніх кордонів (лише змінені).
   useEffect(() => {
