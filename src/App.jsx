@@ -78,7 +78,6 @@ import {
 } from "./nations";
 import { BUILTIN_CHANGELOG } from "./changelog";
 import MaintenanceScreen from "./MaintenanceScreen";
-import { TestWarMapScreen, loadTestWar, saveTestWar, EMPTY_TW, MAX_OBJECTS, BIZ_MAX_HP, DRONE_DAMAGE, AA_RADIUS_KM } from "./testWar";
 
 /* ------------------------------------------------------------------ */
 /*  Season banner artwork (embedded)                                   */
@@ -147,6 +146,62 @@ function applyOfflineAutoClicker(rec) {
   };
 }
 const ENERGY_REGEN_PER_SEC = 1;
+
+/* ------------------------------------------------------------------ */
+/*  Покращення (за Points): енергія та оборона міста                   */
+/*  player.upg = { emax, ereg, cdef } — куплений рівень 0..5          */
+/* ------------------------------------------------------------------ */
+const UPG_MAX_LEVEL = 5;
+const WAR_DECLARE_COST = 5000; // Power за оголошення війни
+const CITY_DEF_UPGRADE_COST = 5000; // Power за рівень оборони міста
+const CITY_DEF_PREFIX = "citydef:"; // citydef:<cityKey> → рівень оборони міста (0..5)
+const UPGRADES = [
+  {
+    id: "emax",
+    title: "Максимальна енергія",
+    base: 100,
+    prices: [10000, 25000, 50000, 90000, 150000],
+    values: [120, 140, 170, 210, 250],
+    colLabel: "Максимальна енергія",
+    fmtVal: (v) => String(v),
+  },
+  {
+    id: "ereg",
+    title: "Відновлення енергії",
+    base: 1,
+    prices: [20000, 45000, 85000, 140000, 200000],
+    values: [1.1, 1.2, 1.3, 1.4, 1.5],
+    colLabel: "Відновлення",
+    fmtVal: (v) => String(v).replace(".", ",") + " енергії/с",
+  },
+  {
+    id: "cdef",
+    title: "Оборона міста",
+    base: 10000,
+    prices: [25000, 60000, 120000, 200000, 300000],
+    values: [12000, 15000, 20000, 25000, 30000],
+    colLabel: "Поріг захоплення",
+    fmtVal: (v) => String(v),
+  },
+];
+const CITY_DEF_THRESHOLDS = [10000, 12000, 15000, 20000, 25000, 30000];
+function upgLevel(rec, id) {
+  const n = Math.floor(Number(rec?.upg?.[id]) || 0);
+  return Math.max(0, Math.min(UPG_MAX_LEVEL, n));
+}
+function maxEnergyOf(rec) {
+  const l = upgLevel(rec, "emax");
+  return l > 0 ? UPGRADES[0].values[l - 1] : MAX_ENERGY;
+}
+function energyRegenOf(rec) {
+  const l = upgLevel(rec, "ereg");
+  return l > 0 ? UPGRADES[1].values[l - 1] : ENERGY_REGEN_PER_SEC;
+}
+async function getCityDefLevel(cityKeyStr) {
+  const raw = await storageGet(CITY_DEF_PREFIX + cityKeyStr, true);
+  const n = Math.floor(Number(raw) || 0);
+  return Math.max(0, Math.min(UPG_MAX_LEVEL, n));
+}
 const ID_KEY = "my-player-id";
 const TUTORIAL_KEY = "tutorial-done-v1";
 const TOS_KEY = "tos-accepted-v2"; // v2: оновлена угода (згадка про персональні дані)
@@ -784,6 +839,7 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   if (active.some((w) => warInvolves(w, defender))) return { ok: false, reason: "Ця країна вже веде війну" };
   const now = Date.now();
   const id = "w_" + now.toString(36) + Math.random().toString(36).slice(2, 5);
+  const defLevel = await getCityDefLevel(city.key || "").catch(() => 0);
   const war = {
     id,
     attacker,
@@ -797,7 +853,8 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
     battleEnd: now + WAR_PREP_MS + WAR_BATTLE_MS,
     attAllies: [],
     defAllies: [],
-    target: WAR_TARGET,
+    target: CITY_DEF_THRESHOLDS[defLevel] || WAR_TARGET,
+    defLevel,
     status: "active",
   };
   await setJSON(WAR_PREFIX + id, war, true);
@@ -866,6 +923,8 @@ async function finalizeWar(w, players, forcedWinner = null) {
   if (win) {
     if (w.cityKey) await storageSet(CITY_OWN_PREFIX + w.cityKey, w.attacker, true);
     else await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
+    // нова власниця починає з нульової оборони міста
+    if (w.cityKey) await storageSet(CITY_DEF_PREFIX + w.cityKey, "0", true);
     // Якщо в захисника не лишилось ні областей, ні міст — він з'являється у вільній області
     const nationsNow = await loadNations();
     if (nationsNow) {
@@ -1201,7 +1260,7 @@ function genId() {
 function getCurrentEnergy(rec) {
   if (!rec) return 0;
   const elapsedSec = Math.floor((Date.now() - rec.lastEnergyTs) / 1000);
-  return Math.min(MAX_ENERGY, rec.energy + Math.max(0, elapsedSec) * ENERGY_REGEN_PER_SEC);
+  return Math.min(maxEnergyOf(rec), rec.energy + Math.max(0, elapsedSec) * energyRegenOf(rec));
 }
 
 function getTelegramUser() {
@@ -2069,6 +2128,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player]);
 
+  /* Миттєве оновлення гравця (покупки, оплата дій) із негайним збереженням */
+  const updatePlayer = useCallback(
+    (fn) => {
+      setPlayer((prev) => {
+        if (!prev) return prev;
+        const u = fn(prev);
+        if (!u || u === prev) return prev;
+        flush(u);
+        return u;
+      });
+    },
+    [flush]
+  );
+
   /* Click handler */
   const handleClick = useCallback(
     (spawnEffects) => {
@@ -2310,6 +2383,7 @@ export default function App() {
                 onRefreshMail={refreshMail}
                 onRefreshData={() => refreshGameData(true)}
                 war={war}
+                onUpdatePlayer={updatePlayer}
                 onWarDeclared={(w) => { setWar(w); setTab("clicker"); }}
               />
             )}
@@ -2494,6 +2568,30 @@ function GameLogo({ size = 40, className }) {
       <ellipse cx="32" cy="32" rx="11" ry="27" stroke="currentColor" strokeWidth="1.6" strokeOpacity="0.4" />
       <path d="M5.5 32h53" stroke="currentColor" strokeWidth="1.6" strokeOpacity="0.4" />
       <path d="M17 21l6.5 21.5L32 28l8.5 14.5L47 21" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/* Іконка Power: кулак. Малюється SVG, колір береться з currentColor. */
+function FistIcon({ size = 24, className }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <rect x="4.2" y="6.4" width="3.7" height="7.4" rx="1.85" />
+      <rect x="8.1" y="4.6" width="3.7" height="9" rx="1.85" />
+      <rect x="12" y="4.6" width="3.7" height="9" rx="1.85" />
+      <rect x="15.9" y="6.4" width="3.7" height="7.4" rx="1.85" />
+      <path d="M4.2 12.2h15.4v3.6a5.2 5.2 0 0 1-5.2 5.2H9.4a5.2 5.2 0 0 1-5.2-5.2z" />
+      <rect x="2.6" y="13.6" width="8.4" height="3.6" rx="1.8" fill="rgba(0,0,0,0.28)" />
+    </svg>
+  );
+}
+
+/* Іконка Points: кристал (діамант). */
+function GemIcon({ size = 24, className }) {
+  return (
+    <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M6.2 3.5h11.6l4.2 5.3L12 21 2 8.8z" fill="currentColor" fillOpacity="0.9" />
+      <path d="M2 8.8h20M9 3.5l-2.6 5.3L12 21M15 3.5l2.6 5.3L12 21" stroke="rgba(0,0,0,0.32)" strokeWidth="1.2" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -2976,7 +3074,7 @@ function ClickerScreen({
     onClick((allowed) => spawnEffects(clientX, clientY, allowed));
   };
 
-  const energyPct = Math.max(0, Math.min(100, (energy / MAX_ENERGY) * 100));
+  const energyPct = Math.max(0, Math.min(100, (energy / maxEnergyOf(player)) * 100));
   const isEmpty = energy < 1;
   const unreadNews = news && news.length > 0;
 
@@ -3006,11 +3104,13 @@ function ClickerScreen({
       )}
 
       <div className="cn-power-block" style={war && warPhase(war) === "battle" && warSide(war, player.countryCode) ? { display: "none" } : undefined}>
-        <div className="cn-power-label">POWER</div>
-        <div className="cn-power-value-row">
-          <span className="cn-power-dots">····</span>
+        <div className="cn-power-value-row" aria-label="Power">
+          <FistIcon size={30} className="cn-power-icon" />
           <span className="cn-power-value">{fmt(player.power)}</span>
-          <span className="cn-power-dots">····</span>
+        </div>
+        <div className="cn-power-value-row cn-power-value-row--points" aria-label="Points">
+          <GemIcon size={30} className="cn-power-icon cn-power-icon--points" />
+          <span className="cn-power-value">{fmt(player.points || 0)}</span>
         </div>
       </div>
 
@@ -3059,13 +3159,13 @@ function ClickerScreen({
         <div className="cn-energy-pill">
           <Flame size={15} className="cn-energy-icon" />
           <span className="cn-energy-text">
-            {Math.floor(energy)} / {MAX_ENERGY}
+            {Math.floor(energy)} / {maxEnergyOf(player)}
           </span>
         </div>
         <div className="cn-energy-bar">
           <div className="cn-energy-fill" style={{ width: energyPct + "%" }} />
         </div>
-        {isEmpty && <div className="cn-energy-empty-note"><Zap size={13} className="cn-energy-empty-ico" /><span>Енергія відновлюється</span><b>+1 / сек</b></div>}
+        {isEmpty && <div className="cn-energy-empty-note"><Zap size={13} className="cn-energy-empty-ico" /><span>Енергія відновлюється</span><b>+{String(energyRegenOf(player)).replace(".", ",")} / сек</b></div>}
       </div>
 
       {player.hasPremiumPass && (
@@ -3088,17 +3188,13 @@ function ClickerScreen({
       )}
 
       <div className="cn-stats-row">
-        <div className="cn-stat-chip cn-stat-chip--half">
+        <div className="cn-stat-chip">
+          <span className="cn-stat-chip-dots">⁚⁚</span>
           <div className="cn-stat-chip-body">
             <span className="cn-stat-chip-label">TOTAL CLICKS</span>
             <span className="cn-stat-chip-value">{fmt(player.totalClicks)}</span>
           </div>
-        </div>
-        <div className="cn-stat-chip cn-stat-chip--half cn-stat-chip--points">
-          <div className="cn-stat-chip-body">
-            <span className="cn-stat-chip-label"><Coins size={12} /> POINTS</span>
-            <span className="cn-stat-chip-value">{fmt(player.points || 0)}</span>
-          </div>
+          <span className="cn-stat-chip-dots">⁚⁚</span>
         </div>
       </div>
 
@@ -3274,10 +3370,9 @@ function WarAlliesModal({ war, me, onClose }) {
 /* ------------------------------------------------------------------ */
 
 const HQ_SECTIONS = [
-  { id: "dev", label: "Розвиток", Icon: TrendingUp, text: "Тут можна буде покращувати країну та відкривати нові можливості." },
+  { id: "dev", label: "Покращення", Icon: TrendingUp, text: "" },
   { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, noSoon: true, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
   { id: "diplomacy", label: "Дипломатія", leaderOnly: true, Icon: Handshake, text: "" },
-  { id: "economy", label: "Економіка", Icon: Coins, text: "" },
   { id: "info", label: "Інформація", Icon: Info, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
 ];
@@ -3286,16 +3381,12 @@ const HQ_SUB = [
   { id: "mail", label: "Пошта", Icon: Mail },
   { id: "stats", label: "Статистика", Icon: BarChart2 },
 ];
-// Підрозділи «Армії»
+// Підрозділи «Армії»: лише «Оборона» (поруч із кнопкою «Оголосити війну»)
 const ARMY_SUBS = [
-  { id: "sabotage", label: "Диверсія", Icon: Flame, text: "Тут будуть диверсії проти інших країн." },
-  { id: "sanctions", label: "Санкції", Icon: Ban, text: "Тут можна буде накладати санкції на інші країни." },
-  { id: "intel", label: "Розвідка", Icon: Search, text: "Тут буде розвідка: інформація про війська й економіку інших країн." },
   { id: "defense", label: "Оборона", Icon: Shield, text: "" },
-  { id: "arsenal", label: "Арсенал", Icon: Zap, text: "" },
 ];
 
-function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared }) {
+function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared, onUpdatePlayer }) {
   const [view, setView] = useState(null); // null | id розділу | "dev"
   const [pickKind, setPickKind] = useState(null); // null | "ally" | "pact"
   const [dip, setDip] = useState(null);
@@ -3304,17 +3395,11 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
   const [warMsg, setWarMsg] = useState("");
   const [armySub, setArmySub] = useState(null); // null | id підрозділу Армії
-  const [tw, setTw] = useState(EMPTY_TW); // тестові бізнеси й ППО
-  const [twAction, setTwAction] = useState(null); // null | "business" | "aa" | "drone"
-  useEffect(() => {
-    let cancelled = false;
-    loadTestWar().then((d) => { if (!cancelled) setTw(d); });
-    return () => { cancelled = true; };
-  }, []);
-  const changeTw = useCallback((d) => {
-    setTw(d);
-    saveTestWar(d);
-  }, []);
+  const [defPick, setDefPick] = useState(false); // вибір власного міста на карті
+  const [defCity, setDefCity] = useState(null); // { id, name, rid, key }
+  const [defLevel, setDefLevel] = useState(0);
+  const [defMsg, setDefMsg] = useState("");
+  const [upgMsg, setUpgMsg] = useState("");
 
   const reloadDip = useCallback(async () => {
     setDip(await loadDiplomacy());
@@ -3355,12 +3440,19 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     }
     cnSfx.navSwitch();
     setDipMsg("");
+    setUpgMsg("");
     setArmySub(null);
+    setDefCity(null);
+    setDefMsg("");
     setView(id);
   };
   const goBack = () => {
     if (view === "mail" || view === "stats") setView("info");
-    else if (view === "army" && armySub) setArmySub(null);
+    else if (view === "army" && armySub) {
+      setArmySub(null);
+      setDefCity(null);
+      setDefMsg("");
+    }
     else {
       setArmySub(null);
       setView(null);
@@ -3384,6 +3476,11 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const declareOn = async (city) => {
     const target = warPick?.country;
     setWarPick(null);
+    if ((player.power || 0) < WAR_DECLARE_COST) {
+      cnSfx.error();
+      setWarMsg(`✗ Для оголошення війни потрібно ${fmt(WAR_DECLARE_COST)} Power`);
+      return;
+    }
     const res = await declareWar2({
       attacker: player.countryCode,
       defender: target,
@@ -3395,6 +3492,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     if (res.ok) {
       cnSfx.purchase();
       setWarMsg("");
+      onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: Math.max(0, (prev.power || 0) - WAR_DECLARE_COST) }));
       onWarDeclared && onWarDeclared(res.war);
     } else {
       cnSfx.error();
@@ -3402,10 +3500,75 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     }
   };
 
-  if (twAction) {
+  const buyUpgrade = (id) => {
+    const u = UPGRADES.find((x) => x.id === id);
+    const lvl = upgLevel(player, id);
+    if (!u || lvl >= UPG_MAX_LEVEL) return;
+    const price = u.prices[lvl];
+    if ((player.points || 0) < price) {
+      cnSfx.error();
+      setUpgMsg(`✗ Недостатньо Points: потрібно ${fmt(price)}`);
+      return;
+    }
+    onUpdatePlayer &&
+      onUpdatePlayer((prev) => {
+        if ((prev.points || 0) < price || upgLevel(prev, id) !== lvl) return prev;
+        return { ...prev, points: prev.points - price, upg: { ...(prev.upg || {}), [id]: lvl + 1 } };
+      });
+    cnSfx.purchase();
+    setUpgMsg(`✓ «${u.title}»: рівень ${lvl + 1} відкрито`);
+  };
+
+  const pickDefCity = (city) => {
+    setDefPick(false);
+    setDefCity(city);
+    setDefMsg("");
+    setDefLevel(0);
+    getCityDefLevel(city.key).then(setDefLevel).catch(() => {});
+  };
+
+  const upgradeDef = async () => {
+    if (!defCity) return;
+    const lvl = await getCityDefLevel(defCity.key);
+    setDefLevel(lvl);
+    const fail = (t) => {
+      cnSfx.error();
+      setDefMsg("✗ " + t);
+    };
+    if (lvl >= UPG_MAX_LEVEL) return fail("Оборона міста вже на максимальному рівні");
+    const owner = (nations?.cityOwners || {})[defCity.key] || nations?.owners?.[defCity.rid];
+    if (owner !== player.countryCode) return fail("Це місто більше не належить твоїй країні");
+    if (war && war.status !== "ended" && war.cityKey === defCity.key) return fail("Під час війни за місто оборону покращувати не можна");
+    if (lvl + 1 > upgLevel(player, "cdef")) return fail(`Спершу відкрий рівень ${lvl + 1} «Оборона міста» у розділі «Покращення» (за Points)`);
+    if ((player.power || 0) < CITY_DEF_UPGRADE_COST) return fail(`Потрібно ${fmt(CITY_DEF_UPGRADE_COST)} Power`);
+    await storageSet(CITY_DEF_PREFIX + defCity.key, String(lvl + 1), true);
+    onUpdatePlayer && onUpdatePlayer((prev) => ((prev.power || 0) >= CITY_DEF_UPGRADE_COST ? { ...prev, power: prev.power - CITY_DEF_UPGRADE_COST } : prev));
+    cnSfx.purchase();
+    setDefLevel(lvl + 1);
+    setDefMsg(`✓ Оборону міста ${defCity.name} покращено до рівня ${lvl + 1}`);
+  };
+
+  if (view === "army" && defPick) {
     return (
       <div className="cn-hq" style={{ "--hq": color }}>
-        <TestWarMapScreen action={twAction} me={player} nations={nations} lang={lang} data={tw} onChange={changeTw} onClose={() => setTwAction(null)} />
+        <MapScreen
+          players={players}
+          me={player}
+          loading={false}
+          onRefresh={onRefreshData || (() => {})}
+          nations={nations}
+          lang={lang}
+          dip={dip}
+          pick={{
+            step: "city",
+            country: player.countryCode,
+            label: "Обери своє місто для оборони",
+            cityBtn: (n) => `🛡️ Обрати ${n}`,
+            hint: "Обери місто своєї країни",
+            onPickCity: pickDefCity,
+            onCancel: () => setDefPick(false),
+          }}
+        />
       </div>
     );
   }
@@ -3497,16 +3660,25 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
             msg={warMsg}
             sub={armySub}
             onSub={(id) => { cnSfx.navSwitch(); setArmySub(id); }}
-            tw={tw}
-            onTwAction={(a) => { cnSfx.navSwitch(); setTwAction(a); }}
+            player={player}
+            defCity={defCity}
+            defLevel={defLevel}
+            defMsg={defMsg}
+            onPickDefCity={() => { cnSfx.navSwitch(); setDefMsg(""); setDefPick(true); }}
+            onUpgradeDef={upgradeDef}
             onDeclare={async () => {
               setWarMsg("");
+              if ((player.power || 0) < WAR_DECLARE_COST) {
+                cnSfx.error();
+                setWarMsg(`✗ Для оголошення війни потрібно ${fmt(WAR_DECLARE_COST)} Power`);
+                return;
+              }
               setDip(await loadDiplomacy());
               setWarPick({ step: "country" });
             }}
           />
-        ) : view === "economy" ? (
-          <EconomyPanel tw={tw} onCreateBusiness={() => { cnSfx.navSwitch(); setTwAction("business"); }} />
+        ) : view === "dev" ? (
+          <UpgradesPanel player={player} msg={upgMsg} onBuy={buyUpgrade} />
         ) : view === "info" ? (
           <InfoPanel
             country={country}
@@ -3602,7 +3774,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       <div className="cn-hq-grid">
         {HQ_SECTIONS.map((s) => {
           const locked = s.leaderOnly && !isLeader;
-          const soon = s.id === "dev";
+          const soon = false;
           return (
             <button
               key={s.id}
@@ -3641,34 +3813,39 @@ function HqRowTile({ Icon, label, hint, onClick, badge }) {
   );
 }
 
-/* Армія (лише лідер): війна за місто, Диверсія, Санкції, Розвідка, Оборона, Арсенал */
-function ArmyPanel({ war, msg, onDeclare, sub, onSub, tw, onTwAction }) {
+/* Армія (лише лідер): Оголосити війну та Оборона міста */
+function ArmyPanel({ war, msg, onDeclare, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
   const phase = war ? warPhase(war) : null;
   if (sub === "defense") {
+    const unlocked = upgLevel(player, "cdef");
+    const maxed = defLevel >= UPG_MAX_LEVEL;
+    const needUnlock = !maxed && defLevel + 1 > unlocked;
     return (
       <div className="cn-dip-menu">
-        <HqRowTile Icon={Shield} label="Створити ППО" hint={`Постав ППО на карті. Радіус дії ${AA_RADIUS_KM} км`} onClick={() => onTwAction("aa")} />
-        <div className="cn-tw-line">ППО встановлено: <b>{tw.aa.length}/{MAX_OBJECTS}</b></div>
-        <div className="cn-dip-sub">ППО збиває дрони, що влітають у її зону. Тестова механіка.</div>
-      </div>
-    );
-  }
-  if (sub === "arsenal") {
-    return (
-      <div className="cn-dip-menu">
-        <HqRowTile Icon={Send} label="Запустити Дрон" hint="Режими: прокласти маршрут або керувати самостійно" onClick={() => onTwAction("drone")} />
-        <div className="cn-tw-line">Бізнесів-цілей: <b>{tw.biz.length}</b></div>
-        <div className="cn-dip-sub">Влучання дрона віднімає {DRONE_DAMAGE} ХП бізнесу. Тестова механіка.</div>
-      </div>
-    );
-  }
-  const soonSub = ARMY_SUBS.find((x) => x.id === sub);
-  if (soonSub) {
-    return (
-      <div className="cn-hq-wip">
-        <div className="cn-hq-wip-icon"><soonSub.Icon size={34} /></div>
-        <div className="cn-hq-wip-title">У розробці</div>
-        <div className="cn-hq-wip-text">{soonSub.text}</div>
+        {defMsg && <div className="cn-dev-status-msg">{defMsg}</div>}
+        <HqRowTile Icon={Shield} label={defCity ? "Обрати інше місто" : "Обрати місто на карті"} hint="Обери своє місто, щоб покращити його оборону" onClick={onPickDefCity} />
+        <div className="cn-tw-line">Відкрито рівнів у «Покращення»: <b>{unlocked}/{UPG_MAX_LEVEL}</b></div>
+        {defCity && (
+          <div className="cn-def-card">
+            <div className="cn-def-city">{defCity.name}</div>
+            <div className="cn-def-lvl">Рівень оборони <b>{defLevel}/{UPG_MAX_LEVEL}</b></div>
+            <div className="cn-dip-list">
+              <div className="cn-dip-row"><div className="cn-dip-row-name">Поточний поріг захоплення</div><b className="cn-tw-hp-num">{fmt(CITY_DEF_THRESHOLDS[defLevel])}</b></div>
+              {!maxed && <div className="cn-dip-row"><div className="cn-dip-row-name">Наступний рівень</div><b className="cn-tw-hp-num">{fmt(CITY_DEF_THRESHOLDS[defLevel + 1])}</b></div>}
+            </div>
+            {maxed ? (
+              <div className="cn-dip-sub" style={{ textAlign: "center" }}>Максимальний рівень оборони</div>
+            ) : (
+              <>
+                <button type="button" className="cn-primary-btn cn-map-pick-btn" disabled={needUnlock} onClick={onUpgradeDef} style={needUnlock ? { opacity: 0.5 } : undefined}>
+                  <span className="cn-primary-btn-label">Покращити до рівня {defLevel + 1} · {fmt(CITY_DEF_UPGRADE_COST)} Power</span>
+                </button>
+                {needUnlock && <div className="cn-dip-sub" style={{ textAlign: "center" }}>Спершу відкрий рівень {defLevel + 1} «Оборона міста» у розділі «Покращення» за Points.</div>}
+              </>
+            )}
+          </div>
+        )}
+        <div className="cn-dip-sub">Поріг захоплення — скільки балансу кліків має набрати атакуюча сторона, щоб узяти місто. Після захоплення оборона міста скидається.</div>
       </div>
     );
   }
@@ -3687,37 +3864,55 @@ function ArmyPanel({ war, msg, onDeclare, sub, onSub, tw, onTwAction }) {
         <button type="button" className="cn-warhud-declare" onClick={() => { cnSfx.navSwitch(); onDeclare(); }}>
           <span className="cn-hq-tile-icon"><Swords size={22} /></span>
           <span className="cn-warhud-declare-text">
-            <b>Оголосити війну</b>
+            <b>Оголосити війну · {fmt(WAR_DECLARE_COST)} Power</b>
             <small>Обери країну й місто на карті. 10 хвилин підготовки, далі година битви.</small>
           </span>
         </button>
       )}
       {ARMY_SUBS.map((x) => (
-        <HqRowTile key={x.id} Icon={x.Icon} label={x.label} onClick={() => onSub(x.id)} />
+        <HqRowTile key={x.id} Icon={x.Icon} label={x.label} hint="Покращення оборони твоїх міст" onClick={() => onSub(x.id)} />
       ))}
-      <div className="cn-dip-sub">Правила: кліки всіх гравців країн-учасниць під час битви йдуть на шкалу. Атака має набрати баланс (кліки атаки мінус кліки захисту) {fmt(WAR_TARGET)} за годину, інакше місто лишається в захисника.</div>
+      <div className="cn-dip-sub">Правила: кліки всіх гравців країн-учасниць під час битви йдуть на шкалу. Атака має набрати баланс (кліки атаки мінус кліки захисту), що дорівнює порогу захоплення міста (від {fmt(CITY_DEF_THRESHOLDS[0])} до {fmt(CITY_DEF_THRESHOLDS[UPG_MAX_LEVEL])} залежно від оборони) за годину, інакше місто лишається в захисника.</div>
     </div>
   );
 }
 
-/* Економіка: бізнеси (тестова механіка) */
-function EconomyPanel({ tw, onCreateBusiness }) {
+/* Покращення за Points: енергія та оборона міста */
+function UpgradesPanel({ player, msg, onBuy }) {
+  const roman = ["I", "II", "III", "IV", "V"];
   return (
     <div className="cn-dip-menu">
-      <HqRowTile Icon={Coins} label="Створити бізнес" hint={`Обери місце на карті. Кожен бізнес має ${BIZ_MAX_HP} ХП`} onClick={onCreateBusiness} />
-      <div className="cn-tw-line">Мої бізнеси: <b>{tw.biz.length}/{MAX_OBJECTS}</b></div>
-      {tw.biz.length === 0 && <div className="cn-lb-empty">Бізнесів поки немає</div>}
-      <div className="cn-dip-list">
-        {tw.biz.map((b, i) => (
-          <div className="cn-dip-row" key={b.id}>
-            <span className="cn-hq-tile-icon" style={{ width: 32, height: 32 }}><Coins size={16} /></span>
-            <div className="cn-dip-row-name">Бізнес #{i + 1}</div>
-            <span className="cn-tw-hp"><span className="cn-tw-hp-fill" style={{ width: Math.max(0, (b.hp / BIZ_MAX_HP) * 100) + "%" }} /></span>
-            <b className="cn-tw-hp-num">{b.hp}/{BIZ_MAX_HP}</b>
+      {msg && <div className="cn-dev-status-msg">{msg}</div>}
+      <div className="cn-tw-line">Мої Points: <b>{fmt(player.points || 0)}</b></div>
+      {UPGRADES.map((u, ui) => {
+        const lvl = upgLevel(player, u.id);
+        const total = u.prices.reduce((a, b) => a + b, 0);
+        const next = lvl < UPG_MAX_LEVEL ? u.prices[lvl] : null;
+        return (
+          <div className="cn-upg" key={u.id}>
+            <div className="cn-upg-title">{ui + 1}. {u.title}</div>
+            <div className="cn-upg-table">
+              <div className="cn-upg-row cn-upg-row--head"><span>Рівень</span><span>Ціна в Points</span><span>{u.colLabel}</span></div>
+              <div className="cn-upg-row cn-upg-row--done"><span>База</span><span>—</span><span>{u.fmtVal(u.base).replace(/^(\d+)$/, (m) => fmt(Number(m)))}</span></div>
+              {u.prices.map((pr, i) => (
+                <div key={i} className={"cn-upg-row" + (i < lvl ? " cn-upg-row--done" : i === lvl ? " cn-upg-row--next" : "")}>
+                  <span>{roman[i]}{i < lvl ? " ✓" : ""}</span>
+                  <span>{fmt(pr)}</span>
+                  <span>{u.id === "ereg" ? u.fmtVal(u.values[i]) : fmt(u.values[i])}</span>
+                </div>
+              ))}
+            </div>
+            <div className="cn-upg-total">Загальна вартість: <b>{fmt(total)} Points</b></div>
+            {next != null ? (
+              <button type="button" className="cn-primary-btn cn-map-pick-btn" onClick={() => onBuy(u.id)} style={(player.points || 0) < next ? { opacity: 0.55 } : undefined}>
+                <span className="cn-primary-btn-label">Відкрити рівень {roman[lvl]} · {fmt(next)} Points</span>
+              </button>
+            ) : (
+              <div className="cn-dip-sub" style={{ textAlign: "center" }}>Усі рівні відкрито</div>
+            )}
           </div>
-        ))}
-      </div>
-      <div className="cn-dip-sub">Тестова механіка: бізнеси бачиш лише ти.</div>
+        );
+      })}
     </div>
   );
 }
@@ -5129,7 +5324,7 @@ function StatsScreen({ me, energy, globalRank, countryRank, isLeader, mail, wars
       <div className="cn-profile-grid" style={{ marginBottom: 10 }}>
         <ProfileStat label="Power" value={fmt(me.power)} />
         <ProfileStat label="Total Clicks" value={fmt(me.totalClicks)} />
-        <ProfileStat label="Energy" value={`${Math.floor(energy)} / ${MAX_ENERGY}`} />
+        <ProfileStat label="Energy" value={`${Math.floor(energy)} / ${maxEnergyOf(me)}`} />
         <ProfileStat label="Global Rank" value={typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank} />
         <ProfileStat label="Country Rank" value={typeof countryRank === "number" ? "#" + fmt(countryRank) : countryRank} />
         <ProfileStat label="Power / Click" value={avgPowerPerClick} />
@@ -5759,6 +5954,7 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
   const [logLimit, setLogLimit] = useState(20);
   const [editOpen, setEditOpen] = useState(false);
   const [power, setPower] = useState("");
+  const [pts, setPts] = useState("");
   const [clicks, setClicks] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -5809,9 +6005,10 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
     setBusy(true);
     const np = Math.max(0, Math.round(Number(power) || 0));
     const nc = Math.max(0, Math.round(Number(clicks) || 0));
-    const updated = { ...sel, power: np, totalClicks: nc };
+    const npt = Math.max(0, Math.round(Number(pts) || 0));
+    const updated = { ...sel, power: np, points: npt, totalClicks: nc };
     await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
-    await adminLogAction(sel.id, `Адмін змінив Power ${fmt(sel.power || 0)} → ${fmt(np)}, кліки ${fmt(sel.totalClicks || 0)} → ${fmt(nc)}`);
+    await adminLogAction(sel.id, `Адмін змінив Power ${fmt(sel.power || 0)} → ${fmt(np)}, Points ${fmt(sel.points || 0)} → ${fmt(npt)}, кліки ${fmt(sel.totalClicks || 0)} → ${fmt(nc)}`);
     if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
     setMsg("✓ Збережено");
     setEditOpen(false);
@@ -5931,6 +6128,10 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
                 <input className="cn-admin-input" type="number" value={power} onChange={(e) => setPower(e.target.value)} />
               </label>
               <label className="cn-admin-field-label">
+                Points
+                <input className="cn-admin-input" type="number" value={pts} onChange={(e) => setPts(e.target.value)} />
+              </label>
+              <label className="cn-admin-field-label">
                 Кількість кліків
                 <input className="cn-admin-input" type="number" value={clicks} onChange={(e) => setClicks(e.target.value)} />
               </label>
@@ -5945,7 +6146,7 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
                 <input className="cn-admin-input" type="text" placeholder="Причина блокування (необов'язково)" value={reason} onChange={(e) => setReason(e.target.value)} />
               )}
               <div className="cn-admin-edit-actions">
-                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => { setPower(String(Math.round(sel.power || 0))); setClicks(String(Math.round(sel.totalClicks || 0))); setEditOpen(true); }}>
+                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => { setPower(String(Math.round(sel.power || 0))); setPts(String(Math.round(sel.points || 0))); setClicks(String(Math.round(sel.totalClicks || 0))); setEditOpen(true); }}>
                   Редагувати
                 </button>
                 <button className={"cn-dev-btn" + (sel.blocked ? "" : " cn-dev-btn--danger")} type="button" disabled={busy} onClick={toggleBlock}>
@@ -6251,7 +6452,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     }
     setBusy(true);
     try {
-      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify({ ...me, power: 0, points: 0, passBaseClicks: 0, totalClicks: 0, energy: MAX_ENERGY, lastEnergyTs: Date.now() }), true);
+      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify({ ...me, power: 0, points: 0, passBaseClicks: 0, totalClicks: 0, upg: {}, energy: MAX_ENERGY, lastEnergyTs: Date.now() }), true);
       await setJSON(MAIL_PREFIX + me.id, [], true);
       await saveWars([]);
       await saveAlliances([]);
@@ -6630,11 +6831,11 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
         type="button"
         onClick={() => pick.onPickCity({ id: selectedCity.city.i, name: cityName(selectedCity.city), rid: selectedCity.city.rid, key: cityKey(selectedCity.city) })}
       >
-        <span className="cn-primary-btn-label">⚔️ Напасти на {cityName(selectedCity.city)}</span>
+        <span className="cn-primary-btn-label">{pick.cityBtn ? pick.cityBtn(cityName(selectedCity.city)) : `⚔️ Напасти на ${cityName(selectedCity.city)}`}</span>
       </button>
     ) : pick && pick.step === "city" ? (
       <div className="cn-map-card-sub" style={{ marginTop: 8 }}>
-        Обери місто країни «{COUNTRY_MAP[pick.country]?.name}»
+        {pick.hint || `Обери місто країни «${COUNTRY_MAP[pick.country]?.name}»`}
       </div>
     ) : null;
   const pickBtn =
@@ -7418,6 +7619,9 @@ function GlobalStyles() {
       }
       .cn-power-value-row { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 2px; }
       .cn-power-dots { color: var(--cn-accent); font-size: 16px; letter-spacing: 2px; opacity: 0.85; align-self: center; }
+      .cn-power-icon { flex-shrink: 0; color: var(--cn-accent-bright, #7DD3FC); filter: drop-shadow(0 0 8px rgba(var(--cn-accent-rgb),0.6)); }
+      .cn-power-icon--points { color: #FBBF24; filter: drop-shadow(0 0 8px rgba(251,191,36,0.6)); }
+      .cn-power-value-row--points { margin-top: 0; }
       .cn-power-value {
         font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: clamp(38px, 7vh, 56px);
         color: #FFFFFF; text-shadow: 0 3px 0 rgba(2,8,22,0.55), 0 0 30px rgba(var(--cn-accent-rgb),0.55);
@@ -7523,12 +7727,7 @@ function GlobalStyles() {
       .cn-admin-field-label { font-size: 10.5px; color: #8FA6C4; display: flex; flex-direction: column; gap: 3px; }
       .cn-admin-edit-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-      .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; gap: 10px; }
-      .cn-stat-chip--half { flex: 1; min-width: 0; padding: 12px 10px; }
-      .cn-stat-chip--half .cn-stat-chip-label { display: inline-flex; align-items: center; gap: 5px; }
-      .cn-stat-chip--half .cn-stat-chip-value { font-size: 21px; }
-      .cn-stat-chip--points { border-color: rgba(251,191,36,0.55); box-shadow: 0 0 16px rgba(251,191,36,0.18); }
-      .cn-stat-chip--points .cn-stat-chip-label { color: #FDE68A; }
+      .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; }
       .cn-pass-reward-icon--banner img { width: 44px; height: 26px; border-radius: 6px; object-fit: cover; display: block; }
       .cn-stat-chip {
         display: flex; align-items: center; gap: 16px;
@@ -8699,6 +8898,17 @@ function GlobalStyles() {
       .cn-hq-tile-label { font-size: 12px; }
       .cn-map-pick-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-radius: 12px; font-size: 13px; font-weight: 700; color: #fff; background: rgba(251,191,36,0.16); border: 1px solid rgba(251,191,36,0.55); }
       .cn-map-pick-btn { margin-top: 10px; padding: 12px; }
+      .cn-upg { padding: 12px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); margin-bottom: 12px; }
+      .cn-upg-title { font-size: 15px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+      .cn-upg-row { display: grid; grid-template-columns: 0.7fr 1.2fr 1.4fr; gap: 6px; padding: 7px 4px; font-size: 13px; color: rgba(255,255,255,0.85); border-bottom: 1px solid rgba(255,255,255,0.07); }
+      .cn-upg-row span:nth-child(2), .cn-upg-row span:nth-child(3) { text-align: right; }
+      .cn-upg-row--head { font-weight: 800; color: #fff; font-size: 12px; }
+      .cn-upg-row--done { color: #34D399; }
+      .cn-upg-row--next { background: rgba(251,191,36,0.12); border-radius: 8px; color: #FBBF24; font-weight: 700; }
+      .cn-upg-total { margin-top: 8px; font-size: 13px; color: rgba(255,255,255,0.75); }
+      .cn-def-card { padding: 12px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); }
+      .cn-def-city { font-size: 17px; font-weight: 800; color: #fff; }
+      .cn-def-lvl { font-size: 13px; color: rgba(255,255,255,0.75); margin: 2px 0 8px; }
       .cn-rel-tag { display: inline-block; margin-top: 8px; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 800; }
       .cn-rel-tag--ally { color: #06121F; background: #34D399; }
       .cn-rel-tag--pact { color: #06121F; background: #60A5FA; }

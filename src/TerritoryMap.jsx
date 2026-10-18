@@ -597,7 +597,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       // Території захоплених міст: зона міста (діаграма Вороного) фарбується в колір нового власника.
       map.addSource("selzone", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addSource("captured", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "captured-fill", type: "fill", source: "captured", paint: { "fill-color": ["get", "c"], "fill-opacity": 0.66 } });
+      map.addLayer({ id: "captured-fill", type: "fill", source: "captured", paint: { "fill-color": ["get", "c"], "fill-opacity": OWNER_OPACITY } });
+      // Та сама текстура суші, що й на решті території власника, щоб захоплена зона не відрізнялась.
+      if (map.hasImage("land-tex")) map.addLayer({ id: "captured-texture", type: "fill", source: "captured", paint: { "fill-pattern": "land-tex", "fill-opacity": 0.34 } });
       map.addLayer({ id: "captured-line", type: "line", source: "captured", paint: { "line-color": ["get", "c"], "line-width": 2.2, "line-opacity": 0.95 } });
       // Зони міст усередині вибраної області (прев'ю: де проходитиме лінія фронту між містами)
       // Підсвітка вибраної території однієї країни в поділеній області
