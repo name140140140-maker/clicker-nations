@@ -325,6 +325,10 @@ async function saveCityDefense(obj) {
 async function getNews() {
   return (await loadGameState()).news;
 }
+/* Новина, що не ламає основну дію, якщо запис не вдався */
+function pushNews(text) {
+  return addNews(text).catch(() => null);
+}
 async function addNews(text) {
   const state = await loadGameState();
   const item = { id: "n_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), text, ts: Date.now() };
@@ -342,6 +346,7 @@ async function ensureSeasonStarted() {
   // Новий сезон (50 днів): стартує одразу для всіх гравців.
   const started = { seasonNumber: season.seasonNumber || 1, durationDays: SEASON_DURATION_DAYS, startedAt: Date.now(), rev: SEASON_REV };
   const updated = await saveGameStatePart({ season: started });
+  await pushNews(`🏆 Стартував сезон ${started.seasonNumber}: ${started.durationDays} днів боротьби та нагород Battle Pass.`);
   return updated.season;
 }
 
@@ -720,6 +725,11 @@ async function respondDiplomacyRequest(requestId, accept) {
   await setJSON(DIP_PREFIX + "req:" + requestId, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
   if (accept) {
     await setJSON(DIP_PREFIX + req.type + ":" + pairId(req.from, req.to), { kind: req.type, a: req.from, b: req.to, active: true, ts: Date.now() }, true);
+    await pushNews(
+      req.type === "ally"
+        ? `🤝 ${COUNTRY_MAP[req.from]?.flag || ""} ${COUNTRY_MAP[req.from]?.name || req.from} і ${COUNTRY_MAP[req.to]?.flag || ""} ${COUNTRY_MAP[req.to]?.name || req.to} уклали союз.`
+        : `📜 ${COUNTRY_MAP[req.from]?.flag || ""} ${COUNTRY_MAP[req.from]?.name || req.from} і ${COUNTRY_MAP[req.to]?.flag || ""} ${COUNTRY_MAP[req.to]?.name || req.to} підписали пакт про ненапад.`
+    );
   }
   const fromLeader = await getLeader(req.from);
   if (fromLeader) {
@@ -740,6 +750,9 @@ async function breakDiplomacy(kind, mine, other) {
     DIP_PREFIX + kind + ":" + pairId(mine, other),
     { kind, a: mine, b: other, active: false, brokenAt: Date.now(), brokenBy: mine },
     true
+  );
+  await pushNews(
+    `💔 ${COUNTRY_MAP[mine]?.flag || ""} ${COUNTRY_MAP[mine]?.name || mine} розірвали ${kind === "ally" ? "союз" : "пакт про ненапад"} з ${COUNTRY_MAP[other]?.flag || ""} ${COUNTRY_MAP[other]?.name || other}.`
   );
   if (kind === "ally") {
     try {
@@ -860,6 +873,9 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   await setJSON(WAR_PREFIX + id, war, true);
   const an = COUNTRY_MAP[attacker]?.name || attacker;
   const dn = COUNTRY_MAP[defender]?.name || defender;
+  await pushNews(
+    `⚔️ ${COUNTRY_MAP[attacker]?.flag || ""} ${COUNTRY_MAP[attacker]?.name || attacker} оголосили війну ${COUNTRY_MAP[defender]?.flag || ""} ${COUNTRY_MAP[defender]?.name || defender} за місто ${city.name}. Поріг захоплення: ${fmt(war.target)}.`
+  );
   await mailMany(players, [attacker, defender], {
     type: "info",
     subject: `⚔️ Підготовка до війни за ${city.name}`,
@@ -893,6 +909,7 @@ async function acceptWarInvite(meta) {
   const key = meta.side === "att" ? "attAllies" : "defAllies";
   const next = { ...war, [key]: [...(war[key] || []), meta.toCountry] };
   await setJSON(WAR_PREFIX + war.id, next, true);
+  await pushNews(`🤝 ${COUNTRY_MAP[meta.toCountry]?.flag || ""} ${COUNTRY_MAP[meta.toCountry]?.name || meta.toCountry} вступили у війну за місто ${war.cityName} на боці ${meta.side === "att" ? "атаки" : "захисту"}.`);
   const fromLeader = await getLeader(meta.fromCountry);
   if (fromLeader) {
     await addMail(fromLeader, {
@@ -951,6 +968,11 @@ async function finalizeWar(w, players, forcedWinner = null) {
   const text = win
     ? `${an} перемогли в битві за ${w.cityName} (баланс +${fmt(net)}) і забрали місто в ${dn}.${respawnNote}`
     : `${dn} відбили атаку на ${w.cityName}: баланс ${fmt(Math.max(net, 0))} із ${fmt(w.target || WAR_TARGET)}. ${an} не змогли взяти місто.`;
+  await pushNews(
+    win
+      ? `🏴 ${COUNTRY_MAP[w.attacker]?.flag || ""} ${an} захопили місто ${w.cityName} у ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn}.${respawnNote}`
+      : `🛡️ ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn} відбили атаку ${an} на місто ${w.cityName}.`
+  );
   await mailMany(players, [...attSide, ...defSide], { type: "info", subject: win ? `Війна завершена: ${w.cityName} захоплено` : `Війна завершена: ${w.cityName} вистояло`, body: text });
   return true;
 }
@@ -2035,6 +2057,7 @@ export default function App() {
         if (!res.ok) return res;
         targetCountry = res.country.id;
         await setLeaderStorage(targetCountry, id);
+        await pushNews(`🌍 З'явилась нова країна «${name}». Світ став трохи тіснішим!`);
       } else if (!COUNTRY_MAP[targetCountry]) {
         await refreshNations();
         if (!COUNTRY_MAP[targetCountry]) return { ok: false, reason: "Цієї країни більше не існує. Обери іншу." };
@@ -2980,7 +3003,6 @@ function ClickerScreen({
   const [pressed, setPressed] = useState(false);
   const [shake, setShake] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
-  const [rewardsOpen, setRewardsOpen] = useState(false);
   const globeRef = useRef(null);
   const lastEffectTsRef = useRef(0);
   const MAX_EFFECTS = 6;
@@ -3077,6 +3099,18 @@ function ClickerScreen({
   const energyPct = Math.max(0, Math.min(100, (energy / maxEnergyOf(player)) * 100));
   const isEmpty = energy < 1;
   const unreadNews = news && news.length > 0;
+  const inWar = !!war && !!warSide(war, player.countryCode); // підготовка або битва
+  const actionBtns = (
+    <>
+      <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.navSwitch(); onOpenLeaderboard && onOpenLeaderboard(); }} aria-label="Рейтинг">
+        <Trophy size={19} />
+      </button>
+      <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); setNewsOpen(true); }} aria-label="Новини">
+        <Newspaper size={19} />
+        {unreadNews && <span className="cn-icon-btn-dot" />}
+      </button>
+    </>
+  );
 
   return (
     <div className="cn-clicker">
@@ -3084,19 +3118,7 @@ function ClickerScreen({
         <span className="cn-country-pill">
           <Flag code={country?.code} size={16} /> {country?.name}
         </span>
-        <div className="cn-clicker-top-actions">
-          <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.navSwitch(); onOpenLeaderboard && onOpenLeaderboard(); }} aria-label="Рейтинг">
-            <Trophy size={19} />
-          </button>
-          <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); setNewsOpen(true); }} aria-label="Новини">
-            <Newspaper size={19} />
-            {unreadNews && <span className="cn-icon-btn-dot" />}
-          </button>
-          <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); setRewardsOpen(true); }} aria-label="Щоденні нагороди">
-            <Gift size={19} />
-            <span className="cn-icon-btn-dot" />
-          </button>
-        </div>
+        {!inWar && <div className="cn-clicker-top-actions">{actionBtns}</div>}
       </div>
 
       {war && warSide(war, player.countryCode) && (
@@ -3105,7 +3127,7 @@ function ClickerScreen({
 
       <div className="cn-power-block" style={war && warPhase(war) === "battle" && warSide(war, player.countryCode) ? { display: "none" } : undefined}>
         <div className="cn-power-value-row" aria-label="Power">
-          <FistIcon size={30} className="cn-power-icon" />
+          <GemIcon size={30} className="cn-power-icon cn-power-icon--power" />
           <span className="cn-power-value">{fmt(player.power)}</span>
         </div>
         <div className="cn-power-value-row cn-power-value-row--points" aria-label="Points">
@@ -3155,15 +3177,19 @@ function ClickerScreen({
         ))}
       </div>
 
-      <div className="cn-energy-block">
-        <div className="cn-energy-pill">
-          <Flame size={15} className="cn-energy-icon" />
-          <span className="cn-energy-text">
-            {Math.floor(energy)} / {maxEnergyOf(player)}
-          </span>
-        </div>
-        <div className="cn-energy-bar">
-          <div className="cn-energy-fill" style={{ width: energyPct + "%" }} />
+      <div className={"cn-energy-block cn-en cn-en--" + (energyPct > 50 ? "high" : energyPct > 20 ? "mid" : "low")}>
+        <div className="cn-en-card">
+          <span className="cn-en-icon"><Zap size={20} strokeWidth={2.4} /></span>
+          <div className="cn-en-main">
+            <div className="cn-en-top">
+              <span className="cn-en-label">ЕНЕРГІЯ</span>
+              <span className="cn-en-val"><b>{Math.floor(energy)}</b> / {maxEnergyOf(player)}</span>
+            </div>
+            <div className="cn-en-bar">
+              <div className="cn-en-fill" style={{ width: energyPct + "%" }} />
+              <div className="cn-en-ticks" />
+            </div>
+          </div>
         </div>
         {isEmpty && <div className="cn-energy-empty-note"><Zap size={13} className="cn-energy-empty-ico" /><span>Енергія відновлюється</span><b>+{String(energyRegenOf(player)).replace(".", ",")} / сек</b></div>}
       </div>
@@ -3198,8 +3224,9 @@ function ClickerScreen({
         </div>
       </div>
 
+      {inWar && <div className="cn-clicker-bottom-actions">{actionBtns}</div>}
+
       {newsOpen && <NewsModal news={news} onClose={() => setNewsOpen(false)} />}
-      {rewardsOpen && <DailyRewardsModal onClose={() => setRewardsOpen(false)} />}
     </div>
   );
 }
@@ -3373,12 +3400,12 @@ const HQ_SECTIONS = [
   { id: "dev", label: "Покращення", Icon: TrendingUp, text: "" },
   { id: "army", label: "Армія", leaderOnly: true, Icon: Swords, noSoon: true, text: "Тут ви керуватимете військами: набір, розміщення та підготовка до війни." },
   { id: "diplomacy", label: "Дипломатія", leaderOnly: true, Icon: Handshake, text: "" },
+  { id: "mail", label: "Пошта", Icon: Mail, text: "" },
   { id: "info", label: "Інформація", Icon: Info, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
 ];
 // Підрозділи «Інформації» (раніше були окремими кнопками Штабу)
 const HQ_SUB = [
-  { id: "mail", label: "Пошта", Icon: Mail },
   { id: "stats", label: "Статистика", Icon: BarChart2 },
 ];
 // Підрозділи «Армії»: лише «Оборона» (поруч із кнопкою «Оголосити війну»)
@@ -3447,7 +3474,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     setView(id);
   };
   const goBack = () => {
-    if (view === "mail" || view === "stats") setView("info");
+    if (view === "stats") setView("info");
     else if (view === "army" && armySub) {
       setArmySub(null);
       setDefCity(null);
@@ -3633,7 +3660,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
         <MailScreen
           me={player}
           mail={mail}
-          onBack={() => setView("info")}
+          onBack={() => setView(null)}
           onRefresh={onRefreshMail || (() => {})}
           onRefreshGameData={onRefreshData}
         />
@@ -3786,7 +3813,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
               <span className="cn-hq-tile-label">{s.label}</span>
               {locked && <Lock size={12} className="cn-hq-lock" />}
               {!locked && soon && <span className="cn-hq-soon cn-hq-soon--tile">Скоро</span>}
-              {s.id === "info" && unreadCount > 0 && <span className="cn-hq-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
+              {s.id === "mail" && unreadCount > 0 && <span className="cn-hq-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
             </button>
           );
         })}
@@ -3921,7 +3948,6 @@ function UpgradesPanel({ player, msg, onBuy }) {
 function InfoPanel({ country, leader, stats, unreadCount, onOpen }) {
   return (
     <div className="cn-dip-menu">
-      <HqRowTile Icon={Mail} label="Пошта" badge={unreadCount > 0 ? (unreadCount > 9 ? "9+" : unreadCount) : null} onClick={() => onOpen("mail")} />
       <HqRowTile Icon={BarChart2} label="Статистика" onClick={() => onOpen("stats")} />
       <div className="cn-dip-list">
         <div className="cn-dip-row"><div className="cn-dip-row-name">Країна</div><b className="cn-tw-hp-num">{country?.name || "—"}</b></div>
@@ -4140,48 +4166,13 @@ function NewsModal({ news, onClose }) {
           </button>
         </div>
         <div className="cn-news-list">
-          {(!news || news.length === 0) && <div className="cn-control-empty">Новин поки немає. Тут з'являтимуться війни, союзи та результати битв.</div>}
+          {(!news || news.length === 0) && <div className="cn-control-empty">Новин поки немає. Тут з'являтимуться війни, захоплення міст, союзи, пакти, нові країни й сезони.</div>}
           {(news || []).map((n) => (
             <div key={n.id} className="cn-news-item">
               <div className="cn-news-text">{n.text}</div>
               <div className="cn-news-time">{timeAgo(n.ts)}</div>
             </div>
           ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Daily rewards (WIP)                                                 */
-/* ------------------------------------------------------------------ */
-
-function DailyRewardsModal({ onClose }) {
-  const days = Array.from({ length: 7 }, (_, i) => i + 1);
-  const close = () => { cnSfx.modalClose(); onClose(); };
-  return (
-    <div className="cn-modal-overlay" onClick={close}>
-      <div className="cn-modal-sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="cn-modal-header">
-          <div className="cn-modal-title">
-            <Gift size={16} /> Щоденні нагороди
-          </div>
-          <button className="cn-icon-btn" type="button" onClick={close} aria-label="Закрити">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="cn-rewards-grid">
-          {days.map((d) => (
-            <div key={d} className="cn-reward-cell">
-              <Lock size={16} />
-              <span>День {d}</span>
-            </div>
-          ))}
-        </div>
-        <div className="cn-control-wip" style={{ marginTop: 10 }}>
-          <Gift size={20} />
-          <div>Щоденні нагороди в розробці. Скоро зможеш отримувати бонуси щодня за вхід у гру.</div>
         </div>
       </div>
     </div>
@@ -7728,6 +7719,7 @@ function GlobalStyles() {
       .cn-power-value-row { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 2px; }
       .cn-power-dots { color: var(--cn-accent); font-size: 16px; letter-spacing: 2px; opacity: 0.85; align-self: center; }
       .cn-power-icon { flex-shrink: 0; color: var(--cn-accent-bright, #7DD3FC); filter: drop-shadow(0 0 8px rgba(var(--cn-accent-rgb),0.6)); }
+      .cn-power-icon--power { color: #38BDF8; filter: drop-shadow(0 0 8px rgba(56,189,248,0.65)); }
       .cn-power-icon--points { color: #FBBF24; filter: drop-shadow(0 0 8px rgba(251,191,36,0.6)); }
       .cn-power-value-row--points { margin-top: 0; }
       .cn-power-value {
@@ -7780,16 +7772,37 @@ function GlobalStyles() {
       }
 
       .cn-energy-block { width: 100%; max-width: 320px; display: flex; flex-direction: column; align-items: center; }
-      .cn-energy-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 6px; }
-      .cn-energy-icon { color: #FBBF24; filter: drop-shadow(0 0 6px rgba(251,191,36,0.6)); }
-      .cn-energy-pill {
-        display: inline-flex; align-items: center; gap: 8px; padding: 9px 20px; border-radius: 999px;
-        background: rgba(6,16,34,0.75); border: 1.5px solid rgba(var(--cn-accent-rgb),0.5);
-        box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.2); margin-bottom: 10px;
+      .cn-en { --en1: #22D3EE; --en2: #34D399; --en-glow: rgba(34,211,238,0.5); }
+      .cn-en--mid { --en1: #FBBF24; --en2: #F59E0B; --en-glow: rgba(251,191,36,0.5); }
+      .cn-en--low { --en1: #F87171; --en2: #EF4444; --en-glow: rgba(239,68,68,0.55); }
+      .cn-en-card {
+        width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 14px 10px 10px; border-radius: 18px;
+        background: linear-gradient(160deg, rgba(10,24,48,0.92), rgba(5,12,28,0.92));
+        border: 1.5px solid rgba(255,255,255,0.1); box-shadow: 0 6px 18px rgba(0,0,0,0.35), 0 0 18px var(--en-glow);
       }
-      .cn-energy-text { font-size: 16px; color: #FFFFFF; font-weight: 700; }
-      .cn-energy-bar { width: 100%; height: 14px; border-radius: 999px; background: rgba(255,255,255,0.06); overflow: hidden; border: 1px solid rgba(255,255,255,0.08); box-shadow: inset 0 0 10px rgba(0,0,0,0.35); }
-      .cn-energy-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, #FBBF24, #34D399 55%, #22D3EE); box-shadow: 0 0 12px rgba(34,211,238,0.5); transition: width 0.4s ease; }
+      .cn-en--low .cn-en-card { animation: cn-en-low 1.4s ease-in-out infinite; }
+      @keyframes cn-en-low { 0%,100% { box-shadow: 0 6px 18px rgba(0,0,0,0.35), 0 0 10px var(--en-glow); } 50% { box-shadow: 0 6px 18px rgba(0,0,0,0.35), 0 0 26px var(--en-glow); } }
+      .cn-en-icon {
+        flex-shrink: 0; width: 40px; height: 40px; border-radius: 13px; display: flex; align-items: center; justify-content: center;
+        color: #04101f; background: linear-gradient(145deg, var(--en1), var(--en2)); box-shadow: 0 0 14px var(--en-glow), inset 0 1px 0 rgba(255,255,255,0.5);
+      }
+      .cn-en-main { flex: 1; min-width: 0; }
+      .cn-en-top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+      .cn-en-label { font-size: 10.5px; font-weight: 800; letter-spacing: 0.2em; color: rgba(255,255,255,0.6); }
+      .cn-en-val { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.65); }
+      .cn-en-val b { font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 800; color: #fff; }
+      .cn-en-bar { position: relative; height: 12px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,0.07); box-shadow: inset 0 2px 5px rgba(0,0,0,0.5); }
+      .cn-en-fill {
+        position: relative; height: 100%; border-radius: 999px; transition: width 0.4s ease;
+        background: linear-gradient(90deg, var(--en1), var(--en2)); box-shadow: 0 0 12px var(--en-glow);
+        overflow: hidden;
+      }
+      .cn-en-fill::after {
+        content: ""; position: absolute; top: 0; bottom: 0; width: 40%; left: -40%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.55), transparent); animation: cn-en-shine 2.6s ease-in-out infinite;
+      }
+      @keyframes cn-en-shine { 0% { left: -40%; } 60%, 100% { left: 110%; } }
+      .cn-en-ticks { position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1.5px), rgba(4,12,26,0.55) calc(10% - 1.5px) 10%); }
       .cn-energy-empty-note {
         display: inline-flex; align-items: center; gap: 7px; align-self: center; margin-top: 8px;
         padding: 6px 14px; border-radius: 999px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
@@ -7859,6 +7872,7 @@ function GlobalStyles() {
         position: absolute; right: 0; top: 0;
         display: flex; flex-direction: column; gap: 10px;
       }
+      .cn-clicker-bottom-actions { display: flex; justify-content: center; gap: 12px; margin-top: 12px; }
       .cn-icon-tile {
         position: relative; width: 42px; height: 42px; border-radius: 14px;
         background: rgba(6,16,34,0.85); border: 1.5px solid rgba(var(--cn-accent-rgb),0.5);
@@ -8720,7 +8734,7 @@ function GlobalStyles() {
         border: 1px solid rgba(var(--cn-accent-rgb),0.45); background: #0c2236; touch-action: none;
         box-shadow: 0 0 0 1px rgba(var(--cn-accent-rgb),0.12), 0 0 26px rgba(60,150,255,0.35), 0 16px 44px rgba(0,0,0,0.5);
       }
-      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(70vh, 680px); border: 0; border-radius: 0; box-shadow: none; }
+      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(70vh, 680px); margin: 0 10px; width: auto; border: 1px solid rgba(var(--cn-accent-rgb),0.38); border-radius: 16px; box-shadow: 0 0 0 1px rgba(255,255,255,0.04), 0 6px 22px rgba(0,0,0,0.35); }
       .cn-map-top { position: absolute; top: 0; left: 0; right: 0; z-index: 4; padding: 14px 58px 26px 16px; pointer-events: none; background: linear-gradient(180deg, rgba(6,14,28,0.62), rgba(6,14,28,0)); }
       .cn-map-top > * { pointer-events: auto; }
       .cn-map-title { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.7), 0 0 18px rgba(var(--cn-accent-rgb),0.6); pointer-events: none; }
@@ -9057,7 +9071,7 @@ function GlobalStyles() {
       .cn-dip-sub { font-size: 11px; color: var(--cn-text-dim); }
       .cn-dip-menu { display: flex; flex-direction: column; gap: 10px; }
       .cn-dip-menu .cn-hq-tile { flex-direction: row; justify-content: flex-start; padding: 14px; }
-      .cn-warhud { align-self: stretch; margin: 4px 58px 0 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 18px; background: linear-gradient(160deg, rgba(127,29,29,0.5), rgba(6,16,34,0.9) 60%); border: 1px solid rgba(248,113,113,0.5); box-shadow: 0 0 22px rgba(239,68,68,0.18); }
+      .cn-warhud { align-self: center; width: 100%; max-width: 440px; margin: 4px auto 0; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 18px; background: linear-gradient(160deg, rgba(127,29,29,0.5), rgba(6,16,34,0.9) 60%); border: 1px solid rgba(248,113,113,0.5); box-shadow: 0 0 22px rgba(239,68,68,0.18); }
       .cn-warhud--prep { background: linear-gradient(160deg, rgba(120,53,15,0.5), rgba(6,16,34,0.9) 60%); border-color: rgba(251,191,36,0.55); box-shadow: 0 0 22px rgba(251,191,36,0.14); }
       .cn-warhud-kicker { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.22em; color: #FCA5A5; }
       .cn-warhud--prep .cn-warhud-kicker { color: #FCD34D; }
