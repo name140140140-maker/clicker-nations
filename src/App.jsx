@@ -6775,10 +6775,56 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
   const [selectedCity, setSelectedCity] = useState(null); // { city, regionName, ownerId }
   const [leaderName, setLeaderName] = useState(null); // undefined = завантаження
   const mapRef = useRef(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+  const [searchRes, setSearchRes] = useState([]);
+  const [wars, setWars] = useState([]);
+  const [warsOpen, setWarsOpen] = useState(false);
+  const [, setWarTick] = useState(0);
 
   const countries = nations?.countries || [];
   const owners = nations?.owners || {};
   const myCountry = COUNTRY_MAP[me?.countryCode];
+
+  /* Активні конфлікти: завантажуємо при вході, при оновленні та раз на хвилину */
+  const loadWars = useCallback(async () => {
+    try {
+      const list = await loadActiveWars();
+      setWars(list.filter((w) => warPhase(w) !== "finish").sort((a, b) => a.createdAt - b.createdAt));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    loadWars();
+    const iv = setInterval(loadWars, 60000);
+    const tk = setInterval(() => setWarTick((n) => n + 1), 15000);
+    return () => {
+      clearInterval(iv);
+      clearInterval(tk);
+    };
+  }, [loadWars]);
+
+  const runSearch = (q) => {
+    setSearchQ(q);
+    setSearchRes(mapRef.current ? mapRef.current.search(q, lang) : []);
+  };
+  const pickResult = (item) => {
+    cnSfx.navSwitch();
+    setSearchOpen(false);
+    setSearchQ("");
+    setSearchRes([]);
+    if (mapRef.current) mapRef.current.goTo(item);
+  };
+  const flyToWar = async (w) => {
+    try {
+      const data = await loadCities();
+      const c = data.list[w.cityId] || data.list.find((x) => cityKey(x) === w.cityKey);
+      if (c && mapRef.current) mapRef.current.flyTo(c.x, c.y, 6.5);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const stats = useMemo(() => {
     const power = {};
@@ -6856,23 +6902,55 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
 
   return (
     <div className="cn-map-screen">
-      <div className="cn-lb-header">
-        <div className="cn-screen-title">{t(lang, "nav_map")}</div>
-        <button className="cn-refresh-btn" onClick={onRefresh} type="button" aria-label="Оновити">
-          <RefreshCw size={16} className={loading ? "cn-spin" : ""} />
-        </button>
-      </div>
-
-      {pick ? (
-        <div className="cn-map-pick-banner">
-          <span>{pick.label}</span>
-          <button type="button" className="cn-dev-btn" onClick={pick.onCancel}>Скасувати</button>
-        </div>
-      ) : (
-        <div className="cn-map-hint">{t(lang, "nn_map_hint")}</div>
-      )}
-
       <div className="cn-map-viewport-wrap">
+        <div className="cn-map-top">
+          {searchOpen ? (
+            <div className="cn-map-search">
+              <div className="cn-map-search-box">
+                <Search size={15} />
+                <input
+                  autoFocus
+                  type="text"
+                  value={searchQ}
+                  placeholder="Місто, область, країна, море…"
+                  onChange={(e) => runSearch(e.target.value)}
+                />
+                <button type="button" aria-label="Закрити пошук" onClick={() => { setSearchOpen(false); setSearchQ(""); setSearchRes([]); }}>
+                  <X size={15} />
+                </button>
+              </div>
+              {searchQ.trim().length >= 2 && (
+                <div className="cn-map-search-list">
+                  {searchRes.length === 0 && <div className="cn-map-search-empty">Нічого не знайдено</div>}
+                  {searchRes.map((r, i) => (
+                    <button type="button" key={r.kind + i + r.label} className="cn-map-search-item" onClick={() => pickResult(r)}>
+                      <b>{r.label}</b>
+                      <small>{r.sub}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : pick ? (
+            <div className="cn-map-pick-banner">
+              <span>{pick.label}</span>
+              <button type="button" className="cn-dev-btn" onClick={pick.onCancel}>Скасувати</button>
+            </div>
+          ) : (
+            <>
+              <div className="cn-map-title">{t(lang, "nav_map")}</div>
+              <div className="cn-map-sub">{t(lang, "nn_map_hint")}</div>
+            </>
+          )}
+        </div>
+        <div className="cn-map-tools">
+          <button type="button" aria-label="Пошук" onClick={() => setSearchOpen((v) => !v)}>
+            <Search size={15} />
+          </button>
+          <button type="button" aria-label="Оновити" onClick={() => { onRefresh(); loadWars(); }}>
+            <RefreshCw size={15} className={loading ? "cn-spin" : ""} />
+          </button>
+        </div>
         <div className="cn-tmap-viewport">
           <TerritoryMap
             ref={mapRef}
@@ -6974,6 +7052,36 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
               </>
             )}
             {pick && pick.step === "city" ? cityPickBtn : pickBtn}
+          </div>
+        )}
+      </div>
+
+      <div className="cn-conflicts">
+        <button type="button" className="cn-conflicts-head" onClick={() => setWarsOpen((v) => !v)} aria-expanded={warsOpen}>
+          <Swords size={15} />
+          <span>Активні конфлікти</span>
+          <b className={"cn-conflicts-count" + (wars.length ? " cn-conflicts-count--on" : "")}>{wars.length}</b>
+          <ChevronRight size={16} className={"cn-conflicts-chev" + (warsOpen ? " cn-conflicts-chev--open" : "")} />
+        </button>
+        {warsOpen && (
+          <div className="cn-conflicts-list">
+            {wars.length === 0 && <div className="cn-conflicts-empty">Зараз немає активних війн</div>}
+            {wars.map((w) => {
+              const ph = warPhase(w);
+              const left = ph === "prep" ? w.prepEnd - Date.now() : w.battleEnd - Date.now();
+              return (
+                <button type="button" key={w.id} className="cn-conflict-row" onClick={() => flyToWar(w)}>
+                  <span className="cn-conflict-sides">
+                    <Flag code={w.attacker} size={16} /> <span>{COUNTRY_MAP[w.attacker]?.name || w.attacker}</span>
+                    <Swords size={12} className="cn-conflict-vs" />
+                    <Flag code={w.defender} size={16} /> <span>{COUNTRY_MAP[w.defender]?.name || w.defender}</span>
+                  </span>
+                  <span className="cn-conflict-meta">
+                    за {w.cityName} · {ph === "prep" ? "підготовка" : "битва"} · {fmtDuration(left)}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -8612,7 +8720,37 @@ function GlobalStyles() {
         border: 1px solid rgba(var(--cn-accent-rgb),0.45); background: #0c2236; touch-action: none;
         box-shadow: 0 0 0 1px rgba(var(--cn-accent-rgb),0.12), 0 0 26px rgba(60,150,255,0.35), 0 16px 44px rgba(0,0,0,0.5);
       }
-      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(62vh, 620px); }
+      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(70vh, 680px); border: 0; border-radius: 0; box-shadow: none; }
+      .cn-map-top { position: absolute; top: 0; left: 0; right: 0; z-index: 4; padding: 14px 58px 26px 16px; pointer-events: none; background: linear-gradient(180deg, rgba(6,14,28,0.62), rgba(6,14,28,0)); }
+      .cn-map-top > * { pointer-events: auto; }
+      .cn-map-title { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.7), 0 0 18px rgba(var(--cn-accent-rgb),0.6); pointer-events: none; }
+      .cn-map-sub { margin-top: 3px; font-size: 11.5px; color: rgba(255,255,255,0.88); text-shadow: 0 1px 6px rgba(0,0,0,0.8); pointer-events: none; max-width: 80%; }
+      .cn-map-tools { position: absolute; top: 78px; right: 10px; z-index: 4; display: flex; flex-direction: column; background: #fff; border-radius: 4px; box-shadow: 0 0 0 2px rgba(0,0,0,0.1); overflow: hidden; }
+      .cn-map-tools button { width: 29px; height: 29px; display: flex; align-items: center; justify-content: center; border: 0; background: #fff; color: #333; cursor: pointer; padding: 0; }
+      .cn-map-tools button + button { border-top: 1px solid #ddd; }
+      .cn-map-tools button:active { background: #eee; }
+      .cn-map-search { position: relative; }
+      .cn-map-search-box { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; color: #fff; background: rgba(8,16,30,0.88); border: 1px solid rgba(var(--cn-accent-rgb),0.55); backdrop-filter: blur(6px); }
+      .cn-map-search-box input { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff; font-size: 14px; }
+      .cn-map-search-box button { background: transparent; border: 0; color: rgba(255,255,255,0.8); display: flex; padding: 2px; cursor: pointer; }
+      .cn-map-search-list { margin-top: 6px; max-height: 42vh; overflow-y: auto; border-radius: 12px; background: rgba(8,16,30,0.94); border: 1px solid rgba(255,255,255,0.12); }
+      .cn-map-search-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; padding: 9px 12px; background: transparent; border: 0; border-bottom: 1px solid rgba(255,255,255,0.07); color: #fff; text-align: left; cursor: pointer; }
+      .cn-map-search-item b { font-size: 14px; }
+      .cn-map-search-item small { font-size: 11px; color: rgba(255,255,255,0.6); }
+      .cn-map-search-empty { padding: 12px; font-size: 13px; color: rgba(255,255,255,0.7); }
+      .cn-conflicts { margin: 12px 0 4px; border-radius: 14px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); overflow: hidden; }
+      .cn-conflicts-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 11px 14px; background: transparent; border: 0; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; text-align: left; }
+      .cn-conflicts-head > span { flex: 1; }
+      .cn-conflicts-count { min-width: 22px; padding: 1px 7px; text-align: center; border-radius: 999px; font-size: 12px; background: rgba(255,255,255,0.12); }
+      .cn-conflicts-count--on { background: #ef4444; }
+      .cn-conflicts-chev { transition: transform 0.2s; }
+      .cn-conflicts-chev--open { transform: rotate(90deg); }
+      .cn-conflicts-list { border-top: 1px solid rgba(255,255,255,0.08); max-height: 220px; overflow-y: auto; }
+      .cn-conflicts-empty { padding: 12px 14px; font-size: 13px; color: rgba(255,255,255,0.65); }
+      .cn-conflict-row { display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 10px 14px; background: transparent; border: 0; border-bottom: 1px solid rgba(255,255,255,0.06); color: #fff; text-align: left; cursor: pointer; }
+      .cn-conflict-sides { display: flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 700; flex-wrap: wrap; }
+      .cn-conflict-vs { color: #f87171; margin: 0 2px; }
+      .cn-conflict-meta { font-size: 11.5px; color: rgba(255,255,255,0.65); }
       .cn-tmap-toast {
         position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 5; padding: 10px 14px; border-radius: 12px;
         font-size: 13px; text-align: center; color: #FEE2E2; background: rgba(127,29,29,0.92); border: 1px solid rgba(248,113,113,0.5);

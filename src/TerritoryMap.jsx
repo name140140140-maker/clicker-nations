@@ -5,7 +5,7 @@ import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson, cityKey } from "./map/cities.js";
 import { cityZones, pointInPolygon } from "./map/geo.js";
 import { waterTexture, landTexture } from "./map/textures.js";
-import { geoLabelsGeoJson } from "./map/geoLabels.js";
+import { geoLabelsGeoJson, GEO_LABELS } from "./map/geoLabels.js";
 
 // КАРТА ТЕРРИТОРІЙ
 // Лише адміністративні області й їхні кордони — без реальних держав і прапорів.
@@ -53,12 +53,12 @@ const pop = ["get", "p"];
 const fadeIn = (z) => ["interpolate", ["linear"], ["zoom"], z, 0, z + 0.7, 1];
 const CITY_TIERS = [
   { id: "a", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 4000000]], [">=", pop, 12000000]]], minzoom: 2.3 },
-  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", [">=", pop, 6000000], ["<", pop, 12000000]]]], minzoom: 3.4 },
-  { id: "c", filter: ["all", notFb, ["any", ["all", isCap, ["<", pop, 1500000]], ["all", [">=", pop, 3000000], ["<", pop, 6000000], ["!", isCap]]]], minzoom: 4.4 },
-  { id: "e", filter: ["all", notFb, ["!", isCap], [">=", pop, 1000000], ["<", pop, 3000000]], minzoom: 5.4 },
-  { id: "f", filter: ["all", notFb, ["!", isCap], ["<", pop, 1000000], ["any", [">=", pop, 300000], ["==", ["get", "cap"], 1]]], minzoom: 6.6 },
-  { id: "g", filter: ["all", notFb, ["!", isCap], ["<", pop, 300000], ["!=", ["get", "cap"], 1]], minzoom: 7.8 },
-  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 8.5 }, // області без реального міста: точка з назвою області
+  { id: "b", filter: ["all", notFb, ["any", ["all", isCap, [">=", pop, 1500000], ["<", pop, 4000000]], ["all", [">=", pop, 6000000], ["<", pop, 12000000]]]], minzoom: 3.2 },
+  { id: "c", filter: ["all", notFb, ["any", ["all", isCap, ["<", pop, 1500000]], ["all", [">=", pop, 3000000], ["<", pop, 6000000], ["!", isCap]]]], minzoom: 4.0 },
+  { id: "e", filter: ["all", notFb, ["!", isCap], [">=", pop, 1000000], ["<", pop, 3000000]], minzoom: 4.6 },
+  { id: "f", filter: ["all", notFb, ["!", isCap], ["<", pop, 1000000], ["any", [">=", pop, 300000], ["==", ["get", "cap"], 1]]], minzoom: 5.4 },
+  { id: "g", filter: ["all", notFb, ["!", isCap], ["<", pop, 300000], ["!=", ["get", "cap"], 1]], minzoom: 6.2 },
+  { id: "d", filter: ["==", ["get", "f"], 1], minzoom: 7.0 }, // області без реального міста: точка з назвою області
 ];
 const labelField = (lang) => (lang === "uk" ? ["get", "u"] : ["get", "n"]);
 
@@ -208,6 +208,77 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     flyTo(lng, lat, zoom = 5) {
       const map = mapRef.current;
       if (map) map.flyTo({ center: [lng, lat], zoom, duration: 800 });
+    },
+    // Пошук за назвою: міста, області, країни, моря й місцевості.
+    search(query, lang = "uk") {
+      const q = String(query || "").trim().toLowerCase();
+      if (q.length < 2) return [];
+      const w = worldRef.current;
+      const rank = (name) => {
+        const n = String(name || "").toLowerCase();
+        if (!n) return -1;
+        if (n === q) return 0;
+        if (n.startsWith(q)) return 1;
+        if (n.split(/[\s\-']/).some((x) => x.startsWith(q))) return 2;
+        return n.includes(q) ? 3 : -1;
+      };
+      const out = [];
+      for (const c of latest.current.countries || []) {
+        const r = rank(c.name);
+        if (r >= 0) out.push({ kind: "country", id: c.id, label: c.name, sub: "Країна", r, w: 0 });
+      }
+      if (w.model) {
+        for (const reg of w.model.regions) {
+          const r = rank(reg.name);
+          if (r >= 0) out.push({ kind: "region", rid: reg.rid, index: reg.index, label: reg.name, sub: "Область", r, w: 1 });
+        }
+      }
+      if (w.cities) {
+        for (const c of w.cities.list) {
+          if (c.f) continue;
+          const r = Math.min(...[rank(c.u), rank(c.n)].filter((x) => x >= 0).concat([9]));
+          if (r < 9) {
+            const idx = w.model ? w.model.indexByRid.get(c.rid) : undefined;
+            out.push({ kind: "city", city: c, label: lang === "uk" && c.u ? c.u : c.n, sub: (c.cap === 2 ? "Столиця · " : "Місто · ") + (idx !== undefined ? w.model.regions[idx].name : ""), r, w: 2 - Math.min(1, (c.imp || 0) / 100) });
+          }
+        }
+      }
+      const seen = new Set();
+      const geoKind = { o: "Океан", s: "Море", g: "Затока", t: "Протока", l: "Озеро", d: "Пустеля", m: "Гори", p: "Місцевість", e: "Півострів", i: "Острів", c: "Материк" };
+      for (const g of GEO_LABELS) {
+        const nm = lang === "uk" ? g[1] : g[2];
+        const r = Math.min(...[rank(g[1]), rank(g[2])].filter((x) => x >= 0).concat([9]));
+        if (r < 9 && !seen.has(nm)) {
+          seen.add(nm);
+          out.push({ kind: "geo", label: nm, sub: geoKind[g[0]] || "Місцевість", lng: g[3], lat: g[4], tier: g[5], r, w: 1.5 });
+        }
+      }
+      out.sort((a, b) => a.r - b.r || a.w - b.w || a.label.localeCompare(b.label));
+      return out.slice(0, 12);
+    },
+    // Перелетіти до результату пошуку й вибрати його.
+    goTo(item) {
+      const w = worldRef.current;
+      const map = mapRef.current;
+      if (!map || !item) return;
+      if (item.kind === "city") {
+        const c = item.city;
+        map.flyTo({ center: [c.x, c.y], zoom: 6.5, duration: 900 });
+        const idx = w.model ? w.model.indexByRid.get(c.rid) : undefined;
+        const L = latest.current;
+        if (L.onSelectCity) {
+          L.onSelectCity({ city: c, regionName: idx !== undefined ? w.model.regions[idx].name : "", ownerId: (L.cityOwners && L.cityOwners[cityKey(c)]) || (idx !== undefined ? w.ownerByIndex[idx] || "" : "") });
+        }
+      } else if (item.kind === "region") {
+        if (w.model) fitRegion(map, w.model, [item.index], 6);
+        if (latest.current.onSelectRegion) latest.current.onSelectRegion({ rid: item.rid, name: item.label, index: item.index, ownerId: (w.ownerByIndex && w.ownerByIndex[item.index]) || "" });
+      } else if (item.kind === "country") {
+        const idxs = [];
+        (w.ownerByIndex || []).forEach((o, i) => { if (o === item.id) idxs.push(i); });
+        if (w.model && idxs.length) fitRegion(map, w.model, idxs, 5);
+      } else if (item.kind === "geo") {
+        map.flyTo({ center: [item.lng, item.lat], zoom: item.tier <= 1 ? 3 : item.tier === 2 ? 4 : 5, duration: 900 });
+      }
     },
     // Скільки кілометрів у одному пікселі на поточному масштабі (для прив'язки кліків і радіусів).
     getPxKm() {
