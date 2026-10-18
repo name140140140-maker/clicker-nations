@@ -146,7 +146,7 @@ function addGeoJsonSource(map, id, blob, options) {
 const worldCache = { model: null, regionsBlob: null, bordersBlob: null };
 
 const TerritoryMap = forwardRef(function TerritoryMap(
-  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null, onPointPick = null, overlay = null },
+  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null, onPointPick = null, overlay = null, tools = null },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -194,7 +194,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
   });
   // Актуальні пропси для довгоживучих обробників карти.
   const latest = useRef({});
-  latest.current = { onSelectRegion, owners, countries, myCountryId, mode, onSelectCity, lang, cityOwners, onPointPick };
+  latest.current = { onSelectRegion, owners, countries, myCountryId, mode, onSelectCity, lang, cityOwners, onPointPick, tools };
 
   useImperativeHandle(ref, () => ({
     flyToRid(rid) {
@@ -313,6 +313,25 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     });
     map.touchZoomRotate.disableRotation();
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    // Додаткові кнопки (пошук, оновлення) вбудовуємо в ту саму групу, що й + і −.
+    const toolDefs = latest.current.tools;
+    if (toolDefs && toolDefs.length) {
+      const group = map.getContainer().querySelector(".maplibregl-ctrl-top-right .maplibregl-ctrl-group");
+      if (group) {
+        for (const t of toolDefs) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.title = t.label;
+          btn.setAttribute("aria-label", t.label);
+          btn.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;margin:auto">${t.svg}</svg>`;
+          btn.addEventListener("click", () => {
+            const cur = (latest.current.tools || []).find((x) => x.id === t.id);
+            if (cur && cur.onClick) cur.onClick();
+          });
+          group.appendChild(btn);
+        }
+      }
+    }
     map.addControl(new maplibregl.AttributionControl({ compact: true, customAttribution: "Дані: geoBoundaries CGAZ (CC BY 4.0)" }));
     mapRef.current = map;
 

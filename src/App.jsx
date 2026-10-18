@@ -4821,7 +4821,9 @@ function ProfileScreen({
   maintenance,
   onSaveMaintenance,
 }) {
-  const [view, setView] = useState("main"); // main | mail | settings | search | titles | icons | achievements | stats
+  const [view, setView] = useState("main"); // main | mail | settings | search | titles | icons | banners | cosmetics | stats
+  const [cosmBack, setCosmBack] = useState("cosmetics"); // куди повертає «Назад» з титулів/фото/банерів
+  const openCosm = (v, back) => { setCosmBack(back); setView(v); };
   const country = COUNTRY_MAP[me.countryCode];
 
   const [countryPickerOpen, setCountryPickerOpen] = useState(false);
@@ -4893,6 +4895,18 @@ function ProfileScreen({
     }
   };
 
+  const equippedIcon = iconById(me.equippedIcon);
+  const equippedBanner = bannerById(me.equippedBanner);
+  const equippedTitle = titleById(me.equippedTitle);
+  const equippedTitleUnlocked = equippedTitle && equippedTitle.req(me, ctx) ? equippedTitle : null;
+  const equippedBadgesList = (Array.isArray(me.equippedBadges) ? me.equippedBadges : [])
+    .map((id) => achievementById(id))
+    .filter((b) => b && b.req(me, ctx))
+    .slice(0, MAX_EQUIPPED_BADGES);
+  const unlockedTitlesCount = TITLES.filter((t) => t.req(me, ctx)).length;
+  const unlockedIconsCount = PROFILE_ICONS.filter((i) => isIconUnlocked(me, i)).length;
+  const unlockedAchievementsCount = ACHIEVEMENTS.filter((a) => a.req(me, ctx)).length;
+
   if (view === "mail") {
     return (
       <MailScreen
@@ -4936,7 +4950,7 @@ function ProfileScreen({
       <TitlesScreen
         me={me}
         ctx={ctx}
-        onBack={() => setView("main")}
+        onBack={() => setView(cosmBack)}
         onEquip={(id) => equipField(me, "equippedTitle", id, onSetPlayer)}
       />
     );
@@ -4945,7 +4959,7 @@ function ProfileScreen({
     return (
       <IconsScreen
         me={me}
-        onBack={() => setView("main")}
+        onBack={() => setView(cosmBack)}
         onEquip={(id) => equipField(me, "equippedIcon", id, onSetPlayer)}
       />
     );
@@ -4954,9 +4968,46 @@ function ProfileScreen({
     return (
       <BannersScreen
         me={me}
-        onBack={() => setView("main")}
+        onBack={() => setView(cosmBack)}
         onEquip={(id) => equipField(me, "equippedBanner", id, onSetPlayer)}
       />
+    );
+  }
+  if (view === "cosmetics") {
+    return (
+      <div className="cn-profile">
+        <div className="cn-lb-header">
+          <button className="cn-icon-btn" type="button" onClick={() => setView("main")} aria-label="Назад"><ArrowLeft size={18} /></button>
+          <div className="cn-screen-title">Косметика</div>
+          <span style={{ width: 36 }} />
+        </div>
+        <div className="cn-menu-list">
+          <button className="cn-menu-card" type="button" onClick={() => openCosm("icons", "cosmetics")}>
+            <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Palette size={24} /></span>
+            <span className="cn-menu-card-text">
+              <span className="cn-menu-card-title">Фото профілю</span>
+              <span className="cn-menu-card-sub">Аватарки · {unlockedIconsCount}/{PROFILE_ICONS.length}</span>
+            </span>
+            <ChevronRight size={20} className="cn-menu-card-chevron" />
+          </button>
+          <button className="cn-menu-card" type="button" onClick={() => openCosm("banners", "cosmetics")}>
+            <span className="cn-menu-card-icon cn-menu-card-icon--blue"><ImageIcon size={24} /></span>
+            <span className="cn-menu-card-text">
+              <span className="cn-menu-card-title">Банер профілю</span>
+              <span className="cn-menu-card-sub">{equippedBanner ? equippedBanner.label : "Ще не обрано"}</span>
+            </span>
+            <ChevronRight size={20} className="cn-menu-card-chevron" />
+          </button>
+          <button className="cn-menu-card" type="button" onClick={() => openCosm("titles", "cosmetics")}>
+            <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Crown size={24} /></span>
+            <span className="cn-menu-card-text">
+              <span className="cn-menu-card-title">Титули</span>
+              <span className="cn-menu-card-sub">{equippedTitleUnlocked ? equippedTitleUnlocked.label : "Без титулу"} · {unlockedTitlesCount}/{TITLES.length}</span>
+            </span>
+            <ChevronRight size={20} className="cn-menu-card-chevron" />
+          </button>
+        </div>
+      </div>
     );
   }
   if (view === "achievements") {
@@ -4986,30 +5037,11 @@ function ProfileScreen({
     );
   }
 
-  const equippedIcon = iconById(me.equippedIcon);
-  const equippedBanner = bannerById(me.equippedBanner);
-  const equippedTitle = titleById(me.equippedTitle);
-  const equippedTitleUnlocked = equippedTitle && equippedTitle.req(me, ctx) ? equippedTitle : null;
-  const equippedBadgesList = (Array.isArray(me.equippedBadges) ? me.equippedBadges : [])
-    .map((id) => achievementById(id))
-    .filter((b) => b && b.req(me, ctx))
-    .slice(0, MAX_EQUIPPED_BADGES);
-  const unlockedTitlesCount = TITLES.filter((t) => t.req(me, ctx)).length;
-  const unlockedIconsCount = PROFILE_ICONS.filter((i) => isIconUnlocked(me, i)).length;
-  const unlockedAchievementsCount = ACHIEVEMENTS.filter((a) => a.req(me, ctx)).length;
-
   return (
     <div className="cn-profile">
       <div className="cn-lb-header">
         <div className="cn-screen-title">Профіль</div>
         <div className="cn-profile-header-actions">
-          <button className="cn-icon-btn" onClick={() => setView("search")} type="button" aria-label="Пошук гравців">
-            <Search size={18} />
-          </button>
-          <button className="cn-icon-btn" onClick={() => setView("mail")} type="button" aria-label="Пошта">
-            <Mail size={18} />
-            {unreadCount > 0 && <span className="cn-icon-btn-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
-          </button>
           <button className="cn-icon-btn" onClick={() => setView("settings")} type="button" aria-label="Налаштування">
             <Settings size={18} />
           </button>
@@ -5021,13 +5053,13 @@ function ProfileScreen({
           {equippedBanner ? (
             <img src={equippedBanner.img} alt={equippedBanner.label} className="cn-profile-banner-img" />
           ) : (
-            <span className="cn-profile-banner-dev-tag">Банер профілю: у розробці</span>
+            <span className="cn-profile-banner-dev-tag">Банера немає</span>
           )}
         </div>
         <button
           type="button"
           className="cn-profile-banner-edit-btn"
-          onClick={() => setView("banners")}
+          onClick={() => openCosm("banners", "main")}
           aria-label="Змінити банер профілю"
         >
           <ImageIcon size={14} /> {equippedBanner ? "Змінити банер" : "Обрати банер"}
@@ -5037,7 +5069,7 @@ function ProfileScreen({
           <button
             type="button"
             className="cn-profile-avatar-ring"
-            onClick={() => setView("icons")}
+            onClick={() => openCosm("icons", "main")}
             aria-label="Змінити іконку профілю"
           >
             {equippedIcon ? <ProfileIconGlyph opt={equippedIcon} size={48} /> : <User size={48} />}
@@ -5053,7 +5085,7 @@ function ProfileScreen({
                 </button>
               )}
             </div>
-            <button type="button" className="cn-profile-title-pill" onClick={() => setView("titles")}>
+            <button type="button" className="cn-profile-title-pill" onClick={() => openCosm("titles", "main")}>
               {equippedTitleUnlocked ? equippedTitleUnlocked.label : "Без титулу"}
               <ChevronRight size={13} />
             </button>
@@ -5061,23 +5093,17 @@ function ProfileScreen({
         </div>
       </div>
 
-      <div className="cn-profile-id-row cn-profile-id-row--centered">
-        <span>ID: {me.id}</span>
-        <button className="cn-profile-copy-btn" type="button" onClick={copyId} aria-label="Скопіювати ID">
-          {copiedId ? <Check size={13} /> : <Copy size={13} />}
-        </button>
-        {isLeader && (
-          <span className="cn-profile-chip cn-profile-chip--leader" style={{ marginLeft: 6 }}>
-            <Crown size={12} /> Лідер країни
-          </span>
-        )}
+      <div className="cn-profile-role-row">
+        <span className={"cn-profile-chip" + (isLeader ? " cn-profile-chip--leader" : "")}>
+          {isLeader ? <Crown size={12} /> : <User size={12} />} {roleStatusLabel(isLeader, me.role)}
+        </span>
       </div>
 
       <div className="cn-profile-stats-bar">
         <button className="cn-profile-stats-item" type="button" onClick={() => setView("stats")}>
           <span className="cn-profile-stats-icon"><MousePointerClick size={18} /></span>
           <span className="cn-profile-stats-text">
-            <span className="cn-profile-stats-label">Всього кліків</span>
+            <span className="cn-profile-stats-label">Кліки</span>
             <span className="cn-profile-stats-value">{fmt(me.totalClicks)}</span>
           </span>
         </button>
@@ -5099,43 +5125,11 @@ function ProfileScreen({
         <div className="cn-profile-stats-item cn-profile-stats-item--static">
           <span className="cn-profile-stats-icon"><Star size={18} /></span>
           <span className="cn-profile-stats-text">
-            <span className="cn-profile-stats-label">Глобальний рейтинг</span>
+            <span className="cn-profile-stats-label">Рейтинг</span>
             <span className="cn-profile-stats-value">
               {typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank}
             </span>
           </span>
-        </div>
-      </div>
-
-      <div className="cn-profile-badges-card">
-        <button type="button" className="cn-profile-badges-header" onClick={() => setView("achievements")}>
-          <span className="cn-profile-badges-header-left">
-            <Shield size={16} /> Значки
-          </span>
-          <span className="cn-profile-badges-header-right">
-            {Math.min(equippedBadgesList.length, MAX_EQUIPPED_BADGES)}/{MAX_EQUIPPED_BADGES}
-            <ChevronRight size={16} />
-          </span>
-        </button>
-
-        <div className="cn-profile-badge-row">
-          {Array.from({ length: MAX_EQUIPPED_BADGES }).map((_, i) => {
-            const b = equippedBadgesList[i];
-            return (
-              <button
-                key={i}
-                type="button"
-                className={"cn-badge-slot2" + (b ? " cn-badge-slot2--filled" : "")}
-                onClick={() => setView("achievements")}
-                aria-label={b ? b.label : "Обрати значок"}
-              >
-                <span className="cn-badge-slot2-ring">
-                  {b ? <img src={b.icon} alt={b.label} /> : <Plus size={16} />}
-                </span>
-                <span className="cn-badge-slot2-label">{b ? b.label : "???"}</span>
-              </button>
-            );
-          })}
         </div>
       </div>
 
@@ -5149,16 +5143,6 @@ function ProfileScreen({
           <ChevronRight size={20} className="cn-menu-card-chevron" />
         </button>
 
-        <button className="cn-menu-card" type="button" onClick={() => setView("mail")}>
-          <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Mail size={24} /></span>
-          <span className="cn-menu-card-text">
-            <span className="cn-menu-card-title">Пошта</span>
-            <span className="cn-menu-card-sub">Повідомлення та нагороди</span>
-          </span>
-          {unreadCount > 0 && <span className="cn-menu-card-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
-          <ChevronRight size={20} className="cn-menu-card-chevron" />
-        </button>
-
         <button className="cn-menu-card" type="button" onClick={() => setView("stats")}>
           <span className="cn-menu-card-icon cn-menu-card-icon--blue"><BarChart3 size={24} /></span>
           <span className="cn-menu-card-text">
@@ -5168,38 +5152,11 @@ function ProfileScreen({
           <ChevronRight size={20} className="cn-menu-card-chevron" />
         </button>
 
-        <button className="cn-menu-card" type="button" onClick={() => setView("achievements")}>
-          <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Award size={24} /></span>
-          <span className="cn-menu-card-text">
-            <span className="cn-menu-card-title">Значки</span>
-            <span className="cn-menu-card-sub">Ваші досягнення · {unlockedAchievementsCount}/{ACHIEVEMENTS.length}</span>
-          </span>
-          <ChevronRight size={20} className="cn-menu-card-chevron" />
-        </button>
-
-        <button className="cn-menu-card" type="button" onClick={() => setView("titles")}>
-          <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Crown size={24} /></span>
-          <span className="cn-menu-card-text">
-            <span className="cn-menu-card-title">Титули</span>
-            <span className="cn-menu-card-sub">Ваші титули · {unlockedTitlesCount}/{TITLES.length}</span>
-          </span>
-          <ChevronRight size={20} className="cn-menu-card-chevron" />
-        </button>
-
-        <button className="cn-menu-card" type="button" onClick={() => setView("icons")}>
+        <button className="cn-menu-card" type="button" onClick={() => setView("cosmetics")}>
           <span className="cn-menu-card-icon cn-menu-card-icon--blue"><Palette size={24} /></span>
           <span className="cn-menu-card-text">
-            <span className="cn-menu-card-title">Іконки профілю</span>
-            <span className="cn-menu-card-sub">Аватарки · {unlockedIconsCount}/{PROFILE_ICONS.length}</span>
-          </span>
-          <ChevronRight size={20} className="cn-menu-card-chevron" />
-        </button>
-
-        <button className="cn-menu-card" type="button" onClick={() => setView("banners")}>
-          <span className="cn-menu-card-icon cn-menu-card-icon--blue"><ImageIcon size={24} /></span>
-          <span className="cn-menu-card-text">
-            <span className="cn-menu-card-title">Банер профілю</span>
-            <span className="cn-menu-card-sub">{equippedBanner ? equippedBanner.label : "Ще не обрано"}</span>
+            <span className="cn-menu-card-title">Косметика</span>
+            <span className="cn-menu-card-sub">Банер, фото профілю, титули</span>
           </span>
           <ChevronRight size={20} className="cn-menu-card-chevron" />
         </button>
@@ -5212,6 +5169,7 @@ function ProfileScreen({
           </span>
           <ChevronRight size={20} className="cn-menu-card-chevron" />
         </button>
+
       </div>
 
       {countryPickerOpen && (
@@ -5427,7 +5385,7 @@ function PlayerPeekModal({ player, players, onClose }) {
             {banner ? (
               <img src={banner.img} alt={banner.label} className="cn-profile-banner-img" />
             ) : (
-              <span className="cn-profile-banner-dev-tag">Банер профілю: у розробці</span>
+              <span className="cn-profile-banner-dev-tag">Банера немає</span>
             )}
           </div>
 
@@ -5451,7 +5409,7 @@ function PlayerPeekModal({ player, players, onClose }) {
           <div className="cn-profile-stats-item cn-profile-stats-item--static">
             <span className="cn-profile-stats-icon"><MousePointerClick size={18} /></span>
             <span className="cn-profile-stats-text">
-              <span className="cn-profile-stats-label">Всього кліків</span>
+              <span className="cn-profile-stats-label">Кліки</span>
               <span className="cn-profile-stats-value">{fmt(player.totalClicks)}</span>
             </span>
           </div>
@@ -5473,7 +5431,7 @@ function PlayerPeekModal({ player, players, onClose }) {
           <div className="cn-profile-stats-item cn-profile-stats-item--static">
             <span className="cn-profile-stats-icon"><Star size={18} /></span>
             <span className="cn-profile-stats-text">
-              <span className="cn-profile-stats-label">Глобальний рейтинг</span>
+              <span className="cn-profile-stats-label">Рейтинг</span>
               <span className="cn-profile-stats-value">
                 {typeof globalRank === "number" ? "#" + fmt(globalRank) : globalRank}
               </span>
@@ -6934,14 +6892,6 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             </>
           )}
         </div>
-        <div className="cn-map-tools">
-          <button type="button" aria-label="Пошук" onClick={() => setSearchOpen((v) => !v)}>
-            <Search size={15} />
-          </button>
-          <button type="button" aria-label="Оновити" onClick={() => { onRefresh(); loadWars(); }}>
-            <RefreshCw size={15} className={loading ? "cn-spin" : ""} />
-          </button>
-        </div>
         <div className="cn-tmap-viewport">
           <TerritoryMap
             ref={mapRef}
@@ -6955,6 +6905,10 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
               setSelected((prev) => (prev?.rid === r.rid && prev?.ownerId === r.ownerId ? null : r));
             }}
             showCities
+            tools={[
+              { id: "search", label: "Пошук", svg: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', onClick: () => setSearchOpen((v) => !v) },
+              { id: "refresh", label: "Оновити", svg: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>', onClick: () => { onRefresh(); loadWars(); } },
+            ]}
             cityOwners={nations?.cityOwners}
             selectedZoneOwner={selected?.ownerId || null}
             lang={lang}
@@ -7487,7 +7441,7 @@ function BottomNav({ tab, setTab, unreadMail, lang = "uk" }) {
             <div className="cn-nav-icon-wrap">
               <Icon size={22} />
               {item.soon && <span className="cn-nav-dot" />}
-              {item.id === "profile" && unreadMail > 0 && (
+              {item.id === "hq" && unreadMail > 0 && (
                 <span className="cn-nav-badge">{unreadMail > 9 ? "9+" : unreadMail}</span>
               )}
             </div>
@@ -8466,10 +8420,14 @@ function GlobalStyles() {
       .cn-profile-name-banner {
         position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
         padding: 22px 22px 12px; margin-top: 0; min-width: 190px;
-        background: linear-gradient(180deg, rgba(6,14,32,0.92), rgba(6,14,32,0.75));
-        border: 1px solid rgba(var(--cn-accent-rgb),0.45); border-radius: 16px;
-        box-shadow: 0 0 20px rgba(var(--cn-accent-rgb),0.18);
+        background: none; border: 0; border-radius: 0; box-shadow: none;
       }
+      .cn-profile-name-banner .cn-profile-name {
+        color: #fff; font-size: 21px; font-weight: 800;
+        text-shadow: 0 0 2px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.95), 0 2px 10px rgba(0,0,0,0.9), 0 0 22px rgba(0,0,0,0.75);
+      }
+      .cn-profile-name-banner .cn-profile-title-pill { background: rgba(4,10,24,0.55); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+      .cn-profile-role-row { display: flex; justify-content: center; margin: 2px 0 14px; }
       .cn-profile-name-banner-crown {
         position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
         color: #FCD34D; filter: drop-shadow(0 0 4px rgba(252,211,77,0.9));
@@ -8499,15 +8457,15 @@ function GlobalStyles() {
         border-radius: 18px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.4);
       }
       .cn-profile-stats-item {
-        flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; background: none; border: none; cursor: pointer;
-        padding: 2px; text-align: left;
+        flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; background: none; border: none; cursor: pointer;
+        padding: 2px; text-align: center; overflow: hidden;
       }
       .cn-profile-stats-item--static { cursor: default; }
       .cn-profile-stats-icon {
         width: 34px; height: 34px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center;
         background: rgba(var(--cn-accent-rgb),0.14); border: 1px solid rgba(var(--cn-accent-rgb),0.4); color: var(--cn-accent-bright);
       }
-      .cn-profile-stats-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .cn-profile-stats-text { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; max-width: 100%; }
       .cn-profile-stats-label {
         font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cn-text-dimmer); white-space: nowrap;
       }
@@ -8515,7 +8473,7 @@ function GlobalStyles() {
         font-size: 13.5px; font-weight: 700; color: var(--cn-text); font-family: 'Space Grotesk', sans-serif;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
-      .cn-profile-stats-value--country { display: flex; align-items: center; gap: 5px; }
+      .cn-profile-stats-value--country { display: flex; align-items: center; justify-content: center; gap: 5px; max-width: 100%; }
       .cn-profile-stats-flag { border-radius: 3px; flex-shrink: 0; }
       .cn-profile-stats-divider { width: 1px; align-self: stretch; background: rgba(var(--cn-accent-rgb),0.22); flex-shrink: 0; }
 
@@ -8734,15 +8692,11 @@ function GlobalStyles() {
         border: 1px solid rgba(var(--cn-accent-rgb),0.45); background: #0c2236; touch-action: none;
         box-shadow: 0 0 0 1px rgba(var(--cn-accent-rgb),0.12), 0 0 26px rgba(60,150,255,0.35), 0 16px 44px rgba(0,0,0,0.5);
       }
-      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(70vh, 680px); margin: 0 10px; width: auto; border: 1px solid rgba(var(--cn-accent-rgb),0.38); border-radius: 16px; box-shadow: 0 0 0 1px rgba(255,255,255,0.04), 0 6px 22px rgba(0,0,0,0.35); }
-      .cn-map-top { position: absolute; top: 0; left: 0; right: 0; z-index: 4; padding: 14px 58px 26px 16px; pointer-events: none; background: linear-gradient(180deg, rgba(6,14,28,0.62), rgba(6,14,28,0)); }
+      .cn-map-viewport-wrap .cn-tmap-viewport { height: min(70vh, 680px); margin: 0 10px; width: auto; border: 1px solid rgba(var(--cn-accent-rgb),0.45); border-radius: 16px; box-shadow: none; isolation: isolate; clip-path: inset(0 round 16px); }
+      .cn-map-top { position: absolute; top: 1px; left: 11px; right: 11px; z-index: 4; padding: 14px 58px 26px 14px; border-radius: 15px 15px 0 0; pointer-events: none; background: linear-gradient(180deg, rgba(6,14,28,0.62), rgba(6,14,28,0)); }
       .cn-map-top > * { pointer-events: auto; }
       .cn-map-title { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: #fff; text-shadow: 0 2px 10px rgba(0,0,0,0.7), 0 0 18px rgba(var(--cn-accent-rgb),0.6); pointer-events: none; }
       .cn-map-sub { margin-top: 3px; font-size: 11.5px; color: rgba(255,255,255,0.88); text-shadow: 0 1px 6px rgba(0,0,0,0.8); pointer-events: none; max-width: 80%; }
-      .cn-map-tools { position: absolute; top: 78px; right: 10px; z-index: 4; display: flex; flex-direction: column; background: #fff; border-radius: 4px; box-shadow: 0 0 0 2px rgba(0,0,0,0.1); overflow: hidden; }
-      .cn-map-tools button { width: 29px; height: 29px; display: flex; align-items: center; justify-content: center; border: 0; background: #fff; color: #333; cursor: pointer; padding: 0; }
-      .cn-map-tools button + button { border-top: 1px solid #ddd; }
-      .cn-map-tools button:active { background: #eee; }
       .cn-map-search { position: relative; }
       .cn-map-search-box { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; color: #fff; background: rgba(8,16,30,0.88); border: 1px solid rgba(var(--cn-accent-rgb),0.55); backdrop-filter: blur(6px); }
       .cn-map-search-box input { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff; font-size: 14px; }
