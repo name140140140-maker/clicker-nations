@@ -847,6 +847,19 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   await pushNews(
     `⚔️ ${COUNTRY_MAP[attacker]?.flag || ""} ${COUNTRY_MAP[attacker]?.name || attacker} оголосили війну ${COUNTRY_MAP[defender]?.flag || ""} ${COUNTRY_MAP[defender]?.name || defender} за місто ${city.name}. Поріг захоплення: ${fmt(war.target)}.`
   );
+  /* Бот пише в Telegram усім гравцям країни, на яку напали */
+  try {
+    const initData = window.Telegram?.WebApp?.initData;
+    if (initData) {
+      fetch("/api/notify-war", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData, warId: id, attackerName: an, defenderName: dn }),
+      }).catch(() => null);
+    }
+  } catch {
+    /* сповіщення не критичні */
+  }
   await mailMany(players, [attacker, defender], {
     type: "info",
     subject: `⚔️ Підготовка до війни за ${city.name}`,
