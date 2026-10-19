@@ -125,6 +125,7 @@ export default async function handler(req, res) {
       : undefined;
 
     let sent = 0;
+    let firstError = "";
     for (let i = 0; i < targets.length; i += 25) {
       const batch = targets.slice(i, i + 25);
       const results = await Promise.allSettled(
@@ -137,8 +138,20 @@ export default async function handler(req, res) {
         )
       );
       sent += results.filter((r) => r.status === "fulfilled" && r.value?.ok).length;
+      if (!firstError) {
+        const bad = results.find((r) => r.status === "rejected" || !r.value?.ok);
+        if (bad) firstError = bad.status === "rejected" ? String(bad.reason) : bad.value?.description || "unknown";
+      }
     }
-    res.status(200).json({ ok: true, sent, total: targets.length });
+    if (sent === 0) {
+      // нікому не дійшло — знімаємо блокування, щоб можна було повторити
+      await fetch(`${SUPABASE_URL}/rest/v1/kv_store?key=eq.${encodeURIComponent("warnotify:" + warId)}`, {
+        method: "DELETE",
+        headers: headers(),
+      }).catch(() => null);
+    }
+    console.log("notify-war:", { warId, sent, total: targets.length, firstError: firstError || null });
+    res.status(200).json({ ok: true, sent, total: targets.length, firstError: firstError || null });
   } catch (err) {
     console.error("notify-war error:", err?.message || err);
     res.status(500).json({ error: "Помилка розсилки" });

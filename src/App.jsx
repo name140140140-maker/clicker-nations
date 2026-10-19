@@ -807,7 +807,7 @@ async function mailMany(players, codes, message) {
   await Promise.all(targets.map((pl) => addMail(pl.id, message).catch(() => null)));
 }
 
-async function declareWar2({ attacker, defender, city, owners, cityOwners, players, immune = false }) {
+async function declareWar2({ attacker, defender, city, owners, cityOwners, players, immune = false, selfId = null }) {
   if (!COUNTRY_MAP[defender]) return { ok: false, reason: "Країну не знайдено" };
   if (attacker === defender) return { ok: false, reason: "Не можна нападати на себе" };
   if (owners && ((cityOwners && cityOwners[city.key]) || owners[city.rid]) !== defender) return { ok: false, reason: "Це місто вже не належить цій країні" };
@@ -855,7 +855,27 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ initData, warId: id, attackerName: an, defenderName: dn }),
-      }).catch(() => null);
+      })
+        .then((r) => r.json().catch(() => null))
+        .then((d) => {
+          console.info("notify-war:", d);
+          /* Для адміна показуємо відповідь сервера, щоб легко знайти причину, якщо сповіщення не доходять */
+          if (isSuperAdmin() && selfId) {
+            const body = d && d.ok
+              ? `Сервер відповів: надіслано ${d.sent ?? 0} із ${d.total ?? 0} гравців.` +
+                (d.skipped ? " Розсилку для цієї війни вже було виконано раніше." : "") +
+                (d.firstError ? `\nПомилка Telegram: ${d.firstError}` : "") +
+                (d.total === 0 ? "\nУ країн-учасниць немає гравців із Telegram ID." : "")
+              : `Сервер відхилив запит: ${(d && d.error) || "невідома помилка"}`;
+            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body }).catch(() => null);
+          }
+        })
+        .catch((e) => {
+          console.warn("notify-war failed:", e);
+          if (isSuperAdmin() && selfId) {
+            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body: "Запит до /api/notify-war не вдався: " + e + ". Ймовірно, файл api/notify-war.js не задеплоєно." }).catch(() => null);
+          }
+        });
     }
   } catch {
     /* сповіщення не критичні */
@@ -3529,6 +3549,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
       cityOwners: nations?.cityOwners,
       players,
       immune: isSuperAdmin() && !!player.timeImmunity,
+      selfId: player.id,
     });
     if (res.ok) {
       cnSfx.purchase();
