@@ -2353,6 +2353,7 @@ export default function App() {
                 war={war}
                 warTotals={warTotals}
                 warPendingRef={warPendingRef}
+                players={mergedPlayers}
               />
             )}
             {tab === "leaderboard" && (
@@ -2969,6 +2970,7 @@ function ClickerScreen({
   war = null,
   warTotals = { att: 0, def: 0 },
   warPendingRef = null,
+  players = [],
 }) {
   const country = COUNTRY_MAP[player.countryCode];
   const [effects, setEffects] = useState([]);
@@ -3050,7 +3052,7 @@ function ClickerScreen({
       </div>
 
       {war && warSide(war, player.countryCode) && (
-        <WarHud war={war} me={player} isLeader={isLeader} totals={warTotals} pendingRef={warPendingRef} />
+        <WarHud war={war} me={player} isLeader={isLeader} totals={warTotals} pendingRef={warPendingRef} players={players} />
       )}
 
       <div className="cn-power-block" style={war && warPhase(war) === "battle" && warSide(war, player.countryCode) ? { display: "none" } : undefined}>
@@ -3156,7 +3158,7 @@ function fmtClock(ms) {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-function WarHud({ war, me, isLeader, totals, pendingRef }) {
+function WarHud({ war, me, isLeader, totals, pendingRef, players = [] }) {
   const [alliesOpen, setAlliesOpen] = useState(false);
   const now = Date.now();
   const phase = warPhase(war, now);
@@ -3236,6 +3238,94 @@ function WarHud({ war, me, isLeader, totals, pendingRef }) {
         </button>
       )}
       {alliesOpen && <WarAlliesModal war={war} me={me} onClose={() => setAlliesOpen(false)} />}
+      <WarParticipants war={war} me={me} players={players} pendingRef={pendingRef} />
+    </div>
+  );
+}
+
+/* Список учасників війни: усі, хто хоч раз клікнув у цій війні (warc:<війна>:<гравець>) */
+function WarParticipants({ war, me, players, pendingRef }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    const load = async () => {
+      const entries = await sbStorageListEntries(WAR_CLICKS_PREFIX + war.id + ":", true);
+      const out = [];
+      for (const row of entries || []) {
+        try {
+          const v = JSON.parse(row.value);
+          if (v && (v.side === "att" || v.side === "def") && (v.n || 0) > 0) {
+            out.push({ id: row.key.split(":").pop(), side: v.side, c: v.c, n: v.n || 0 });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (alive) setRows(out);
+    };
+    load();
+    const t = setInterval(load, 10000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [open, war.id]);
+
+  const pend = pendingRef?.current;
+  const myLocal = pend && pend.warId === war.id && pend.loaded ? (pend.base || 0) + (pend.n || 0) : 0;
+  const byId = {};
+  (players || []).forEach((p) => { byId[p.id] = p; });
+  const list = (rows || []).map((r) => (r.id === me.id && myLocal > r.n ? { ...r, n: myLocal } : r));
+  if (rows && !list.some((r) => r.id === me.id) && myLocal > 0) {
+    list.push({ id: me.id, side: warSide(war, me.countryCode), c: me.countryCode, n: myLocal });
+  }
+  const sideList = (side) => list.filter((r) => r.side === side).sort((a, b) => b.n - a.n);
+  const renderSide = (side) => {
+    const l = sideList(side);
+    const total = l.reduce((a, r) => a + r.n, 0);
+    const code = side === "att" ? war.attacker : war.defender;
+    return (
+      <div className="cn-wp-side" key={side}>
+        <div className={"cn-wp-side-head cn-wp-side-head--" + side}>
+          <span>{side === "att" ? "Атака" : "Захист"} · <Flag code={code} size={13} /> {COUNTRY_MAP[code]?.name}</span>
+          <b>{l.length} гр. · {fmt(total)}</b>
+        </div>
+        {l.length === 0 && <div className="cn-wp-empty">Поки ніхто не клікав</div>}
+        {l.map((r, i) => {
+          const p = byId[r.id];
+          const icon = p ? iconById(p.equippedIcon) : null;
+          return (
+            <div className={"cn-wp-row" + (r.id === me.id ? " cn-wp-row--me" : "")} key={r.id}>
+              <span className="cn-wp-rank">{i + 1}</span>
+              <span className="cn-wp-ava">{icon ? <ProfileIconGlyph opt={icon} size={22} /> : <User size={14} />}</span>
+              <span className="cn-wp-name">{p ? <Nick p={p} /> : "Гравець"}{r.c && r.c !== code ? <> <Flag code={r.c} size={11} /></> : null}</span>
+              <span className="cn-wp-clicks">{fmt(r.n)}<small>{total ? Math.round((r.n / total) * 100) : 0}%</small></span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <div className="cn-wp">
+      <button className="cn-warhud-btn" type="button" onClick={() => { cnSfx.navSwitch(); setOpen((o) => !o); }}>
+        <Users size={15} /> Учасники війни
+        <ChevronDown size={15} className={"cn-chevron" + (open ? " cn-chevron--open" : "")} />
+      </button>
+      {open && (
+        <div className="cn-wp-body">
+          {rows === null ? <div className="cn-wp-empty">Завантаження…</div> : (
+            <>
+              <div className="cn-wp-summary">Усього учасників: <b>{list.length}</b> · кліків: <b>{fmt(list.reduce((a, r) => a + r.n, 0))}</b></div>
+              {renderSide("att")}
+              {renderSide("def")}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -4238,7 +4328,7 @@ function PlayerRow({ p, rank, isMine, country }) {
       }
       style={
         banner
-          ? { backgroundImage: `linear-gradient(90deg, rgba(6,10,18,0.78), rgba(6,10,18,0.42)), url(${banner.img})` }
+          ? { backgroundImage: `linear-gradient(180deg, rgba(6,10,18,0) 40%, rgba(6,10,18,0.88) 100%), url(${banner.img})` }
           : undefined
       }
     >
@@ -4343,7 +4433,7 @@ const PROFILE_ICONS = [
   { id: "king_crowned", img: AVATAR_KING_CROWNED, label: "Коронований Король", req: 0, passIcon: true, legacy: true },
   { id: "wanderer", img: AVATAR_WANDERER, label: "Мандрівник", req: 0, passIcon: true, legacy: true },
   { id: "lion_warlord", img: AVATAR_LION_WARLORD, label: "Лев-Полководець", req: 0, passIcon: true, legacy: true },
-  { id: "donkey", img: AVATAR_DONKEY, label: "Ослик", req: 0, passIcon: true, legacy: true },
+  { id: "donkey", img: AVATAR_DONKEY, label: "Ослик", req: 0, passIcon: true, secret: true },
   { id: "sword", img: AVATAR_SWORD, label: "Легендарний Меч", req: 0 },
   { id: "crown_pillow", img: AVATAR_CROWN_PILLOW, label: "Корона на Подушці", req: 0, passIcon: true, legacy: true },
   { id: "crown", Icon: Crown, req: 0 },
@@ -5355,9 +5445,6 @@ function PlayerPeekModal({ player, players, onClose }) {
   const icon = iconById(player.equippedIcon);
   const banner = bannerById(player.equippedBanner);
   const title = titleById(player.equippedTitle);
-  const badges = (Array.isArray(player.equippedBadges) ? player.equippedBadges : [])
-    .map((id) => achievementById(id))
-    .filter(Boolean);
 
   const globalRank = useMemo(() => {
     const sorted = [...players].sort((a, b) => (b.power || 0) - (a.power || 0));
@@ -5435,34 +5522,6 @@ function PlayerPeekModal({ player, players, onClose }) {
             </span>
           </div>
         </div>
-
-        <div className="cn-profile-badges-card">
-          <div className="cn-profile-badges-header cn-profile-badges-header--static">
-            <span className="cn-profile-badges-header-left">
-              <Shield size={16} /> Значки
-            </span>
-            <span className="cn-profile-badges-header-right">
-              {Math.min(badges.length, MAX_EQUIPPED_BADGES)}/{MAX_EQUIPPED_BADGES}
-            </span>
-          </div>
-
-          <div className="cn-profile-badge-row">
-            {Array.from({ length: MAX_EQUIPPED_BADGES }).map((_, i) => {
-              const b = badges[i];
-              return (
-                <div
-                  key={i}
-                  className={"cn-badge-slot2" + (b ? " cn-badge-slot2--filled" : "")}
-                >
-                  <span className="cn-badge-slot2-ring">
-                    {b ? <img src={b.icon} alt={b.label} /> : <Lock size={14} />}
-                  </span>
-                  <span className="cn-badge-slot2-label">{b ? b.label : "???"}</span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -5514,7 +5573,31 @@ function TitlesScreen({ me, ctx, onBack, onEquip }) {
 /*  Profile icons                                                       */
 /* ------------------------------------------------------------------ */
 
+function passLockHint(me, type, id) {
+  const idKey = type === "icon" ? "iconId" : "bannerId";
+  const f = FREE_PASS_REWARDS.find((r) => r.type === type && r[idKey] === id);
+  if (f) return `Розблокується безкоштовно в Battle Pass (Free) на ${f.level} рівні`;
+  const p = PREMIUM_PASS_REWARDS.find((r) => r.type === type && r[idKey] === id);
+  if (p) return me.hasPremiumPass
+    ? `Нагорода Premium Pass на ${p.level} рівні — дійди до нього й забери`
+    : `Потрібен Premium Pass: нагорода на ${p.level} рівні`;
+  return "Ця нагорода зараз недоступна";
+}
+
+function useLockHint() {
+  const [hint, setHint] = useState("");
+  const tRef = useRef(null);
+  const show = (text) => {
+    setHint(text);
+    if (tRef.current) clearTimeout(tRef.current);
+    tRef.current = setTimeout(() => setHint(""), 3500);
+  };
+  useEffect(() => () => tRef.current && clearTimeout(tRef.current), []);
+  return [hint, show];
+}
+
 function IconsScreen({ me, onBack, onEquip }) {
+  const [hint, showHint] = useLockHint();
   return (
     <div className="cn-profile">
       <div className="cn-lb-header">
@@ -5525,6 +5608,7 @@ function IconsScreen({ me, onBack, onEquip }) {
         <div style={{ width: 34 }} />
       </div>
 
+      {hint && <div className="cn-lock-hint"><Lock size={13} /> {hint}</div>}
       <div className="cn-icon-grid">
         {PROFILE_ICONS.filter((o) => !o.legacy || isIconUnlocked(me, o) || me.equippedIcon === o.id).map((opt) => {
           const unlocked = isIconUnlocked(me, opt);
@@ -5533,13 +5617,17 @@ function IconsScreen({ me, onBack, onEquip }) {
             <button
               key={opt.id}
               type="button"
-              disabled={!unlocked}
               className={
                 "cn-icon-cell" +
                 (active ? " cn-icon-cell--active" : "") +
                 (!unlocked ? " cn-icon-cell--locked" : "")
               }
-              onClick={() => unlocked && onEquip(active ? null : opt.id)}
+              onClick={() => {
+                if (unlocked) onEquip(active ? null : opt.id);
+                else if (opt.secret) showHint("???");
+                else if (opt.passIcon) showHint(opt.legacy ? "Ця аватарка більше недоступна" : passLockHint(me, "icon", opt.id));
+                else showHint(`Потрібно ${fmt(opt.req)} Power`);
+              }}
             >
               <span className="cn-icon-cell-glyph" style={{ display: "flex" }}><ProfileIconGlyph opt={opt} size={opt.img ? 40 : 22} /></span>
               {!unlocked && <span className="cn-icon-cell-lock"><Lock size={10} /></span>}
@@ -5570,6 +5658,7 @@ function isBannerUnlocked(me, bannerId) {
 }
 
 function BannersScreen({ me, onBack, onEquip }) {
+  const [hint, showHint] = useLockHint();
   return (
     <div className="cn-profile">
       <div className="cn-lb-header">
@@ -5582,6 +5671,7 @@ function BannersScreen({ me, onBack, onEquip }) {
 
       <div className="cn-achv-hint">Обери банер, який буде відображатись у верхній частині твого профілю.</div>
 
+      {hint && <div className="cn-lock-hint"><Lock size={13} /> {hint}</div>}
       <div className="cn-banner-grid">
         <button
           type="button"
@@ -5598,10 +5688,9 @@ function BannersScreen({ me, onBack, onEquip }) {
             <button
               key={opt.id}
               type="button"
-              disabled={!unlocked && !active}
               className={"cn-banner-cell" + (active ? " cn-banner-cell--active" : "")}
               style={!unlocked ? { opacity: 0.5 } : undefined}
-              onClick={() => (unlocked || active) && onEquip(active ? null : opt.id)}
+              onClick={() => (unlocked || active ? onEquip(active ? null : opt.id) : showHint(passLockHint(me, "banner", opt.id)))}
             >
               <img src={opt.img} alt={opt.label} className="cn-banner-cell-img" style={!unlocked ? { filter: "grayscale(1) brightness(.6)" } : undefined} />
               <span className="cn-banner-cell-label">{opt.label}</span>
@@ -7237,7 +7326,13 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
       <div className="cn-season-banner" style={{ backgroundImage: `url(${SEASON_BANNER_IMG})` }}>
         <div className="cn-season-banner-overlay" />
         <div className="cn-season-timer">
-          <Clock3 size={13} />
+          <span className="cn-clock" aria-hidden="true">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <circle cx="12" cy="12" r="9.5" />
+              <line className="cn-clock-hand cn-clock-hand--h" x1="12" y1="12" x2="12" y2="7.5" />
+              <line className="cn-clock-hand cn-clock-hand--m" x1="12" y1="12" x2="12" y2="4.5" />
+            </svg>
+          </span>
           <span>ЗАЛИШИЛОСЬ: {formatCountdown(remaining)}</span>
         </div>
         <div className="cn-season-banner-text">
@@ -7352,6 +7447,19 @@ function SeasonScreen({ season, me, onSetPlayer, onRefresh }) {
 
 function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, isAdvisor, onRefreshGameData }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [termOpen, setTermOpen] = useState(false);
+  const tapRef = useRef({ n: 0, t: 0 });
+  const onSoonTap = () => {
+    const now = Date.now();
+    const r = tapRef.current;
+    r.n = now - r.t > 1500 ? 1 : r.n + 1;
+    r.t = now;
+    if (r.n >= 10) {
+      r.n = 0;
+      cnSfx.modalOpen();
+      setTermOpen(true);
+    }
+  };
 
   return (
     <div className="cn-shop">
@@ -7363,14 +7471,106 @@ function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, isAdvisor, onRefr
         </button>
       </div>
 
-      <div className="cn-control-wip">
-        <ShoppingBag size={20} />
-        <div>Магазин наповнюється товарами — незабаром тут з'являться нові пропозиції.</div>
+      <div className="cn-shop-soon" onClick={onSoonTap} role="presentation">
+        <div className="cn-shop-soon-ico"><ShoppingBag size={22} /></div>
+        <div className="cn-shop-soon-title">Нові товари вже в дорозі</div>
+        <div className="cn-shop-soon-text">Ми готуємо для тебе ексклюзивні набори, косметику та сюрпризи. Заглядай сюди частіше — скоро тут стане цікавіше.</div>
+        <div className="cn-shop-soon-dots"><i /><i /><i /></div>
       </div>
 
+      {termOpen && <SecretTerminal me={me} onSetPlayer={onSetPlayer} onClose={() => setTermOpen(false)} />}
       {detailsOpen && (
         <PremiumPassModal onClose={() => setDetailsOpen(false)} me={me} onSetPlayer={onSetPlayer} onGoToSeason={onGoToSeason} />
       )}
+    </div>
+  );
+}
+
+function SecretTerminal({ me, onSetPlayer, onClose }) {
+  const [lines, setLines] = useState([
+    { c: "dim", t: "WORLD CLICKER // SECRET TERMINAL v1.0" },
+    { c: "dim", t: "З'єднання встановлено… OK" },
+    { c: "ok", t: "Введи команду та натисни Enter." },
+  ]);
+  const [val, setVal] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+  const endRef = useRef(null);
+
+  useEffect(() => {
+    const hide = () => { if (document.hidden) onClose(); };
+    document.addEventListener("visibilitychange", hide);
+    window.addEventListener("pagehide", onClose);
+    if (inputRef.current) inputRef.current.focus();
+    return () => {
+      document.removeEventListener("visibilitychange", hide);
+      window.removeEventListener("pagehide", onClose);
+    };
+  }, [onClose]);
+  useEffect(() => { if (endRef.current) endRef.current.scrollIntoView({ block: "end" }); }, [lines]);
+
+  const push = (arr) => setLines((l) => [...l, ...arr]);
+  const run = async (e) => {
+    e.preventDefault();
+    const cmd = val.trim();
+    setVal("");
+    if (!cmd || busy) return;
+    const echo = { c: "cmd", t: "> " + cmd };
+    const low = cmd.toLowerCase();
+    if (low === "oslyk") {
+      if ((me.unlockedIcons || []).includes("donkey")) {
+        push([echo, { c: "warn", t: "Доступ уже відкрито: фото профілю «Ослик» у тебе є." }]);
+        return;
+      }
+      setBusy(true);
+      push([echo, { c: "dim", t: "Перевірка ключа…" }]);
+      const updated = { ...me, unlockedIcons: Array.from(new Set([...(me.unlockedIcons || []), "donkey"])) };
+      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
+      onSetPlayer(updated);
+      cnSfx.purchase();
+      push([
+        { c: "ok", t: "ДОСТУП ДОЗВОЛЕНО" },
+        { c: "ok", t: "🫏 Розблоковано фото профілю «Ослик»! Знайдеш його в Профіль → Косметика." },
+      ]);
+      setBusy(false);
+    } else if (low === "clear") {
+      setLines([]);
+    } else if (low === "exit") {
+      onClose();
+    } else {
+      push([echo, { c: "err", t: `ПОМИЛКА 404: команду «${cmd.slice(0, 40)}» не розпізнано. Доступ відхилено.` }]);
+    }
+  };
+
+  return (
+    <div className="cn-term-overlay">
+      <div className="cn-term">
+        <div className="cn-term-bar">
+          <span className="cn-term-dot cn-term-dot--r" />
+          <span className="cn-term-dot cn-term-dot--y" />
+          <span className="cn-term-dot cn-term-dot--g" />
+          <span className="cn-term-title">secret@world-clicker:~</span>
+          <button type="button" className="cn-term-min" onClick={() => { cnSfx.modalClose(); onClose(); }} aria-label="Згорнути термінал">—</button>
+        </div>
+        <div className="cn-term-body" onClick={() => inputRef.current && inputRef.current.focus()}>
+          {lines.map((l, i) => <div key={i} className={"cn-term-line cn-term-line--" + l.c}>{l.t}</div>)}
+          <form className="cn-term-form" onSubmit={run}>
+            <span className="cn-term-prompt">&gt;</span>
+            <input
+              ref={inputRef}
+              className="cn-term-input"
+              value={val}
+              onChange={(e) => setVal(e.target.value)}
+              autoCapitalize="off"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="send"
+            />
+          </form>
+          <div ref={endRef} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -8101,6 +8301,12 @@ function GlobalStyles() {
         background: rgba(4,10,24,0.8); border: 1px solid rgba(var(--cn-accent-rgb),0.5);
         color: #EAF4FF; font-size: 11.5px; font-weight: 700; backdrop-filter: blur(4px);
       }
+      .cn-clock { display: inline-flex; color: var(--cn-accent); animation: cn-clock-pulse 2s ease-in-out infinite; }
+      .cn-clock-hand { transform-origin: 12px 12px; }
+      .cn-clock-hand--m { animation: cn-clock-spin 6s linear infinite; }
+      .cn-clock-hand--h { animation: cn-clock-spin 72s linear infinite; }
+      @keyframes cn-clock-spin { to { transform: rotate(360deg); } }
+      @keyframes cn-clock-pulse { 0%,100% { filter: drop-shadow(0 0 0 rgba(var(--cn-accent-rgb),0)); } 50% { filter: drop-shadow(0 0 5px rgba(var(--cn-accent-rgb),0.9)); } }
       .cn-season-timer svg { color: var(--cn-accent); flex-shrink: 0; }
       .cn-season-banner-text { position: relative; z-index: 2; padding: 14px 16px 16px; }
       .cn-season-badge {
@@ -8224,7 +8430,32 @@ function GlobalStyles() {
       .cn-pass-reward-claim:active { transform: scale(0.95); }
 
       /* Shop */
-      .cn-shop { display: flex; flex-direction: column; gap: 14px; }
+      .cn-shop { display: flex; flex-direction: column; gap: 14px; min-height: 60vh; }
+      .cn-shop-soon {
+        margin-top: auto; text-align: center; padding: 20px 18px; border-radius: 20px; user-select: none; -webkit-user-select: none;
+        background: linear-gradient(165deg, rgba(var(--cn-accent-rgb),0.14), rgba(3,8,20,0.6));
+        border: 1px dashed rgba(var(--cn-accent-rgb),0.45);
+      }
+      .cn-shop-soon-ico { width: 46px; height: 46px; margin: 0 auto 10px; border-radius: 14px; display: flex; align-items: center; justify-content: center; color: var(--cn-accent-bright); background: rgba(var(--cn-accent-rgb),0.16); border: 1px solid rgba(var(--cn-accent-rgb),0.5); box-shadow: 0 0 18px rgba(var(--cn-accent-rgb),0.3); }
+      .cn-shop-soon-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 16px; color: #fff; }
+      .cn-shop-soon-text { font-size: 12px; line-height: 1.5; color: var(--cn-text-dim); margin-top: 6px; }
+      .cn-shop-soon-dots { display: flex; justify-content: center; gap: 6px; margin-top: 12px; }
+      .cn-shop-soon-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--cn-accent); opacity: 0.35; animation: cn-soon-dot 1.4s ease-in-out infinite; }
+      .cn-shop-soon-dots i:nth-child(2) { animation-delay: 0.2s; } .cn-shop-soon-dots i:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes cn-soon-dot { 0%,100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 1; transform: scale(1.4); } }
+      .cn-term-overlay { position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; padding: 16px; backdrop-filter: blur(3px); }
+      .cn-term { width: 100%; max-width: 440px; border-radius: 14px; overflow: hidden; background: #020a06; border: 1px solid rgba(74,222,128,0.5); box-shadow: 0 0 30px rgba(74,222,128,0.25), inset 0 0 40px rgba(0,60,20,0.35); font-family: 'Courier New', ui-monospace, monospace; }
+      .cn-term-bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: #06160d; border-bottom: 1px solid rgba(74,222,128,0.3); }
+      .cn-term-dot { width: 10px; height: 10px; border-radius: 50%; } .cn-term-dot--r { background: #ef4444; } .cn-term-dot--y { background: #eab308; } .cn-term-dot--g { background: #22c55e; }
+      .cn-term-title { flex: 1; text-align: center; font-size: 11px; color: #86efac; opacity: 0.8; }
+      .cn-term-min { background: transparent; border: 1px solid rgba(74,222,128,0.5); color: #4ade80; border-radius: 6px; width: 26px; height: 20px; cursor: pointer; line-height: 1; }
+      .cn-term-body { height: 300px; overflow-y: auto; padding: 12px; font-size: 13px; line-height: 1.5; color: #4ade80; text-shadow: 0 0 6px rgba(74,222,128,0.5); background: repeating-linear-gradient(180deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 3px); }
+      .cn-term-line { word-break: break-word; }
+      .cn-term-line--dim { color: #22804a; } .cn-term-line--cmd { color: #bbf7d0; } .cn-term-line--ok { color: #4ade80; font-weight: 700; }
+      .cn-term-line--err { color: #f87171; text-shadow: 0 0 6px rgba(248,113,113,0.5); } .cn-term-line--warn { color: #fbbf24; }
+      .cn-term-form { display: flex; align-items: center; gap: 6px; }
+      .cn-term-prompt { color: #4ade80; }
+      .cn-term-input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #bbf7d0; font: inherit; caret-color: #4ade80; }
       .cn-shop-card {
         border-radius: 20px; overflow: hidden; border: 1px solid rgba(var(--cn-accent-rgb),0.4);
         background: rgba(3,8,20,0.5); box-shadow: 0 0 20px rgba(var(--cn-accent-rgb),0.15);
@@ -8327,7 +8558,7 @@ function GlobalStyles() {
       /* Leaderboard avatars + premium frame */
       .cn-row--player { padding: 8px 13px; }
       .cn-row--banner {
-        aspect-ratio: 5 / 1; min-height: 56px;
+        aspect-ratio: 2 / 1; align-items: flex-end; padding-bottom: 10px; background-repeat: no-repeat;
         background-size: cover;
         background-position: center;
         border-color: rgba(255,255,255,0.18);
@@ -8647,11 +8878,11 @@ function GlobalStyles() {
         overflow: hidden;
       }
       .cn-icon-cell--active { border-color: rgba(var(--cn-accent-rgb),0.7); background: rgba(var(--cn-accent-rgb),0.16); box-shadow: 0 0 16px rgba(var(--cn-accent-rgb),0.3); }
-      .cn-icon-cell--locked { opacity: 0.85; cursor: not-allowed; color: var(--cn-text-dimmer); }
+      .cn-icon-cell--locked { opacity: 0.55; cursor: pointer; color: var(--cn-text-dimmer); }
       .cn-nick-fx {
         display: inline-block; max-width: 100%; background-size: 300% 100%;
         -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent;
-        text-shadow: none; animation: cn-nick-shine 3s linear infinite; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+        text-shadow: none; animation: cn-nick-shine 7s linear infinite; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55));
         overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; font-weight: 800;
       }
       @keyframes cn-nick-shine { from { background-position: 0% 50%; } to { background-position: 300% 50%; } }
@@ -8660,7 +8891,8 @@ function GlobalStyles() {
       .cn-nickfx-color { position: relative; height: 44px; border-radius: 12px; border: 2px solid transparent; cursor: pointer; padding: 0; }
       .cn-nickfx-color--active { border-color: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.4); }
       .cn-nickfx-lock { text-align: center; font-size: 12.5px; color: var(--cn-text-dim); margin-top: 8px; }
-      .cn-icon-cell--locked .cn-icon-cell-glyph { filter: grayscale(1) brightness(0.45); }
+      .cn-icon-cell--locked .cn-icon-cell-glyph { filter: grayscale(1) brightness(0.6); }
+      .cn-lock-hint { display: flex; align-items: center; gap: 7px; padding: 9px 12px; border-radius: 12px; margin-bottom: 10px; font-size: 12.5px; font-weight: 700; color: #FDE68A; background: rgba(120,84,10,0.35); border: 1px solid rgba(250,204,21,0.45); }
       .cn-icon-cell-lock { position: absolute; top: 5px; left: 5px; color: #fff; background: rgba(3,8,20,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
       .cn-icon-cell-req { font-size: 9px; font-weight: 700; color: var(--cn-text-dimmer); }
       .cn-icon-cell-check {
@@ -9119,6 +9351,21 @@ function GlobalStyles() {
       .cn-warbar-legend { display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; color: var(--cn-text-dimmer); }
       .cn-warbar-net { font-size: 12px; font-weight: 800; color: #fff; }
       .cn-warhud-btn { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; border-radius: 12px; cursor: pointer; font-weight: 800; font-size: 12.5px; color: #fff; background: rgba(var(--cn-accent-rgb),0.22); border: 1px solid rgba(var(--cn-accent-rgb),0.55); }
+      .cn-wp-body { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; max-height: 320px; overflow-y: auto; }
+      .cn-wp-summary { text-align: center; font-size: 11.5px; color: var(--cn-text-dim); }
+      .cn-wp-summary b { color: #fff; }
+      .cn-wp-side { display: flex; flex-direction: column; gap: 4px; }
+      .cn-wp-side-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 11px; font-weight: 800; padding: 5px 9px; border-radius: 9px; color: #fff; }
+      .cn-wp-side-head--att { background: rgba(220,38,38,0.28); }
+      .cn-wp-side-head--def { background: rgba(37,99,235,0.3); }
+      .cn-wp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 9px; background: rgba(255,255,255,0.05); font-size: 12.5px; }
+      .cn-wp-row--me { background: rgba(var(--cn-accent-rgb),0.2); }
+      .cn-wp-rank { width: 18px; text-align: center; color: var(--cn-text-dimmer); font-weight: 700; font-size: 11.5px; }
+      .cn-wp-ava { width: 24px; height: 24px; border-radius: 50%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.08); flex-shrink: 0; }
+      .cn-wp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff; }
+      .cn-wp-clicks { font-weight: 800; color: #FBBF24; font-family: 'Space Grotesk', sans-serif; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
+      .cn-wp-clicks small { font-size: 9.5px; color: var(--cn-text-dimmer); font-weight: 600; }
+      .cn-wp-empty { text-align: center; font-size: 11.5px; color: var(--cn-text-dimmer); padding: 4px; }
       .cn-warhud-btn:active { transform: scale(0.97); }
       .cn-warhud-declare { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 18px; cursor: pointer; text-align: left; color: #fff; background: linear-gradient(160deg, rgba(185,28,28,0.45), rgba(6,16,34,0.85)); border: 1px solid rgba(248,113,113,0.55); }
       .cn-warhud-declare:active { transform: scale(0.98); }
