@@ -400,6 +400,19 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             },
           });
         }
+        // «Шов»: тонкий контур того ж кольору, що й заливка, закриває вузькі щілини між областями
+        // (на далекому зумі спрощення геометрії інакше лишає синю воду між ними).
+        map.addLayer({
+          id: "regions-seal",
+          type: "line",
+          source: "regions",
+          layout: { "line-join": "round" },
+          paint: {
+            "line-color": ["to-color", ["coalesce", ["feature-state", "c"], MAP_COLORS.free]],
+            "line-width": ["interpolate", ["linear"], ["zoom"], 1, 1.6, 4, 1.2, 7, 0.8],
+            "line-opacity": ["case", ["==", regionOwner, ""], 0.92, OWNER_OPACITY],
+          },
+        });
         // Підсвітка вибраної області (режим вибору й перегляду).
         map.addLayer({
           id: "regions-selected",
