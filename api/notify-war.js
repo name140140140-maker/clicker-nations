@@ -47,8 +47,8 @@ async function allPlayers() {
   const out = [];
   for (let from = 0; ; from += 1000) {
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/kv_store?key=like.${encodeURIComponent(PLAYER_PREFIX + "%")}&shared=eq.true&select=value`,
-      { headers: headers({ Range: `${from}-${from + 999}` }) }
+      `${SUPABASE_URL}/rest/v1/kv_store?key=like.${encodeURIComponent(PLAYER_PREFIX + "%")}&shared=eq.true&select=value&order=key.asc&limit=1000&offset=${from}`,
+      { headers: headers() }
     );
     const rows = await res.json();
     if (!Array.isArray(rows)) break;
