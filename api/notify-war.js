@@ -120,9 +120,16 @@ export default async function handler(req, res) {
     const targets = players
       .filter((p) => p.telegramId && !p.blocked && (p.countryCode === war.defender || p.countryCode === war.attacker))
       .map((p) => ({ ...p, __text: p.countryCode === war.defender ? textDef : textAtt }));
-    const replyMarkup = process.env.WEBAPP_URL
-      ? { inline_keyboard: [[{ text: "🛡 Відкрити гру", web_app: { url: process.env.WEBAPP_URL } }]] }
-      : undefined;
+    // t.me-посилання на Mini App — це звичайна URL-кнопка; web_app дозволений лише для прямої https-адреси гри.
+    const rawUrl = String(process.env.WEBAPP_URL || "").trim().replace(/^http:\/\//i, "https://");
+    let replyMarkup;
+    if (/^https:\/\//i.test(rawUrl)) {
+      const isTme = /^https:\/\/(t\.me|telegram\.me)\//i.test(rawUrl);
+      const btn = isTme
+        ? { text: "🛡 Відкрити гру", url: rawUrl }
+        : { text: "🛡 Відкрити гру", web_app: { url: rawUrl } };
+      replyMarkup = { inline_keyboard: [[btn]] };
+    }
 
     let sent = 0;
     let firstError = "";

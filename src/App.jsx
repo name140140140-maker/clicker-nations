@@ -867,23 +867,20 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
                 (d.firstError ? `\nПомилка Telegram: ${d.firstError}` : "") +
                 (d.total === 0 ? "\nУ країн-учасниць немає гравців із Telegram ID." : "")
               : `Сервер відхилив запит: ${(d && d.error) || "невідома помилка"}`;
-            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body })
-              .catch((e) => console.error("notify-war diagnostic mail failed:", e));
+            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body }).catch(() => null);
           }
         })
         .catch((e) => {
           console.warn("notify-war failed:", e);
           if (isSuperAdmin() && selfId) {
-            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body: "Запит до /api/notify-war не вдався: " + e + ". Ймовірно, файл api/notify-war.js не задеплоєно." })
-              .catch((mailError) => console.error("notify-war diagnostic mail failed:", mailError));
+            addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body: "Запит до /api/notify-war не вдався: " + e + ". Ймовірно, файл api/notify-war.js не задеплоєно." }).catch(() => null);
           }
         });
     } else if (isSuperAdmin() && selfId) {
-      addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body: "Сповіщення не надіслано: гра не передала Telegram initData (відкрий гру саме через бота в Telegram, а не в браузері)." })
-        .catch((e) => console.error("notify-war diagnostic mail failed:", e));
+      addMail(selfId, { type: "info", subject: "🔧 Діагностика сповіщень про війну", body: "Сповіщення не надіслано: гра не передала Telegram initData (відкрий гру саме через бота в Telegram, а не в браузері)." }).catch(() => null);
     }
-  } catch (e) {
-    console.error("notify-war setup failed:", e);
+  } catch {
+    /* сповіщення не критичні */
   }
   await mailMany(players, [attacker, defender], {
     type: "info",
