@@ -2375,7 +2375,7 @@ export default function App() {
         />
       ) : (
         <div className="cn-app">
-          <div className="cn-content">
+          <div className={"cn-content" + (tab === "map" ? " cn-content--map" : "")}>
             {tab === "clicker" && (
               <ClickerScreen
                 player={player}
@@ -7095,6 +7095,45 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             }}
           />
         </div>
+        {!selected && (
+          <div className="cn-map-bottom">
+      <div className="cn-conflicts">
+        <button type="button" className="cn-conflicts-head" onClick={() => setWarsOpen((v) => !v)} aria-expanded={warsOpen}>
+          <Swords size={15} />
+          <span>Активні конфлікти</span>
+          <b className={"cn-conflicts-count" + (wars.length ? " cn-conflicts-count--on" : "")}>{wars.length}</b>
+          <ChevronRight size={16} className={"cn-conflicts-chev" + (warsOpen ? " cn-conflicts-chev--open" : "")} />
+        </button>
+        {warsOpen && (
+          <div className="cn-conflicts-list">
+            {wars.length === 0 && <div className="cn-conflicts-empty">Зараз немає активних війн</div>}
+            {wars.map((w) => {
+              const ph = warPhase(w);
+              const left = ph === "prep" ? w.prepEnd - Date.now() : w.battleEnd - Date.now();
+              return (
+                <button type="button" key={w.id} className="cn-conflict-row" onClick={() => flyToWar(w)}>
+                  <span className="cn-conflict-sides">
+                    <Flag code={w.attacker} size={16} /> <span>{COUNTRY_MAP[w.attacker]?.name || w.attacker}</span>
+                    <Swords size={12} className="cn-conflict-vs" />
+                    <Flag code={w.defender} size={16} /> <span>{COUNTRY_MAP[w.defender]?.name || w.defender}</span>
+                  </span>
+                  <span className="cn-conflict-meta">
+                    за {w.cityName} · {ph === "prep" ? "підготовка" : "битва"} · {fmtDuration(left)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+            <div className="cn-map-bottom-row">
+              <MapLegend lang={lang} myColor={myCountry?.color} />
+              <button className="cn-map-mine-pill" type="button" onClick={goToMine}>
+                <Compass size={14} /> {t(lang, "nn_goto_mine")}
+              </button>
+            </div>
+          </div>
+        )}
         {selectedCity && selected && (
           <div className="cn-map-card cn-map-card--anim cn-city-card" key={"city" + selectedCity.city.i}>
             <button className="cn-map-card-close" onClick={() => { setSelectedCity(null); setSelected(null); }} type="button" aria-label="Закрити">
@@ -7176,43 +7215,6 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
           </div>
         )}
       </div>
-
-      <div className="cn-conflicts">
-        <button type="button" className="cn-conflicts-head" onClick={() => setWarsOpen((v) => !v)} aria-expanded={warsOpen}>
-          <Swords size={15} />
-          <span>Активні конфлікти</span>
-          <b className={"cn-conflicts-count" + (wars.length ? " cn-conflicts-count--on" : "")}>{wars.length}</b>
-          <ChevronRight size={16} className={"cn-conflicts-chev" + (warsOpen ? " cn-conflicts-chev--open" : "")} />
-        </button>
-        {warsOpen && (
-          <div className="cn-conflicts-list">
-            {wars.length === 0 && <div className="cn-conflicts-empty">Зараз немає активних війн</div>}
-            {wars.map((w) => {
-              const ph = warPhase(w);
-              const left = ph === "prep" ? w.prepEnd - Date.now() : w.battleEnd - Date.now();
-              return (
-                <button type="button" key={w.id} className="cn-conflict-row" onClick={() => flyToWar(w)}>
-                  <span className="cn-conflict-sides">
-                    <Flag code={w.attacker} size={16} /> <span>{COUNTRY_MAP[w.attacker]?.name || w.attacker}</span>
-                    <Swords size={12} className="cn-conflict-vs" />
-                    <Flag code={w.defender} size={16} /> <span>{COUNTRY_MAP[w.defender]?.name || w.defender}</span>
-                  </span>
-                  <span className="cn-conflict-meta">
-                    за {w.cityName} · {ph === "prep" ? "підготовка" : "битва"} · {fmtDuration(left)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <MapLegend lang={lang} myColor={myCountry?.color} />
-
-      <button className="cn-dev-btn cn-tmap-mine-btn" type="button" onClick={goToMine}>
-        <Compass size={14} /> {t(lang, "nn_goto_mine")}
-      </button>
-
     </div>
   );
 }
@@ -9109,6 +9111,23 @@ function GlobalStyles() {
       .cn-city-importance b { color: var(--cn-accent-bright); min-width: 38px; text-align: right; }
       .cn-city-attack { margin-top: 10px; padding: 12px; }
       .cn-map-viewport-wrap { position: relative; margin: 0 -10px; }
+      /* Повноекранна карта у вкладці «Карта»: без рамок і відступів, інтерфейс — поверх карти */
+      .cn-content--map { padding: 0; overflow: hidden; }
+      .cn-content--map .cn-map-screen { height: 100%; }
+      .cn-content--map .cn-map-viewport-wrap { margin: 0; height: 100%; }
+      .cn-content--map .cn-map-viewport-wrap .cn-tmap-viewport { height: 100%; min-height: 0; margin: 0; border: 0; border-radius: 0; clip-path: none; box-shadow: none; }
+      .cn-content--map .cn-map-top { left: 0; right: 0; top: 0; border-radius: 0; padding: calc(14px + env(safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)) 66px 34px 18px; background: linear-gradient(180deg, rgba(6,14,28,0.72), rgba(6,14,28,0)); }
+      .cn-content--map .maplibregl-ctrl-top-right { top: calc(10px + env(safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); }
+      .cn-content--map .cn-map-viewport-wrap > .cn-map-card { left: 12px; right: 12px; bottom: 12px; }
+      .cn-map-bottom { position: absolute; left: 12px; right: 52px; bottom: 12px; z-index: 6; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+      .cn-map-bottom > * { pointer-events: auto; }
+      .cn-map-bottom .cn-conflicts { margin: 0; display: flex; flex-direction: column-reverse; background: rgba(6,14,28,0.78); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(var(--cn-accent-rgb),0.35); border-radius: 16px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+      .cn-map-bottom .cn-conflicts-list { border-top: 0; border-bottom: 1px solid rgba(255,255,255,0.08); max-height: 30vh; }
+      .cn-map-bottom-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .cn-map-bottom .cn-tmap-legend { margin: 0; gap: 4px 12px; padding: 7px 12px; border-radius: 999px; background: rgba(6,14,28,0.78); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(var(--cn-accent-rgb),0.3); font-size: 11px; color: #E6F0FF; flex-wrap: nowrap; }
+      .cn-map-bottom .cn-tmap-legend-item { gap: 5px; white-space: nowrap; }
+      .cn-map-bottom .cn-tmap-legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+      .cn-map-mine-pill { display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 700; color: var(--cn-accent-bright); background: rgba(6,14,28,0.78); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(var(--cn-accent-rgb),0.5); cursor: pointer; white-space: nowrap; }
       .cn-map-viewport {
         position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 22px; max-height: 84vh;
         overflow: hidden; border: 1px solid rgba(var(--cn-accent-rgb),0.45);

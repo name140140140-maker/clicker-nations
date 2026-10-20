@@ -79,6 +79,8 @@ const ownerB = ["string", ["feature-state", "ob"], ""];
 const regionOwner = ["string", ["feature-state", "o"], ""];
 const isHighlighted = ["boolean", ["feature-state", "h"], false];
 const isCoast = ["==", ["get", "two"], 0];
+// Узбережжя захопленої (чиєїсь) області — малюємо темним кордоном, а не світлим узбережжям із синім сяйвом.
+const isOwnedCoast = ["all", isCoast, ["!=", ownerA, ""]];
 
 const yieldToBrowser = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -443,7 +445,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "borders",
           filter: ["==", ["get", "two"], 0],
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": 0.3 },
+          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": ["case", isOwnedCoast, 0, 0.3] },
         });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
         // рамка власної території, контур вибраної області.
@@ -453,9 +455,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "borders",
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
-            "line-color": ["case", isHighlighted, MAP_COLORS.selected, mineEdge, MAP_COLORS.mine, isCoast, MAP_COLORS.coast, MAP_COLORS.border],
-            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isCoast, 1.3, ["!=", ownerA, ownerB], 1.5, 0],
-            "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isCoast, 0.85, 0.9],
+            "line-color": ["case", isHighlighted, MAP_COLORS.selected, mineEdge, MAP_COLORS.mine, isOwnedCoast, MAP_COLORS.border, isCoast, MAP_COLORS.coast, MAP_COLORS.border],
+            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isOwnedCoast, 1.5, isCoast, 1.3, ["!=", ownerA, ownerB], 1.5, 0],
+            "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isOwnedCoast, 0.95, isCoast, 0.85, 0.9],
           },
         });
 
@@ -704,9 +706,14 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         id: "zones-fill", type: "fill", source: "zones",
         paint: { "fill-color": "#ffffff", "fill-opacity": ["get", "a"] },
       });
+      // Стильні межі зон: м'яке сяйво + тонка суцільна лінія (замість грубого штрихпунктиру).
       map.addLayer({
-        id: "zones-line", type: "line", source: "zones",
-        paint: { "line-color": "#ffffff", "line-width": 1.1, "line-opacity": 0.85, "line-dasharray": [2, 2] },
+        id: "zones-glow", type: "line", source: "zones", layout: { "line-join": "round", "line-cap": "round" },
+        paint: { "line-color": "#fff3b0", "line-width": 5, "line-blur": 4, "line-opacity": 0.3 },
+      });
+      map.addLayer({
+        id: "zones-line", type: "line", source: "zones", layout: { "line-join": "round", "line-cap": "round" },
+        paint: { "line-color": "#ffffff", "line-width": 1, "line-opacity": 0.7 },
       });
       for (const tier of CITY_TIERS) {
         map.addLayer({
