@@ -9397,7 +9397,7 @@ function GlobalStyles() {
       .cn-wp-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 9px; background: rgba(255,255,255,0.05); font-size: 12.5px; }
       .cn-wp-row--me { background: rgba(var(--cn-accent-rgb),0.2); }
       .cn-wp-rank { width: 18px; text-align: center; color: var(--cn-text-dimmer); font-weight: 700; font-size: 11.5px; }
-      .cn-wp-ava { width: 24px; height: 24px; border-radius: 50%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.08); flex-shrink: 0; }
+      .cn-wp-ava { position: relative; width: 24px; height: 24px; border-radius: 50%; overflow: hidden; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.08); flex-shrink: 0; }
       .cn-wp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #fff; }
       .cn-wp-clicks { font-weight: 800; color: #FBBF24; font-family: 'Space Grotesk', sans-serif; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
       .cn-wp-clicks small { font-size: 9.5px; color: var(--cn-text-dimmer); font-weight: 600; }

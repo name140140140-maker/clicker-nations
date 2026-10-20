@@ -4,7 +4,6 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson, cityKey } from "./map/cities.js";
 import { cityZones, pointInPolygon } from "./map/geo.js";
-import { waterTexture, landTexture } from "./map/textures.js";
 import { geoLabelsGeoJson, GEO_LABELS } from "./map/geoLabels.js";
 
 // КАРТА ТЕРРИТОРІЙ
@@ -25,10 +24,10 @@ const MAX_ZOOM = 12;
 const SOURCE_MAX_ZOOM = 8;
 
 export const MAP_COLORS = {
-  water: "#1457c2", // яскравий мультяшний океан
-  free: "#6fd01f", // насичений салатовий мох
+  water: "#1a5cae", // чистий спокійний океан
+  free: "#86cf4e", // свіжа плоска зелень
   border: "#0b2412",
-  borderInternal: "#2f7a14",
+  borderInternal: "#5fa83a",
   mine: "#ffffff",
   selected: "#ffd54a",
   coast: "#e6ff8f", // світла облямівка узбережжя
@@ -378,14 +377,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           ? ["all", ["!=", ownerA, ownerB], ["any", ["==", ownerA, mine], ["==", ownerB, mine]]]
           : false;
 
-        // Текстури: хвилі на воді та трава/рельєф на суші (генеруються в коді).
-        try {
-          const wt = waterTexture(MAP_COLORS.water);
-          const lt = landTexture();
-          if (!map.hasImage("water-tex")) map.addImage("water-tex", wt.data, { pixelRatio: 2 });
-          if (!map.hasImage("land-tex")) map.addImage("land-tex", lt.data, { pixelRatio: 2 });
-          map.setPaintProperty("bg", "background-pattern", "water-tex");
-        } catch (err) { console.warn("Текстури карти недоступні:", err); }
+        // Карта без текстур: чисті плоскі кольори суші й води.
 
         map.addLayer({
           id: "regions-fill",
@@ -438,7 +430,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "borders",
           filter: ["==", ["get", "two"], 0],
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 4, "line-opacity": 0.4 },
+          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": 0.3 },
         });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
         // рамка власної території, контур вибраної області.
