@@ -697,7 +697,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       map.addLayer({ id: "captured-fill", type: "fill", source: "captured", paint: { "fill-color": ["get", "c"], "fill-opacity": OWNER_OPACITY } });
       // Та сама текстура суші, що й на решті території власника, щоб захоплена зона не відрізнялась.
       if (map.hasImage("land-tex")) map.addLayer({ id: "captured-texture", type: "fill", source: "captured", paint: { "fill-pattern": "land-tex", "fill-opacity": 0.34 } });
-      map.addLayer({ id: "captured-line", type: "line", source: "captured", paint: { "line-color": ["get", "c"], "line-width": 2.2, "line-opacity": 0.95 } });
+      // Кордон захопленої зони міста — темний, як і решта кордонів (а не кольору власника).
+      map.addLayer({ id: "captured-line", type: "line", source: "captured", layout: { "line-join": "round" }, paint: { "line-color": MAP_COLORS.border, "line-width": 1.6, "line-opacity": 0.95 } });
       // Зони міст усередині вибраної області (прев'ю: де проходитиме лінія фронту між містами)
       // Підсвітка вибраної території однієї країни в поділеній області
       map.addLayer({ id: "selzone-fill", type: "fill", source: "selzone", paint: { "fill-color": "#ffffff", "fill-opacity": 0.5 } });
