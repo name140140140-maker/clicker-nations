@@ -49,6 +49,7 @@ import {
   Coins,
   Award,
   Sparkles,
+  LifeBuoy,
   Star,
   UserPlus,
   Pencil,
@@ -99,6 +100,18 @@ const SHOP_BANNER_IMG = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBD
 /* ------------------------------------------------------------------ */
 
 const MAX_ENERGY = 100;
+/* Бот підтримки: ім'я користувача (без @) задається змінною VITE_SUPPORT_BOT_USERNAME на Vercel */
+const SUPPORT_BOT_USERNAME = (import.meta.env && import.meta.env.VITE_SUPPORT_BOT_USERNAME) || "";
+function openSupportChat() {
+  if (!SUPPORT_BOT_USERNAME) {
+    alert("Підтримка скоро буде доступна.");
+    return;
+  }
+  const url = `https://t.me/${SUPPORT_BOT_USERNAME}?start=support`;
+  const wa = window.Telegram?.WebApp;
+  if (wa?.openTelegramLink) wa.openTelegramLink(url);
+  else window.open(url, "_blank");
+}
 const NO_WARS = [];
 /* Кулдаун між діями лідера/радника/повстанця (8 годин) */
 const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
@@ -3069,6 +3082,9 @@ function ClickerScreen({
     <>
       <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.navSwitch(); onOpenLeaderboard && onOpenLeaderboard(); }} aria-label="Рейтинг">
         <Trophy size={19} />
+      </button>
+      <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); openSupportChat(); }} aria-label="Підтримка">
+        <LifeBuoy size={19} />
       </button>
       <button className="cn-icon-tile" type="button" onClick={() => { cnSfx.modalOpen(); setNewsOpen(true); }} aria-label="Новини">
         <Newspaper size={19} />
