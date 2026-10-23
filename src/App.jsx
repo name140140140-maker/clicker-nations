@@ -1,5 +1,5 @@
 /* build: 1787523498 */
-import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import {
   Zap,
   Trophy,
@@ -1738,50 +1738,50 @@ function t(lang, key) {
 
 const TUTORIAL_STEPS = [
   { img: GLOBY_WAVE2_IMG, tab: "clicker", target: null, pos: "center",
-    title: { uk: "Привіт! Я Глобі", en: "Hi! I'm Globby", ru: "Привет! Я Глоби" },
-    text: { uk: "Я — твій гід по World Clicker. Зараз я не просто розкажу, а покажу пальцем, де що знаходиться, і сам переведу тебе по розділах. Поїхали!", en: "I'm your guide to World Clicker. I won't just talk — I'll point at things and take you through every section myself. Let's go!", ru: "Я — твой гид по World Clicker. Я не просто расскажу, а покажу пальцем, где что находится, и сам проведу тебя по разделам. Поехали!" } },
+    title: { uk: "Привіт, {name}!", en: "Hi, {name}!", ru: "Привет, {name}!" },
+    text: { uk: "Мене звати Глобі. Я покажу, як тут усе працює, і це займе хвилину.", en: "My name is Globby. I'll show you how everything works. It'll take a minute.", ru: "Меня зовут Глоби. Я покажу, как тут всё устроено, это займёт минуту." } },
   { img: GLOBY_POINT_IMG, tab: "clicker", target: "globe", pos: "top",
-    title: { uk: "Клікай по глобусу", en: "Tap the globe", ru: "Кликай по глобусу" },
-    text: { uk: "Ось він — головний глобус. Натискай на нього: кожен клік приносить Power і додає до статистики.", en: "This is the main globe. Tap it: every tap earns Power and adds to your stats.", ru: "Вот главный глобус. Нажимай на него: каждый клик приносит Power и идёт в статистику." } },
+    title: { uk: "Це твій глобус", en: "This is your globe", ru: "Это твой глобус" },
+    text: { uk: "Натискай на нього. За кожен клік ти отримуєш Power.", en: "Tap it. Every tap gives you Power.", ru: "Нажимай на него. За каждый клик ты получаешь Power." } },
   { img: GLOBY_POINT_IMG, tab: "clicker", target: "power", pos: "bottom",
-    title: { uk: "Power і Points", en: "Power & Points", ru: "Power и Points" },
-    text: { uk: "Угорі — твої гроші. Power — головний ресурс країни, від нього залежить рейтинг. Points — друга валюта, її дають нагороди сезону.", en: "Up here is your wealth. Power is your country's main resource and drives the ranking. Points are a second currency from season rewards.", ru: "Вверху — твои ресурсы. Power — главный ресурс страны, от него зависит рейтинг. Points — вторая валюта, её дают награды сезона." } },
+    title: { uk: "Power і Points", en: "Power and Points", ru: "Power и Points" },
+    text: { uk: "Power визначає твоє місце в рейтингу. Points ти отримуєш за нагороди сезону й витрачаєш на покращення.", en: "Power sets your place in the ranking. You get Points from season rewards and spend them on upgrades.", ru: "Power определяет твоё место в рейтинге. Points ты получаешь за награды сезона и тратишь на улучшения." } },
   { img: GLOBY_IDLE_IMG, tab: "clicker", target: "energy", pos: "top",
-    title: { uk: "Стеж за енергією", en: "Watch your energy", ru: "Следи за энергией" },
-    text: { uk: "Це шкала енергії. Кожен клік витрачає 1 енергії, а вона відновлюється сама — тож заходь регулярно, а не клікай без упину.", en: "This is your energy bar. Each tap costs 1 energy and it refills on its own — so visit regularly instead of tapping non-stop.", ru: "Это шкала энергии. Каждый клик тратит 1 энергии, а она восстанавливается сама — заходи регулярно, а не кликай без остановки." } },
+    title: { uk: "Енергія", en: "Energy", ru: "Энергия" },
+    text: { uk: "Кожен клік коштує 1 енергії. Вона відновлюється сама, тож просто заходь у гру частіше.", en: "Each tap costs 1 energy. It refills on its own, so just visit more often.", ru: "Каждый клик стоит 1 энергии. Она восстанавливается сама, так что просто заходи в игру чаще." } },
   { img: GLOBY_POINT_IMG, tab: "clicker", target: "actions", pos: "bottom",
-    title: { uk: "Рейтинг, підтримка, новини", en: "Ranking, support, news", ru: "Рейтинг, поддержка, новости" },
-    text: { uk: "Три кнопки справа вгорі: 🏆 Рейтинг країн і гравців, 🛟 чат підтримки в Telegram та 📰 Світові новини гри.", en: "Three buttons in the top right: 🏆 the ranking of countries and players, 🛟 the support chat in Telegram and 📰 World News.", ru: "Три кнопки справа вверху: 🏆 рейтинг стран и игроков, 🛟 чат поддержки в Telegram и 📰 Мировые новости игры." } },
+    title: { uk: "Кнопки вгорі", en: "Top buttons", ru: "Кнопки сверху" },
+    text: { uk: "Тут рейтинг, підтримка в Telegram і новини гри.", en: "Here you'll find the ranking, Telegram support and game news.", ru: "Здесь рейтинг, поддержка в Telegram и новости игры." } },
   { img: GLOBY_PRESENT_IMG, tab: "map", target: null, pos: "top",
-    title: { uk: "Карта світу", en: "The world map", ru: "Карта мира" },
-    text: { uk: "Це «Карта»: області й міста всіх країн. У кожної країни свій колір. Торкнись міста чи області, щоб побачити власника — рухай і масштабуй карту пальцями.", en: "This is the 'Map': regions and cities of every country, each in its own color. Tap a city or region to see its owner — drag and pinch to explore.", ru: "Это «Карта»: области и города всех стран, у каждой свой цвет. Нажми на город или область, чтобы увидеть владельца — двигай и масштабируй карту пальцами." } },
+    title: { uk: "Карта", en: "The map", ru: "Карта" },
+    text: { uk: "Тут видно території всіх країн. Торкнись міста чи області, щоб дізнатись, кому вони належать.", en: "Here you can see every country's territory. Tap a city or region to see who owns it.", ru: "Здесь видны территории всех стран. Нажми на город или область, чтобы узнать, кому они принадлежат." } },
   { img: GLOBY_PRESENT_IMG, tab: "hq", target: "hq-dev", pos: "bottom",
-    title: { uk: "Штаб: Покращення", en: "HQ: Upgrades", ru: "Штаб: Улучшения" },
-    text: { uk: "Це «Штаб» твоєї країни. Плитка «Покращення» — тут за Points підсилюєш енергію, її відновлення та оборону міст.", en: "This is your country's 'HQ'. The 'Upgrades' tile is where you spend Points on energy, energy refill and city defense.", ru: "Это «Штаб» твоей страны. Плитка «Улучшения» — здесь за Points усиливаешь энергию, её восстановление и оборону городов." } },
+    title: { uk: "Штаб країни", en: "Country HQ", ru: "Штаб страны" },
+    text: { uk: "У «Покращеннях» ти за Points збільшуєш енергію та міцність міст.", en: "In 'Upgrades' you spend Points to boost your energy and city defense.", ru: "В «Улучшениях» ты за Points увеличиваешь энергию и крепость городов." } },
   { img: GLOBY_POINT_IMG, tab: "hq", target: "hq-army", pos: "top",
     title: { uk: "Війни", en: "Wars", ru: "Войны" },
-    text: { uk: "«Армія» — тут лідер країни оголошує війну. Спершу підготовка, потім бій. Хто вже готується до війни чи воює — того атакувати не можна, а після війни обидві сторони 4 години відпочивають.", en: "'Army' is where the leader declares war. First preparation, then battle. A country already preparing for or fighting a war can't be attacked, and after a war both sides rest for 4 hours.", ru: "«Армия» — здесь лидер страны объявляет войну. Сначала подготовка, потом бой. Страну, которая готовится к войне или воюет, атаковать нельзя, а после войны обе стороны отдыхают 4 часа." } },
+    text: { uk: "Війну оголошує лідер країни. Спочатку йде підготовка, потім бій. Країну, яка вже воює, атакувати не можна.", en: "The country's leader declares wars. First comes preparation, then the battle. A country already at war can't be attacked.", ru: "Войну объявляет лидер страны. Сначала подготовка, потом бой. Страну, которая уже воюет, атаковать нельзя." } },
   { img: GLOBY_PRESENT_IMG, tab: "hq", target: "hq-diplomacy", pos: "top",
-    title: { uk: "Дипломатія й союзники", en: "Diplomacy & allies", ru: "Дипломатия и союзники" },
-    text: { uk: "«Дипломатія» — теж для лідера. Домовляйся з іншими країнами й кликай союзників на свій бік у війні.", en: "'Diplomacy' is for the leader too. Make deals with other countries and call allies to your side in a war.", ru: "«Дипломатия» — тоже для лидера. Договаривайся с другими странами и зови союзников на свою сторону в войне." } },
+    title: { uk: "Дипломатія", en: "Diplomacy", ru: "Дипломатия" },
+    text: { uk: "Тут лідер домовляється з іншими країнами та кличе союзників на допомогу.", en: "Here the leader makes deals with other countries and calls allies for help.", ru: "Здесь лидер договаривается с другими странами и зовёт союзников на помощь." } },
   { img: GLOBY_POINT_IMG, tab: "hq", target: "hq-mail", pos: "top",
     title: { uk: "Пошта", en: "Mail", ru: "Почта" },
-    text: { uk: "«Пошта» — сюди приходять листи від гри й адміністрації. Коли є нове, на плитці світиться цифра.", en: "'Mail' is where letters from the game and admins arrive. A number lights up on the tile when there's something new.", ru: "«Почта» — сюда приходят письма от игры и администрации. Когда есть новое, на плитке горит цифра." } },
+    text: { uk: "Сюди приходять листи від гри та адміністрації.", en: "Letters from the game and admins arrive here.", ru: "Сюда приходят письма от игры и администрации." } },
   { img: GLOBY_PRESENT_IMG, tab: "season", target: "season-banner", pos: "bottom",
-    title: { uk: "Сезон і Battle Pass", en: "Season & Battle Pass", ru: "Сезон и Battle Pass" },
-    text: { uk: "Ось «Сезон» — Battle Pass на 50 днів. Нові рівні відкриваються за кліки, а нагороди чекають нижче у безкоштовній і Premium-лінії. Не забувай їх забирати!", en: "This is the 'Season' — a 50-day Battle Pass. New levels unlock with taps, and rewards wait below on the free and Premium tracks. Don't forget to claim them!", ru: "Это «Сезон» — Battle Pass на 50 дней. Новые уровни открываются за клики, а награды ждут ниже на бесплатной и Premium-линиях. Не забывай их забирать!" } },
+    title: { uk: "Сезон", en: "Season", ru: "Сезон" },
+    text: { uk: "Кліками ти піднімаєш рівень і забираєш нагороди. Сезон триває 50 днів.", en: "Your taps raise your level and unlock rewards. The season lasts 50 days.", ru: "Кликами ты повышаешь уровень и забираешь награды. Сезон длится 50 дней." } },
   { img: GLOBY_POINT_IMG, tab: "shop", target: "premium-offer", pos: "bottom",
-    title: { uk: "Магазин і Premium Pass", en: "Shop & Premium Pass", ru: "Магазин и Premium Pass" },
-    text: { uk: "У «Магазині» — Premium Pass: Points ×2, сяючий нікнейм, ексклюзивні аватари, банери й титули. Він необов'язковий — грати можна й без нього.", en: "The 'Shop' has the Premium Pass: Points ×2, a glowing nickname, exclusive avatars, banners and titles. It's optional — you can play fine without it.", ru: "В «Магазине» — Premium Pass: Points ×2, сияющий ник, эксклюзивные аватары, баннеры и титулы. Он необязателен — играть можно и без него." } },
+    title: { uk: "Premium Pass", en: "Premium Pass", ru: "Premium Pass" },
+    text: { uk: "Дає більше нагород і красивий нік. Він необов'язковий, грати можна й без нього.", en: "Gives you more rewards and a fancy nickname. It's optional, you can play without it.", ru: "Даёт больше наград и красивый ник. Он необязателен, играть можно и без него." } },
   { img: GLOBY_PRESENT_IMG, tab: "profile", target: "prof-cosm", pos: "top",
-    title: { uk: "Профіль і косметика", en: "Profile & cosmetics", ru: "Профиль и косметика" },
-    text: { uk: "У «Профілі» — твоя статистика й «Косметика»: фото профілю, банери, титули та колір ніка. Заблоковані нагороди теж видно — підказка скаже, як їх відкрити.", en: "'Profile' has your stats and 'Cosmetics': avatars, banners, titles and nickname color. Locked rewards are visible too — a hint tells you how to unlock them.", ru: "В «Профиле» — твоя статистика и «Косметика»: фото профиля, баннеры, титулы и цвет ника. Заблокированные награды тоже видны — подсказка скажет, как их открыть." } },
+    title: { uk: "Профіль", en: "Profile", ru: "Профиль" },
+    text: { uk: "У «Косметиці» обирай фото, банер, титул і колір ніка. Закриті нагороди теж видно, а підказка скаже, як їх відкрити.", en: "In 'Cosmetics' pick your avatar, banner, title and nickname color. Locked items are visible too, and a hint shows how to unlock them.", ru: "В «Косметике» выбирай фото, баннер, титул и цвет ника. Закрытые награды тоже видны, а подсказка скажет, как их открыть." } },
   { img: GLOBY_POINT_IMG, tab: "profile", target: "prof-settings", pos: "bottom",
     title: { uk: "Налаштування", en: "Settings", ru: "Настройки" },
-    text: { uk: "Шестерня — це налаштування: звук, мова й повтор цього туторіалу, якщо щось забудеш.", en: "The gear is settings: sound, language and a replay of this tutorial if you forget something.", ru: "Шестерёнка — это настройки: звук, язык и повтор этого туториала, если что-то забудешь." } },
+    text: { uk: "Тут звук і мова. Якщо щось забудеш, туторіал можна пройти ще раз.", en: "Sound and language are here. If you forget something, you can replay this tutorial.", ru: "Здесь звук и язык. Если что-то забудешь, туториал можно пройти ещё раз." } },
   { img: GLOBY_WAVE_IMG, tab: "clicker", target: null, pos: "center",
-    title: { uk: "Світ чекає на тебе!", en: "The world awaits!", ru: "Мир ждёт тебя!" },
-    text: { uk: "Тепер ти знаєш, де що лежить. Накопичуй Power, підіймайся в рейтингу, захоплюй території й збирай нагороди сезону. Удачі, командире!", en: "Now you know where everything is. Gather Power, climb the ranking, capture territory and collect season rewards. Good luck, commander!", ru: "Теперь ты знаешь, где что лежит. Копи Power, поднимайся в рейтинге, захватывай территории и собирай награды сезона. Удачи, командир!" } },
+    title: { uk: "Це все, {name}!", en: "That's it, {name}!", ru: "Это всё, {name}!" },
+    text: { uk: "Тепер ти знаєш, де що лежить. Клікай, піднімайся в рейтингу й розвивай свою країну. Успіхів!", en: "Now you know where everything is. Tap, climb the ranking and grow your country. Good luck!", ru: "Теперь ты знаешь, где что лежит. Кликай, поднимайся в рейтинге и развивай свою страну. Успехов!" } },
 ];
 function tutPick(obj, lang) { return obj[lang] || obj.en || obj.uk; }
 
@@ -2403,7 +2403,7 @@ export default function App() {
         />
       ) : (
         <div className="cn-app">
-          <div className={"cn-content" + (tab === "map" ? " cn-content--map" : "")}>
+          <div key={tab} className={"cn-content cn-content--anim" + (tab === "map" ? " cn-content--map" : "")}>
             {tab === "clicker" && (
               <ClickerScreen
                 player={player}
@@ -2506,7 +2506,7 @@ export default function App() {
           <BottomNav tab={tab} setTab={setTab} unreadMail={unreadCount} lang={language} />
         </div>
       )}
-      {showTutorial && player && <TutorialModal onClose={closeTutorial} lang={language} setTab={setTab} />}
+      {showTutorial && player && <TutorialModal onClose={closeTutorial} lang={language} setTab={setTab} name={player.username} />}
     </div>
   );
 }
@@ -2515,14 +2515,16 @@ export default function App() {
 /*  Onboarding tutorial (dialogue with mentor character)                */
 /* ------------------------------------------------------------------ */
 
-function TutorialModal({ onClose, lang = "uk", setTab }) {
+function TutorialModal({ onClose, lang = "uk", setTab, name = "" }) {
   const [step, setStep] = useState(0);
-  const [displayedText, setDisplayedText] = useState("");
+  const [typingDone, setTypingDone] = useState(false);
+  const textRef = useRef(null);
   const [rect, setRect] = useState(null);
   const total = TUTORIAL_STEPS.length;
   const current = TUTORIAL_STEPS[step];
-  const currentTitle = tutPick(current.title, lang);
-  const currentText = tutPick(current.text, lang);
+  const playerName = String(name || "").trim() || (lang === "uk" ? "друже" : lang === "ru" ? "друг" : "friend");
+  const currentTitle = tutPick(current.title, lang).replace("{name}", playerName);
+  const currentText = tutPick(current.text, lang).replace("{name}", playerName);
   const isLast = step === total - 1;
   const typeTimerRef = useRef(null);
   const vh = typeof window !== "undefined" ? window.innerHeight : 700;
@@ -2531,7 +2533,7 @@ function TutorialModal({ onClose, lang = "uk", setTab }) {
 
   /* Глобі сам переводить гравця на потрібну вкладку. */
   useEffect(() => {
-    if (current.tab && setTab) setTab(current.tab);
+    if (current.tab && setTab) startTransition(() => setTab(current.tab));
   }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Шукаємо на екрані елемент, на який вказує Глобі, і стежимо за його положенням. */
@@ -2555,34 +2557,56 @@ function TutorialModal({ onClose, lang = "uk", setTab }) {
       );
     };
     const first = setTimeout(measure, 80);
-    const iv = setInterval(measure, 250);
+    const iv = setInterval(measure, 400);
     window.addEventListener("resize", measure);
     return () => { clearTimeout(first); clearInterval(iv); window.removeEventListener("resize", measure); };
   }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* Typewriter reveal of the dialogue text, with a soft blip every few
-     characters so it feels alive without being noisy. */
+  /* Заздалегідь декодуємо всі пози, щоб зміна кроку не гальмувала. */
+  const preloadRef = useRef([]);
   useEffect(() => {
-    setDisplayedText("");
-    let i = 0;
+    preloadRef.current = [GLOBY_IDLE_IMG, GLOBY_POINT_IMG, GLOBY_WAVE_IMG, GLOBY_WAVE2_IMG, GLOBY_PRESENT_IMG].map((src) => {
+      const im = new Image();
+      im.src = src;
+      try { if (im.decode) im.decode().catch(() => {}); } catch (e) { /* ignore */ }
+      return im;
+    });
+  }, []);
+
+  /* Друкарський ефект іде напряму в DOM (без перерендеру React на кожну літеру) через rAF. */
+  useEffect(() => {
+    const el = textRef.current;
     const full = currentText;
-    clearInterval(typeTimerRef.current);
-    typeTimerRef.current = setInterval(() => {
-      i += 1;
-      setDisplayedText(full.slice(0, i));
-      if (i % 3 === 0) cnSfx.blip();
-      if (i >= full.length) clearInterval(typeTimerRef.current);
-    }, 18);
-    return () => clearInterval(typeTimerRef.current);
+    setTypingDone(false);
+    if (!el) return undefined;
+    el.textContent = "";
+    let raf = 0;
+    let lastN = 0;
+    const t0 = performance.now();
+    const tick = (now) => {
+      const n = Math.min(full.length, Math.floor((now - t0) / 18) + 1);
+      if (n !== lastN) {
+        el.textContent = full.slice(0, n);
+        if (Math.floor(n / 4) !== Math.floor(lastN / 4)) cnSfx.blip();
+        lastN = n;
+      }
+      if (n >= full.length) { setTypingDone(true); return; }
+      raf = requestAnimationFrame(tick);
+    };
+    // даємо першому кадру нового кроку відмалюватись, потім починаємо друк
+    raf = requestAnimationFrame(tick);
+    typeTimerRef.current = () => cancelAnimationFrame(raf);
+    return () => cancelAnimationFrame(raf);
   }, [step, currentText]);
 
   const skipTyping = () => {
-    clearInterval(typeTimerRef.current);
-    setDisplayedText(currentText);
+    if (typeof typeTimerRef.current === "function") typeTimerRef.current();
+    if (textRef.current) textRef.current.textContent = currentText;
+    setTypingDone(true);
   };
 
   const finish = () => {
-    if (setTab) setTab("clicker");
+    if (setTab) startTransition(() => setTab("clicker"));
     onClose();
   };
   const next = () => {
@@ -2619,12 +2643,12 @@ function TutorialModal({ onClose, lang = "uk", setTab }) {
         <>
           <div
             className="cn-tut-spot"
-            style={{ left: rect.x - 6, top: rect.y - 6, width: rect.w + 12, height: rect.h + 12 }}
+            style={{ width: rect.w + 12, height: rect.h + 12, transform: `translate3d(${rect.x - 6}px, ${rect.y - 6}px, 0)` }}
           />
           {showArrow && (
             <span
               className={"cn-tut-arrow cn-tut-arrow--" + (place === "bottom" ? "up" : "down")}
-              style={{ left: rect.x + rect.w / 2 - 14, top: place === "bottom" ? rect.y + rect.h + 8 : rect.y - 38 }}
+              style={{ transform: `translate3d(${rect.x + rect.w / 2 - 14}px, ${place === "bottom" ? rect.y + rect.h + 8 : rect.y - 38}px, 0)` }}
             />
           )}
         </>
@@ -2646,7 +2670,7 @@ function TutorialModal({ onClose, lang = "uk", setTab }) {
             </>
           )}
           <div className="cn-tutorial-frame">
-            <img key={step} src={current.img} alt={t(lang, "tutorial_mentor_name")} className="cn-tutorial-portrait" draggable={false} />
+            <img key={step} src={current.img} alt={t(lang, "tutorial_mentor_name")} className="cn-tutorial-portrait" draggable={false} decoding="async" />
           </div>
         </div>
         <div className="cn-tutorial-name-tag">{t(lang, "tutorial_mentor_name")} · {step + 1}/{total}</div>
@@ -2654,8 +2678,8 @@ function TutorialModal({ onClose, lang = "uk", setTab }) {
         <div key={step} className="cn-tutorial-bubble cn-tutorial-bubble--enter" onClick={skipTyping}>
           <div className="cn-tutorial-title">{currentTitle}</div>
           <div className="cn-tutorial-text">
-            {displayedText}
-            {displayedText.length < currentText.length && <span className="cn-tutorial-caret" />}
+            <span ref={textRef} />
+            {!typingDone && <span className="cn-tutorial-caret" />}
           </div>
         </div>
 
@@ -7889,11 +7913,14 @@ function ComingSoon({ title, description, icon: Icon }) {
 /* ------------------------------------------------------------------ */
 
 function BottomNav({ tab, setTab, unreadMail, lang = "uk" }) {
+  const [pending, setPending] = useState(null);
+  useEffect(() => { setPending(null); }, [tab]);
+  const shownTab = pending || tab;
   return (
     <nav className="cn-nav">
       {NAV.map((item) => {
         const Icon = item.icon;
-        const active = tab === item.id;
+        const active = shownTab === item.id;
         return (
           <button
             key={item.id}
@@ -7901,7 +7928,8 @@ function BottomNav({ tab, setTab, unreadMail, lang = "uk" }) {
             className={"cn-nav-btn" + (active ? " cn-nav-btn--active" : "")}
             onClick={() => {
               if (item.id !== tab) cnSfx.navSwitch();
-              setTab(item.id);
+              setPending(item.id);
+              startTransition(() => setTab(item.id));
             }}
             type="button"
           >
@@ -7983,6 +8011,10 @@ function GlobalStyles() {
         overscroll-behavior: contain;
         padding: calc(10px + env(safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)) 18px 6px;
       }
+
+      .cn-content--anim { animation: cnTabIn 0.2s ease-out; }
+      @keyframes cnTabIn { from { opacity: 0; transform: translate3d(0, 8px, 0); } to { opacity: 1; transform: translate3d(0, 0, 0); } }
+      @media (prefers-reduced-motion: reduce) { .cn-content--anim { animation: none; } }
 
       /* Boot */
       .cn-boot {
@@ -8519,12 +8551,15 @@ function GlobalStyles() {
       .cn-tutorial-overlay--free { pointer-events: none; }
       .cn-tutorial-overlay--free .cn-tutorial-card { pointer-events: auto; }
       .cn-tut-spot {
-        position: fixed; border-radius: 16px; pointer-events: none;
+        position: fixed; left: 0; top: 0; border-radius: 16px; pointer-events: none;
         box-shadow: 0 0 0 100vmax rgba(2,6,16,0.8); border: 2px solid var(--cn-accent-bright);
-        transition: left 0.28s ease, top 0.28s ease, width 0.28s ease, height 0.28s ease;
-        animation: cnTutSpotPulse 1.6s ease-in-out infinite;
+        transition: transform 0.28s ease; will-change: transform; backface-visibility: hidden;
       }
-      .cn-tut-arrow { position: fixed; width: 28px; height: 28px; pointer-events: none; z-index: 2; transition: left 0.28s ease, top 0.28s ease; }
+      .cn-tut-spot::after {
+        content: ""; position: absolute; inset: -2px; border-radius: 16px; border: 2px solid #FBBF24;
+        opacity: 0; animation: cnTutSpotPulse 1.6s ease-in-out infinite; will-change: opacity;
+      }
+      .cn-tut-arrow { position: fixed; left: 0; top: 0; width: 28px; height: 28px; pointer-events: none; z-index: 2; transition: transform 0.28s ease; will-change: transform; }
       .cn-tut-arrow::before {
         content: ""; position: absolute; left: 4px; top: 4px; width: 0; height: 0;
         border-left: 10px solid transparent; border-right: 10px solid transparent;
@@ -8549,8 +8584,8 @@ function GlobalStyles() {
       .cn-tutorial-card--compact .cn-tutorial-skip { top: -36px; right: 0; background: rgba(2,6,16,0.75); }
       .cn-tutorial-overlay--top .cn-tutorial-card--compact .cn-tutorial-skip { top: auto; bottom: -36px; }
       @keyframes cnTutSpotPulse {
-        0%, 100% { border-color: var(--cn-accent-bright); }
-        50% { border-color: #FBBF24; }
+        0%, 100% { opacity: 0; }
+        50% { opacity: 1; }
       }
       @keyframes cnTutArrowUp { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
       @keyframes cnTutArrowDown { 0%,100% { transform: translateY(0); } 50% { transform: translateY(7px); } }
