@@ -2333,6 +2333,7 @@ export default function App() {
       ) : (
         <div className="cn-app">
           <div key={tab} className={"cn-content cn-content--anim" + (tab === "map" ? " cn-content--map" : "")}>
+            <ScreenErrorBoundary resetKey={tab}>
             {tab === "clicker" && (
               <ClickerScreen
                 player={player}
@@ -2381,7 +2382,6 @@ export default function App() {
                 players={mergedPlayers}
                 energy={displayedEnergy}
                 theme={theme}
-                onChangeTheme={changeTheme}
                 mail={mail}
                 unreadCount={unreadCount}
                 onRefreshMail={refreshMail}
@@ -2433,6 +2433,7 @@ export default function App() {
                 lang={language}
               />
             )}
+            </ScreenErrorBoundary>
           </div>
           <BottomNav tab={tab} setTab={setTab} unreadMail={unreadCount} lang={language} />
         </div>
@@ -2445,6 +2446,36 @@ export default function App() {
 /* ------------------------------------------------------------------ */
 /*  Onboarding tutorial (dialogue with mentor character)                */
 /* ------------------------------------------------------------------ */
+
+/* Якщо екран «впав», показуємо повідомлення з кнопкою «Назад», а не чорний екран. */
+class ScreenErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error) {
+    console.error("Screen crashed:", error);
+  }
+  componentDidUpdate(prev) {
+    if (prev.resetKey !== this.props.resetKey && this.state.error) this.setState({ error: null });
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={{ padding: 24, textAlign: "center", color: "#cbd5e1" }}>
+        <div style={{ fontSize: 40, marginBottom: 8 }}>⚠️</div>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Цей розділ тимчасово не працює</div>
+        <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 14 }}>Спробуй перейти в інший розділ або перезапусти гру.</div>
+        <button className="cn-primary-btn" type="button" onClick={() => this.setState({ error: null })}>
+          <span className="cn-primary-btn-label">Спробувати ще раз</span>
+        </button>
+      </div>
+    );
+  }
+}
 
 function TutorialModal({ onClose, lang = "uk", setTab, name = "" }) {
   const [step, setStep] = useState(0);
