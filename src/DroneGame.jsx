@@ -97,9 +97,15 @@ export default function DroneGame({ city, targetName, onClose }) {
   const canvasRef = useRef(null);
   const [phase, setPhase] = useState("brief"); // brief | play | end
   const [banner, setBanner] = useState("");
+  const [round, setRound] = useState(0);
+  const [result, setResult] = useState(false);
+  const [video, setVideo] = useState(null); // { blob, mime, ext }
+  const [shareMsg, setShareMsg] = useState("");
   const phaseRef = useRef("brief");
   const closedRef = useRef(false);
   const stateRef = useRef(null);
+  const autoRef = useRef(false);
+  const seedRef = useRef(Math.floor(Math.random() * 99999));
   const setPh = (p) => { phaseRef.current = p; setPhase(p); };
   const finish = (ok) => { if (closedRef.current) return; closedRef.current = true; onClose(ok); };
 
@@ -119,7 +125,7 @@ export default function DroneGame({ city, targetName, onClose }) {
     window.addEventListener("resize", resize);
 
     const cityName = (city?.name || "МІСТО").toUpperCase();
-    const C = buildCity((city?.key || city?.name || "city") + ":" + Math.floor(Math.random() * 99999), cityName);
+    const C = buildCity((city?.key || city?.name || "city") + ":" + seedRef.current, cityName);
     const { items, boxes, target } = C;
     const S = {
       p: { x: 0, y: 16, z: -120 }, yaw: 0, vel: { x: 0, y: 0, z: 0 }, lean: 0, leanF: 0,
@@ -128,7 +134,7 @@ export default function DroneGame({ city, targetName, onClose }) {
       cam: { x: 0, y: 22, z: -140, yaw: 0, pitch: 0.4 },
       mode: "brief", // brief | fly | slow | burn
       timeScale: 1, slowT: 0, expT: 0, impactPos: null, cine: null, hitBox: null, result: false,
-      exploded: false, doneShown: false,
+      exploded: false, doneShown: false, track: [], frames: [], replayTrack: null, rep: null, shown: false, dur: 0, rt: 0, pendingHit: null,
     };
     let raf = 0, last = performance.now(), dead = false;
     const camSolve = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0.4 };
@@ -291,10 +297,154 @@ export default function DroneGame({ city, targetName, onClose }) {
       return null;
     };
 
+    const sample = (fr, t) => {
+      if (t <= fr[0].t) return fr[0];
+      for (let i = 1; i < fr.length; i++) {
+        if (fr[i].t >= t) {
+          const a = fr[i - 1], b = fr[i], u = (t - a.t) / (b.t - a.t || 1), L = (k) => a[k] + (b[k] - a[k]) * u;
+          return { x: L("x"), y: L("y"), z: L("z"), vx: L("vx"), vy: L("vy"), vz: L("vz"), yaw: L("yaw"), lean: L("lean"), leanF: L("leanF") };
+        }
+      }
+      return fr[fr.length - 1];
+    };
+    const applyFrame = (f) => { S.p.x = f.x; S.p.y = f.y; S.p.z = f.z; S.vel.x = f.vx; S.vel.y = f.vy; S.vel.z = f.vz; S.yaw = f.yaw; S.lean = f.lean; S.leanF = f.leanF; };
+    // чи є пряма видимість між двома точками (без будівель на шляху)
+    const clearLine = (a, b) => {
+      const n = Math.max(4, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) / 2));
+      for (let i = 1; i < n; i++) {
+        const u = i / n, x = a.x + (b.x - a.x) * u, y = a.y + (b.y - a.y) * u, z = a.z + (b.z - a.z) * u;
+        for (const bx of boxes) if (x > bx.x0 - 0.3 && x < bx.x1 + 0.3 && z > bx.z0 - 0.3 && z < bx.z1 + 0.3 && y < bx.h + 0.3) return false;
+      }
+      return true;
+    };
+    // найкраща точка камери: поза будівлями, з видом на весь шлях дрона до удару, збоку від напрямку польоту
+    const pickCam = (fr) => {
+      const last = fr[fr.length - 1], first = fr[0], mid = fr[Math.floor(fr.length / 2)];
+      const hv = Math.hypot(last.vx, last.vz) || 1;
+      const dir = { x: last.vx / hv, z: last.vz / hv };
+      const pts = [first, mid, last, { x: last.x, y: Math.max(2, last.y - 2), z: last.z }];
+      let best = null, bestScore = -1e9;
+      for (let ai = 0; ai < 16; ai++) {
+        const ang = (ai / 16) * Math.PI * 2;
+        for (const dist of [28, 38, 50]) {
+          for (const hgt of [6, 12, 20]) {
+            const c = { x: last.x + Math.sin(ang) * dist, y: Math.max(3, last.y + hgt), z: last.z + Math.cos(ang) * dist };
+            if (c.x < -BOUNDS.x || c.x > BOUNDS.x || c.z < BOUNDS.zMin) continue;
+            if (hitTest(c.x, c.y, c.z) || c.y < 3) continue;
+            let sc = 0;
+            for (const q of pts) sc += clearLine(c, q) ? 10 : -4;
+            const side = Math.abs(Math.sin(ang) * dir.z - Math.cos(ang) * dir.x); // 1 = строго збоку
+            sc += side * 6 - dist * 0.02 - hgt * 0.03;
+            if (sc > bestScore) { bestScore = sc; best = c; }
+          }
+        }
+      }
+      return best || { x: last.x - dir.x * 26, y: last.y + 14, z: last.z - dir.z * 26 };
+    };
+    const explode = (h) => {
+      S.exploded = true; S.expT = S.t; S.impactPos = { ...S.p }; S.flash = 1; S.shake = 1;
+      S.hitBox = h.ground ? null : h;
+      S.result = !!h.t;
+      if (!h.ground) h.burnt = 1;
+      emitBurst(S.p, 90);
+    };
+    const burnTick = (dtS) => {
+      if (S.hitBox) {
+        emitFire(S.hitBox);
+        for (const b of boxes) if (!b.burnt && Math.abs(b.cx - S.hitBox.cx) < 42 && Math.abs(b.cz - S.hitBox.cz) < 42 && Math.random() < dtS * 0.5) b.burnt = 1;
+      } else emitBurst({ x: S.impactPos.x, y: 1, z: S.impactPos.z }, 1);
+      for (const b of boxes) if (b.burnt && b !== S.hitBox && Math.random() < 0.18) emitFire(b);
+    };
+    const aimCam = (focus, dtR) => {
+      const c = S.cine.pos;
+      S.cam.x = c.x; S.cam.y = c.y; S.cam.z = c.z;
+      const l = lookAt(S.cam, focus);
+      const k = 1 - Math.exp(-dtR * 5);
+      S.cam.yaw = angLerp(S.cam.yaw, l.yaw, k);
+      S.cam.pitch += (l.pitch - S.cam.pitch) * k;
+    };
     const angLerp = (a, b, t) => { let d = ((b - a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; return a + d * t; };
     const lookAt = (from, to) => {
       const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
       return { yaw: Math.atan2(dx, dz), pitch: Math.atan2(-dy, Math.hypot(dx, dz)) };
+    };
+
+    const camByShot = (sh, dtR, R) => {
+      if (sh.fixed) { aimCam(S.p, dtR); return; }
+      const p = S.p, fx = Math.sin(S.yaw), fz = Math.cos(S.yaw);
+      let pos;
+      if (sh.type === "chase") pos = { x: p.x - fx * 15, y: p.y + 7.5, z: p.z - fz * 15 };
+      else if (sh.type === "high") pos = { x: p.x - fx * 8, y: p.y + 40, z: p.z - fz * 8 };
+      else if (sh.type === "front") pos = { x: p.x + fx * 24, y: p.y + 4, z: p.z + fz * 24 };
+      else { const a = S.yaw + Math.PI + (R.rt - sh.a) * 0.6; pos = { x: p.x + Math.sin(a) * 24, y: p.y + 9, z: p.z + Math.cos(a) * 24 }; }
+      const h = hitTest(pos.x, pos.y, pos.z);
+      if (h && !h.ground) pos.y = h.h + 4;
+      pos.y = Math.max(2.5, pos.y);
+      S.cam.x = pos.x; S.cam.y = pos.y; S.cam.z = pos.z;
+      if (sh.type === "chase") { S.cam.yaw = S.yaw; S.cam.pitch = 0.3; }
+      else { const l = lookAt(pos, { x: p.x, y: p.y + 1, z: p.z }); S.cam.yaw = l.yaw; S.cam.pitch = l.pitch; }
+    };
+
+    // ---- запис відео повтору (canvas → MediaRecorder) ----
+    let rec = null, chunks = [], recMime = "";
+    const startRec = () => {
+      rec = null;
+      try {
+        if (!canvas.captureStream || typeof window.MediaRecorder === "undefined") return;
+        const mts = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+        recMime = mts.find((m) => window.MediaRecorder.isTypeSupported(m)) || "";
+        if (!recMime) return;
+        rec = new window.MediaRecorder(canvas.captureStream(30), { mimeType: recMime, videoBitsPerSecond: 3500000 });
+        chunks = [];
+        rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        rec.onstop = () => {
+          const mime = recMime.split(";")[0];
+          if (!discard && chunks.length) setVideo({ blob: new Blob(chunks, { type: mime }), mime, ext: mime.includes("mp4") ? "mp4" : "webm" });
+          else if (!discard) setVideo(null);
+        };
+        rec.start(250);
+      } catch (e) { rec = null; }
+    };
+    let discard = false;
+    const stopRec = (drop) => { discard = !!drop; try { if (rec && rec.state !== "inactive") rec.stop(); } catch (e) { /* ok */ } rec = null; };
+
+    const finishReplay = () => {
+      stopRec(false);
+      S.mode = "burn"; S.timeScale = 1; S.rep = null;
+      setPh("replayEnd");
+    };
+    S.startReplay = () => {
+      const tr = S.replayTrack;
+      if (!tr || tr.length < 4) return;
+      const t1 = tr[tr.length - 1].t;
+      const D = Math.min(15, t1 - tr[0].t);
+      const t0 = t1 - D;
+      const body = Math.max(0.5, D - 1.5);
+      const n = Math.max(1, Math.round(body / 3));
+      const types = ["chase", "side", "high", "front", "orbit", "side", "chase"];
+      const shots = [];
+      for (let i = 0; i < n; i++) {
+        const a = (body * i) / n, b = (body * (i + 1)) / n;
+        let type = types[i % types.length];
+        const sh = { a, b, type, fixed: false };
+        if (type === "side") {
+          const slice = tr.filter((f) => f.t >= t0 + a && f.t <= t0 + b);
+          if (slice.length >= 2) { sh.fixed = true; sh.pos = pickCam(slice); } else sh.type = "chase";
+        }
+        shots.push(sh);
+      }
+      shots.push({ a: body, b: D + 5, type: "final", fixed: true, pos: pickCam(S.frames) });
+      for (const b of boxes) b.burnt = 0;
+      S.parts = []; S.exploded = false; S.hitBox = null; S.impactPos = null; S.flash = 0; S.shake = 0;
+      S.rep = { tr, t0, D, rt: 0, shots, cur: null, cutT: 0, ended: false, age: 0 };
+      S.mode = "replay"; S.timeScale = 1;
+      setBanner("");
+      startRec();
+    };
+    S.stopReplay = () => {
+      stopRec(true);
+      S.mode = "burn"; S.timeScale = 1; S.rep = null;
+      setPh("result");
     };
 
     const frame = (now) => {
@@ -331,62 +481,72 @@ export default function DroneGame({ city, targetName, onClose }) {
         // камера за дроном (зверху)
         S.cam.x = S.p.x - Math.sin(S.yaw) * 15; S.cam.z = S.p.z - Math.cos(S.yaw) * 15; S.cam.y = S.p.y + 7.5;
         S.cam.yaw = S.yaw; S.cam.pitch = 0.3;
-        // передбачення зіткнення на 0.7 с вперед → слоу-мо
-        const sp2 = Math.hypot(S.vel.x, S.vel.y, S.vel.z);
-        if (sp2 > 6) {
-          for (let s = 0.1; s <= 0.7; s += 0.1) {
-            const h = hitTest(S.p.x + S.vel.x * s, S.p.y + S.vel.y * s, S.p.z + S.vel.z * s);
-            if (h) {
-              S.mode = "slow"; S.slowT = S.t; S.timeScale = 0.2;
-              const hv = Math.hypot(S.vel.x, S.vel.z) || 1;
-              const sx = S.vel.z / hv, sz = -S.vel.x / hv;
-              let best = null;
-              for (const sg of [1, -1]) {
-                const cand = { x: S.p.x + sx * 24 * sg - (S.vel.x / hv) * 4, y: S.p.y + 5, z: S.p.z + sz * 24 * sg - (S.vel.z / hv) * 4 };
-                if (!hitTest(cand.x, cand.y, cand.z) && !best) best = cand;
-              }
-              S.cine = { from: { ...S.cam }, pos: best || { x: S.p.x + sx * 24, y: S.p.y + 12, z: S.p.z + sz * 24 } };
-              break;
-            }
-          }
+        // історія кадрів (останні ~1 с) для відмотки часу
+        S.track.push({ t: S.t, x: S.p.x, y: S.p.y, z: S.p.z, vx: S.vel.x, vy: S.vel.y, vz: S.vel.z, yaw: S.yaw, lean: S.lean, leanF: S.leanF });
+        while (S.track.length > 2 && S.t - S.track[0].t > 16.5) S.track.shift();
+        // справжнє зіткнення → відмотка назад і повтор у слоу-мо
+        const hit = hitTest(S.p.x, S.p.y, S.p.z);
+        if (hit && S.track.length > 4) {
+          S.pendingHit = hit;
+          const tEnd = S.track[S.track.length - 1].t;
+          S.frames = S.track.filter((f) => f.t >= tEnd - 0.9);
+          S.replayTrack = S.track.slice();
+          S.dur = S.frames[S.frames.length - 1].t - S.frames[0].t;
+          S.rt = S.dur; S.mode = "rewind"; S.timeScale = 1; S.cine = { pos: pickCam(S.frames) };
         }
         if (S.t > 150 && S.mode === "fly") { S.mode = "burn"; S.exploded = false; S.result = false; S.expT = S.t; S.timeoutEnd = true; setBanner("Зв'язок із дроном втрачено"); }
+      } else if (ph === "replay") {
+        const R = S.rep;
+        const remain = R.D - R.rt;
+        let ts = 1;
+        if (!R.ended) ts = remain > 1.5 ? 1 : 0.3 + 0.7 * Math.max(0, (remain - 1.2) / 0.3);
+        else ts = 0.3 + 0.7 * Math.min(1, Math.max(0, (R.age - 3.2) / 1.2));
+        S.timeScale = ts;
+        if (!R.ended) {
+          R.rt = Math.min(R.D, R.rt + dtReal * ts);
+          applyFrame(sample(R.tr, R.t0 + R.rt));
+          const shot = R.shots.find((x) => R.rt >= x.a && R.rt < x.b) || R.shots[R.shots.length - 1];
+          if (shot !== R.cur) {
+            R.cur = shot; R.cutT = S.t;
+            if (shot.fixed) { S.cine = { pos: shot.pos }; const l = lookAt(shot.pos, S.p); S.cam.yaw = l.yaw; S.cam.pitch = l.pitch; }
+          }
+          camByShot(shot, dtReal, R);
+          if (R.rt >= R.D) { explode(S.pendingHit); R.ended = true; R.age = 0; }
+        } else {
+          R.age += dtReal;
+          S.flash = Math.max(0, S.flash - dtReal * 1.6); S.shake = Math.max(0, S.shake - dtReal * 1.2);
+          aimCam({ x: S.impactPos.x, y: S.impactPos.y + 6, z: S.impactPos.z }, dtReal);
+          burnTick(dtReal * ts);
+          if (R.age > 6.2) finishReplay();
+        }
+      } else if (ph === "rewind") {
+        // відмотка: швидко назад по записаних кадрах
+        S.rt = Math.max(0, S.rt - dtReal * 2.4);
+        const f = sample(S.frames, S.frames[0].t + S.rt);
+        applyFrame(f);
+        aimCam(S.p, dtReal);
+        if (S.rt <= 0) {
+          S.mode = "slow"; S.slowT = S.t; S.timeScale = 0.3; S.rt = 0;
+        }
       } else if (ph === "slow" || ph === "burn") {
         if (ph === "slow" && !S.exploded) {
-          S.p.x += S.vel.x * dt; S.p.y += S.vel.y * dt; S.p.z += S.vel.z * dt;
-          const h = hitTest(S.p.x, S.p.y, S.p.z);
+          S.rt = Math.min(S.dur, S.rt + dt);
+          applyFrame(sample(S.frames, S.frames[0].t + S.rt));
+          const h = S.rt >= S.dur ? S.pendingHit : null;
           if (h) {
-            S.exploded = true; S.expT = S.t; S.impactPos = { ...S.p }; S.flash = 1; S.shake = 1;
-            S.hitBox = h.ground ? null : h;
-            S.result = !!(h.t);
-            if (h.t) { h.burnt = 1; } else if (!h.ground) { h.burnt = 1; }
-            emitBurst(S.p, 90);
-            setBanner(h.t ? "ЦІЛЬ ЗНИЩЕНА" : "ДРОН РОЗБИТО");
+            explode(h);
+            setBanner(h.t ? "ДРОН ВЛУЧИВ У ЦІЛЬ" : "ДРОН НЕ ВЛУЧИВ У ЦІЛЬ");
           }
         }
-        // камера: від позиції за дроном до бокового плану
-        const e = S.t - S.slowT;
-        const k = Math.min(1, e / 0.9); const ease = k * k * (3 - 2 * k);
-        const focus = S.exploded ? S.impactPos : S.p;
-        if (S.cine) {
-          let tp = S.cine.pos;
-          if (S.exploded) { const o = (S.t - S.expT) * 0.12; const ang = Math.atan2(tp.x - focus.x, tp.z - focus.z) + o; const dd = Math.min(46, Math.hypot(tp.x - focus.x, tp.z - focus.z) + (S.t - S.expT) * 2.5); tp = { x: focus.x + Math.sin(ang) * dd, y: Math.max(tp.y, focus.y + 12 + (S.t - S.expT) * 1.5), z: focus.z + Math.cos(ang) * dd }; }
-          const from = S.cine.from;
-          S.cam.x = from.x + (tp.x - from.x) * ease; S.cam.y = from.y + (tp.y - from.y) * ease; S.cam.z = from.z + (tp.z - from.z) * ease;
-          const l = lookAt(S.cam, { x: focus.x, y: focus.y + (S.exploded ? 6 : 0), z: focus.z });
-          S.cam.yaw = angLerp(from.yaw, l.yaw, ease); S.cam.pitch = from.pitch + (l.pitch - from.pitch) * ease;
-        }
+        // камера стоїть на місці, лише плавно повертається слідом за дроном
+        if (S.cine) aimCam(S.exploded ? { x: S.impactPos.x, y: S.impactPos.y + 6, z: S.impactPos.z } : S.p, dtReal);
         if (S.exploded) {
           const ee = S.t - S.expT;
           S.flash = Math.max(0, S.flash - dtReal * 1.6); S.shake = Math.max(0, S.shake - dtReal * 1.2);
           if (ee > 1.4 && S.timeScale < 1) S.timeScale = Math.min(1, S.timeScale + dtReal * 1.2);
-          if (S.hitBox) {
-            emitFire(S.hitBox);
-            for (const b of boxes) if (!b.burnt && Math.abs(b.cx - S.hitBox.cx) < 42 && Math.abs(b.cz - S.hitBox.cz) < 42 && Math.random() < dt * 0.5) b.burnt = 1;
-          } else emitBurst({ x: S.impactPos.x, y: 1, z: S.impactPos.z }, 1);
-          for (const b of boxes) if (b.burnt && b !== S.hitBox && Math.random() < 0.18) emitFire(b);
-          if (ee > 5.6) { S.mode = "done"; finish(S.result); }
-        } else if (S.timeoutEnd && S.t - S.expT > 2) { S.mode = "done"; finish(false); }
+          burnTick(dt);
+          if (ee > 5.6 && !S.shown) { S.shown = true; setResult(S.result); setBanner(""); setPh("result"); }
+        } else if (S.timeoutEnd && S.t - S.expT > 2 && !S.shown) { S.shown = true; setResult(false); setBanner(""); setPh("result"); }
       }
 
       // частинки
@@ -457,10 +617,10 @@ export default function DroneGame({ city, targetName, onClose }) {
         const [sx, sy] = scr(q);
         const u = p.age / p.life;
         const base = (FOCAL / q[2]);
-        if (p.kind === 2) { ctx.fillStyle = `rgba(55,55,60,${0.55 * (1 - u)})`; ctx.beginPath(); ctx.arc(sx, sy, Math.max(2, base * (2.5 + u * 5)), 0, 6.2832); ctx.fill(); }
+        if (p.kind === 2) { ctx.fillStyle = `rgba(55,55,60,${0.55 * (1 - u)})`; ctx.beginPath(); ctx.arc(sx, sy, Math.max(2, base * (2 + u * 3.2)), 0, 6.2832); ctx.fill(); }
         else {
           ctx.fillStyle = u < 0.35 ? `rgba(255,${Math.round(220 - u * 250)},70,${0.95 - u * 0.6})` : `rgba(235,${Math.round(100 - u * 50)},25,${0.9 * (1 - u)})`;
-          ctx.beginPath(); ctx.arc(sx, sy, Math.max(1.5, base * (p.kind === 0 ? 1.4 : 2.2 - u * 1.2)), 0, 6.2832); ctx.fill();
+          ctx.beginPath(); ctx.arc(sx, sy, Math.max(1.5, base * (p.kind === 0 ? 1 : 1.7 - u * 0.9)), 0, 6.2832); ctx.fill();
         }
       }
       // ударна хвиля
@@ -509,7 +669,29 @@ export default function DroneGame({ city, targetName, onClose }) {
           ctx.fillStyle = "rgba(255,255,255,0.55)"; ctx.beginPath(); ctx.arc(p.ox + p.dx * 46, p.oy + p.dy * 46, 18, 0, 6.2832); ctx.fill();
         }
       }
-      if (S.timeScale < 0.9 && S.mode !== "brief") {
+      if (S.mode === "replay" && S.rep) {
+        const R = S.rep;
+        const ct = S.t - R.cutT;
+        if (ct < 0.18) { ctx.fillStyle = `rgba(255,255,255,${0.45 * (1 - ct / 0.18)})`; ctx.fillRect(0, 0, Wd, Hd); }
+        ctx.fillStyle = "#ff3b30"; if (Math.floor(S.t * 2) % 2 === 0) { ctx.beginPath(); ctx.arc(22, 26, 6, 0, 6.2832); ctx.fill(); }
+        ctx.fillStyle = "#fff"; ctx.font = "bold 14px monospace"; ctx.textAlign = "left"; ctx.fillText("ПОВТОР", 36, 31);
+        ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, Hd - 54, Wd, 54);
+        ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "800 15px sans-serif"; ctx.fillText("WORLD CLICKER · УДАР ДРОНОМ", Wd / 2, Hd - 32);
+        ctx.font = "600 13px sans-serif"; ctx.fillStyle = "#ffd9a0"; ctx.fillText(cityName, Wd / 2, Hd - 14);
+        if (R.ended) {
+          ctx.font = "900 26px sans-serif"; ctx.textAlign = "center";
+          ctx.fillStyle = S.result ? "#ffb347" : "#ff6a5c"; ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 5;
+          const txt = S.result ? "ДРОН ВЛУЧИВ У ЦІЛЬ" : "ДРОН НЕ ВЛУЧИВ У ЦІЛЬ";
+          ctx.strokeText(txt, Wd / 2, 96); ctx.fillText(txt, Wd / 2, 96);
+        }
+      }
+      if (S.mode === "rewind") {
+        ctx.fillStyle = "rgba(70,110,255,0.16)"; ctx.fillRect(0, 0, Wd, Hd);
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        for (let y = (S.t * 300) % 6; y < Hd; y += 6) ctx.fillRect(0, y, Wd, 2);
+        ctx.fillStyle = "#fff"; ctx.font = "bold 18px monospace"; ctx.textAlign = "center"; ctx.fillText("◀◀ ПЕРЕМОТКА", Wd / 2, 100);
+      }
+      if (S.timeScale < 0.9 && S.mode !== "brief" && S.mode !== "rewind") {
         ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.font = "bold 13px monospace"; ctx.textAlign = "right"; ctx.fillText("СЛОУ-МО ▶", Wd - 56, 30);
       }
     };
@@ -518,10 +700,12 @@ export default function DroneGame({ city, targetName, onClose }) {
     // старт польоту
     S.start = () => { S.mode = "fly"; S.yaw = 0; };
     stateRef.current = S;
+    if (autoRef.current) { autoRef.current = false; S.start(); }
 
     const pos = (e) => { const r = wrap.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
     const onDown = (e) => {
       if (S.mode !== "fly") return;
+      if (e.target && e.target.closest && e.target.closest("button")) return;
       const [x, y] = pos(e);
       S.ptr.set(e.pointerId, { side: x < Wd / 2 ? 0 : 1, ox: x, oy: y, dx: 0, dy: 0 });
       try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* ok */ }
@@ -544,7 +728,7 @@ export default function DroneGame({ city, targetName, onClose }) {
     window.addEventListener("keyup", ku);
 
     return () => {
-      dead = true; cancelAnimationFrame(raf);
+      dead = true; cancelAnimationFrame(raf); stopRec(true);
       window.removeEventListener("resize", resize);
       wrap.removeEventListener("pointerdown", onDown);
       wrap.removeEventListener("pointermove", onMove);
@@ -554,14 +738,60 @@ export default function DroneGame({ city, targetName, onClose }) {
       window.removeEventListener("keyup", ku);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [city]);
+  }, [city, round]);
 
-  const btn = { padding: "12px 26px", borderRadius: 12, border: "none", fontWeight: 800, fontSize: 15, color: "#fff", background: "linear-gradient(180deg,#3b8cff,#1f64d6)", boxShadow: "0 4px 0 #14439a", cursor: "pointer" };
+  const btn = { padding: "12px 22px", borderRadius: 12, border: "none", fontWeight: 800, fontSize: 15, color: "#fff", background: "linear-gradient(180deg,#3b8cff,#1f64d6)", boxShadow: "0 4px 0 #14439a", cursor: "pointer" };
+  const btn2 = { ...btn, background: "linear-gradient(180deg,#667,#445)", boxShadow: "0 4px 0 #223" };
+  const btnG = { ...btn, background: "linear-gradient(180deg,#3fc25a,#1f9a3c)", boxShadow: "0 4px 0 #136b28" };
+
+  const retry = () => {
+    autoRef.current = true;
+    setBanner(""); setResult(false); setVideo(null); setShareMsg("");
+    setPh("play"); setRound((r) => r + 1);
+  };
+  const startReplay = () => { setShareMsg(""); setVideo(null); setPh("replay"); if (stateRef.current) stateRef.current.startReplay(); };
+  const gameLink = (import.meta.env && import.meta.env.VITE_GAME_LINK) || window.location.origin;
+  const shareText = `🚁 Мій удар дроном по місту ${city?.name || ""}${targetName ? " (" + targetName + ")" : ""} у World Clicker! ${result ? "🎯 Влучив у ціль — місто у вогні 🔥" : "💥 Не влучив у ціль, але було видовищно!"}\nЗаходь і спробуй сам: ${gameLink}`;
+  const saveVideo = () => {
+    if (!video) return;
+    try {
+      const url = URL.createObjectURL(video.blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `drone-strike.${video.ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      setShareMsg("Відео збережено. Додай його до повідомлення в Telegram.");
+    } catch (e) { setShareMsg("Не вдалося зберегти відео на цьому пристрої."); }
+  };
+  const shareVideo = async () => {
+    setShareMsg("");
+    if (video) {
+      try {
+        const file = new window.File([video.blob], `drone-strike.${video.ext}`, { type: video.mime });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], text: shareText, title: "World Clicker — удар дроном" });
+          return;
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
+      }
+    }
+    // запасний шлях: посилання в Telegram з описом; відео можна зберегти кнопкою нижче
+    const u = `https://t.me/share/url?url=${encodeURIComponent(gameLink)}&text=${encodeURIComponent(shareText)}`;
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(u); else window.open(u, "_blank");
+    if (video) setShareMsg("Цей пристрій не може надіслати відео напряму: збережи його кнопкою «Зберегти відео» і додай до повідомлення.");
+  };
+  const onX = () => {
+    if (phase === "replay") { if (stateRef.current) stateRef.current.stopReplay(); return; }
+    finish(phase === "result" || phase === "replayEnd" ? result : false);
+  };
+  const panel = { position: "absolute", left: 0, right: 0, bottom: 0, padding: "22px 18px 26px", background: "linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.78) 28%)", textAlign: "center", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 };
 
   return (
     <div ref={wrapRef} style={{ position: "fixed", inset: 0, zIndex: 3000, background: "#000", touchAction: "none", userSelect: "none", overflow: "hidden" }}>
       <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
-      <button type="button" aria-label="Закрити" onClick={() => finish(false)} style={{ position: "absolute", top: 10, right: 10, width: 38, height: 38, borderRadius: 19, border: "none", background: "rgba(0,0,0,.55)", color: "#fff", fontSize: 18, cursor: "pointer", zIndex: 2 }}>✕</button>
+      <button type="button" aria-label="Закрити" onClick={onX} style={{ position: "absolute", top: 10, right: 10, width: 38, height: 38, borderRadius: 19, border: "none", background: "rgba(0,0,0,.55)", color: "#fff", fontSize: 18, cursor: "pointer", zIndex: 2 }}>✕</button>
       {phase === "brief" && (
         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", background: "linear-gradient(180deg,rgba(0,0,0,.25),rgba(0,0,0,.6))", textAlign: "center", color: "#fff", padding: "0 24px 48px" }}>
           <div style={{ fontSize: 13, letterSpacing: 2, color: "#ffb3a8" }}>УДАР ДРОНОМ</div>
@@ -573,9 +803,33 @@ export default function DroneGame({ city, targetName, onClose }) {
           <button type="button" style={btn} onClick={() => { setPh("play"); if (stateRef.current) stateRef.current.start(); }}>Запустити</button>
         </div>
       )}
-      {banner && (
+      {banner && phase === "play" && (
         <div style={{ position: "absolute", left: 0, right: 0, top: 70, textAlign: "center", pointerEvents: "none" }}>
-          <div style={{ display: "inline-block", fontSize: 24, fontWeight: 900, color: banner.startsWith("ЦІЛЬ") ? "#ffb347" : "#ff6a5c", textShadow: "0 2px 8px rgba(0,0,0,.8)" }}>{banner}</div>
+          <div style={{ display: "inline-block", fontSize: 24, fontWeight: 900, color: banner.includes("НЕ ВЛУЧИВ") || banner.includes("втрачено") ? "#ff6a5c" : "#ffb347", textShadow: "0 2px 8px rgba(0,0,0,.8)" }}>{banner}</div>
+        </div>
+      )}
+      {phase === "result" && (
+        <div style={panel}>
+          <div style={{ fontSize: 26, fontWeight: 900, color: result ? "#ffb347" : "#ff6a5c", textShadow: "0 2px 8px rgba(0,0,0,.8)" }}>{result ? "🎯 ДРОН ВЛУЧИВ У ЦІЛЬ" : "💥 ДРОН НЕ ВЛУЧИВ У ЦІЛЬ"}</div>
+          <div style={{ fontSize: 14, opacity: 0.9 }}>{result ? `Місто ${city?.name || ""} у вогні` : "Спробуй ще раз — цілься в червону будівлю"}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", marginTop: 4 }}>
+            <button type="button" style={btn} onClick={retry}>Атакувати ще раз</button>
+            <button type="button" style={btnG} onClick={startReplay}>🎬 Повтор і поділитися</button>
+            <button type="button" style={btn2} onClick={() => finish(result)}>В меню</button>
+          </div>
+        </div>
+      )}
+      {phase === "replayEnd" && (
+        <div style={panel}>
+          <div style={{ fontSize: 20, fontWeight: 900 }}>🎬 Повтор готовий</div>
+          <div style={{ fontSize: 13, opacity: 0.85, maxWidth: 320 }}>{video ? "Останні секунди польоту з різних ракурсів і слоу-мо удару." : "Цей пристрій не записує відео, але можна поділитися описом."}</div>
+          {shareMsg && <div style={{ fontSize: 12, color: "#ffd9a0", maxWidth: 320 }}>{shareMsg}</div>}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center" }}>
+            <button type="button" style={btnG} onClick={shareVideo}>📤 Поділитися в Telegram</button>
+            {video && <button type="button" style={btn} onClick={saveVideo}>Зберегти відео</button>}
+            <button type="button" style={btn} onClick={startReplay}>Ще раз</button>
+            <button type="button" style={btn2} onClick={() => setPh("result")}>Назад</button>
+          </div>
         </div>
       )}
     </div>
