@@ -37,59 +37,144 @@ function fogCol(rgb, k, dist) {
 
 function buildCity(seedStr, cityName) {
   const rnd = mulberry(hashSeed(seedStr));
-  const items = []; // коробки, дерева, табличка
+  const items = [];
   const cell = 26;
   const zStart = 80;
   const zEnd = 690;
   const tzRow = zStart + (12 + Math.floor(rnd() * 5)) * cell;
   const sideSign = rnd() < 0.5 ? -1 : 1;
   const tx = sideSign * (1 + Math.floor(rnd() * 3)) * cell;
-  const pal = ["#8c9bb0", "#a39a8c", "#7f8fa3", "#b0a58f", "#6f7d92", "#9aa8b8", "#b8a890", "#a8b2a0"];
+  const pal = ["#8c9bb0", "#a39a8c", "#7f8fa3", "#b0a58f", "#6f7d92", "#9aa8b8", "#b8a890", "#a8b2a0", "#c2b49a", "#8e9ba8"];
+  const carCols = ["#d64545", "#3b7fd6", "#e8e8e8", "#2d2f33", "#e0b73a", "#4aa86a", "#9aa0a8"];
+  const wallCols = ["#f0e6d0", "#e8d8b8", "#d9e4ee", "#f2d9d0", "#e9e2c8", "#d8e8d0"];
+  const roofCols = ["#c4442e", "#8a4a32", "#5a6b86", "#a0523d", "#6b5a48"];
   let id = 0;
   const box = (x0, x1, z0, z1, h, color, extra) => {
-    const b = { type: "box", id: id++, x0, x1, z0, z1, h, rgb: hexRgb(color), cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, cy: h / 2, burnt: 0, t: false, win: true, ...extra };
+    const b = { type: "box", id: id++, x0, x1, z0, z1, h, rgb: hexRgb(color), cx: (x0 + x1) / 2, cz: (z0 + z1) / 2, cy: ((extra && extra.y0 ? extra.y0 : 0) + h) / 2, burnt: 0, t: false, win: true, ...extra };
     items.push(b);
     return b;
   };
+  const deco = (x0, x1, z0, z1, h, color, extra) => box(x0, x1, z0, z1, h, color, { deco: true, win: false, far: 170, ...extra });
+  const tree = (x, z, sc, pine) => items.push({ type: "tree", id: id++, cx: x, cz: z, cy: 3, s: sc, pine: !!pine, c: rnd() < 0.5 ? "#2f8f3d" : "#3da34a", far: 330 });
+  const lamp = (x, z) => items.push({ type: "lamp", id: id++, cx: x, cz: z, cy: 3, arm: x > 0 ? -1 : 1, far: 210 });
+  const bench = (x, z, alongZ) => {
+    if (alongZ) { deco(x - 0.4, x + 0.4, z - 1.1, z + 1.1, 0.6, "#8a5a2b", { far: 120 }); deco(x - (x > 0 ? -0.4 : 0.4) - 0.2, x - (x > 0 ? -0.4 : 0.4) + 0.2, z - 1.1, z + 1.1, 1.2, "#6b4423", { far: 120 }); }
+    else { deco(x - 1.1, x + 1.1, z - 0.4, z + 0.4, 0.6, "#8a5a2b", { far: 120 }); deco(x - 1.1, x + 1.1, z - 0.6, z - 0.4, 1.2, "#6b4423", { far: 120 }); }
+  };
+  const car = (x, z) => {
+    const c = carCols[Math.floor(rnd() * carCols.length)];
+    deco(x, x + 4.2, z - 0.95, z + 0.95, 1.1, c, { far: 150 });
+    deco(x + 0.9, x + 3.2, z - 0.85, z + 0.85, 1.9, shadeHex(c, 0.85), { far: 150, y0: 1.1, glass: true });
+  };
+  // дім із двосхилим дахом, дверима, димарем і живоплотом
+  const house = (cx, cz, w, d, axis, doorFace) => {
+    const h = 4 + rnd() * 2.2;
+    const wall = wallCols[Math.floor(rnd() * wallCols.length)];
+    const roof = roofCols[Math.floor(rnd() * roofCols.length)];
+    box(cx - w / 2, cx + w / 2, cz - d / 2, cz + d / 2, h, wall, { win: true, noTop: true, door: doorFace, far: 420 });
+    const rh = 2.3 + rnd() * 1.2;
+    items.push({ type: "roof", id: id++, x0: cx - w / 2, x1: cx + w / 2, z0: cz - d / 2, z1: cz + d / 2, y0: h, h: h + rh, axis, rgb: hexRgb(roof), wall: hexRgb(wall), cx, cz, cy: h + rh / 2, ly: 1, far: 420 });
+    if (rnd() < 0.6) deco(cx + w * 0.15, cx + w * 0.15 + 0.9, cz - 0.5, cz + 0.5, h + rh + 0.6, "#8a7a6a", { y0: h + 0.8, ly: 2, far: 110 });
+    // живопліт перед входом
+    if (doorFace === 1) deco(cx - w / 2 - 1.6, cx - w / 2 - 1.1, cz - d / 2, cz + d / 2, 1.1, "#3f9a3f", { far: 120 });
+    else if (doorFace === 2) deco(cx + w / 2 + 1.1, cx + w / 2 + 1.6, cz - d / 2, cz + d / 2, 1.1, "#3f9a3f", { far: 120 });
+    else if (doorFace === 3) deco(cx - w / 2, cx + w / 2, cz - d / 2 - 1.6, cz - d / 2 - 1.1, 1.1, "#3f9a3f", { far: 120 });
+    else deco(cx - w / 2, cx + w / 2, cz + d / 2 + 1.1, cz + d / 2 + 1.6, 1.1, "#3f9a3f", { far: 120 });
+  };
+
   let target = null;
+  const parks = [];
   for (let gz = zStart; gz < zEnd; gz += cell) {
     for (let gx = -130; gx <= 130; gx += cell) {
       if (gx === 0) continue; // головний проспект
       const isTarget = gz === tzRow && gx === tx;
       const centerBoost = 1 - Math.min(1, Math.abs(gx) / 140);
-      if (!isTarget && rnd() < 0.14) continue;
+      if (!isTarget && rnd() < 0.13) {
+        // парк: газон, дерева, лавка
+        parks.push({ x: gx, z: gz });
+        for (let k = 0; k < 5; k++) tree(gx + (rnd() - 0.5) * 18, gz + (rnd() - 0.5) * 18, 0.9 + rnd() * 0.6, rnd() < 0.2);
+        bench(gx, gz + 6.5, false);
+        continue;
+      }
       const w = 11 + rnd() * 7;
       const d = 11 + rnd() * 7;
       let h = 8 + rnd() * (16 + 36 * centerBoost);
       if (!isTarget && Math.abs(gz - tzRow) < 55 && Math.abs(gx - tx) < 55) h = Math.min(h, 24);
-      if (isTarget) { target = box(gx - 9, gx + 9, gz - 9, gz + 9, 40, "#e2452f", { t: true, win: false }); }
-      else box(gx - w / 2, gx + w / 2, gz - d / 2, gz + d / 2, h, pal[Math.floor(rnd() * pal.length)]);
+      if (isTarget) { target = box(gx - 9, gx + 9, gz - 9, gz + 9, 40, "#e2452f", { t: true, win: false }); continue; }
+      const col = pal[Math.floor(rnd() * pal.length)];
+      const x0 = gx - w / 2, x1 = gx + w / 2, z0 = gz - d / 2, z1 = gz + d / 2;
+      const b = box(x0, x1, z0, z1, h, col);
+      if (h > 26) {
+        // уступ угорі
+        const th = h + 5 + rnd() * 6;
+        b.noTop = true;
+        box(x0 + 2.2, x1 - 2.2, z0 + 2.2, z1 - 2.2, th, shadeHex(col, 1.08), { y0: h, ly: 1 });
+        deco(x0 + 0.4, x0 + 2, z0 + 0.4, z0 + 1.6, h + 1.2, "#9aa0a6", { y0: h, ly: 2, far: 120 });
+      } else if (h > 12) {
+        deco(x0 + 1, x0 + 3.2, z0 + 1, z0 + 2.4, h + 1.3, "#9aa0a6", { y0: h, ly: 2, far: 120 });
+        if (rnd() < 0.5) deco(x1 - 3, x1 - 1, z1 - 2.4, z1 - 1, h + 1, "#8a9096", { y0: h, ly: 2, far: 120 });
+      }
     }
   }
-  // передмістя: будиночки вздовж дороги
-  for (let z = -150; z < 56; z += 15) {
+  // вуличні ліхтарі, дерева й лавки вздовж проспекту
+  for (let z = -200; z < zEnd + 10; z += 26) {
+    lamp(12, z); lamp(-12, z + 13);
+    if (z > zStart - 20) {
+      tree(15.5, z + 7, 0.7 + rnd() * 0.2); tree(-15.5, z + 20, 0.7 + rnd() * 0.2);
+      if (Math.round((z - zStart) / 26) % 3 === 0) { bench(11.2, z + 5, true); bench(-11.2, z + 18, true); }
+    }
+  }
+  // припарковані авто на поперечних вулицях
+  for (let rc = zStart - 13; rc <= zEnd; rc += cell) {
+    for (let k = 0; k < 5; k++) {
+      const x = (rnd() < 0.5 ? -1 : 1) * (18 + rnd() * 120);
+      if (Math.abs(((x + 143) % 26)) < 5 || Math.abs(((x + 143) % 26)) > 21) continue;
+      car(x, rc + (rnd() < 0.5 ? -1.7 : 1.7));
+    }
+  }
+  // передмістя: будинки вздовж дороги та провулки
+  const lanes = [-148, -104, -22];
+  for (let z = -170; z < 60; z += 14) {
     for (const side of [-1, 1]) {
-      if (rnd() < 0.25) continue;
-      const x = side * (16 + rnd() * 18);
-      const hh = 5 + rnd() * 3;
-      const col = ["#f0e6d0", "#e8d8b8", "#d9e4ee", "#f2d9d0"][Math.floor(rnd() * 4)];
-      box(x - 3.5, x + 3.5, z - 3.5, z + 3.5, hh, col, { win: false });
-      box(x - 4.2, x + 4.2, z - 4.2, z + 4.2, hh + 1.4, "#c4442e", { win: false, roofOnly: true, y0: hh });
+      if (rnd() < 0.2) continue;
+      if (Math.abs(z + 66) < 13 && side === 1) continue; // табличка
+      if (lanes.some((lz) => Math.abs(z - lz) < 9)) continue; // провулки
+      const x = side * (21 + rnd() * 3);
+      house(x, z, 7 + rnd() * 2, 7.5 + rnd() * 1.5, "z", side > 0 ? 1 : 2);
     }
   }
-  // дерева
-  for (let i = 0; i < 110; i++) {
+  for (const lz of lanes) {
+    for (const side of [-1, 1]) {
+      for (let x = 34; x < 100; x += 15) {
+        for (const lz2 of [-1, 1]) {
+          if (rnd() < 0.25) continue;
+          house(side * (x + rnd() * 3), lz + lz2 * 9.5, 8 + rnd() * 2, 7 + rnd(), "x", lz2 > 0 ? 3 : 4);
+        }
+      }
+      for (let x = 30; x < 100; x += 18) lamp(side * x, lz + 4.2);
+    }
+  }
+  // дерева й сосни навколо
+  for (let i = 0; i < 150; i++) {
     const x = (rnd() * 2 - 1) * 170;
-    const z = -160 + rnd() * 230;
-    if (Math.abs(x) < 12) continue;
-    items.push({ type: "tree", id: id++, cx: x, cz: z, cy: 3, s: 0.8 + rnd() * 0.7, c: rnd() < 0.5 ? "#2f8f3d" : "#3da34a" });
+    const z = -170 + rnd() * 240;
+    if (Math.abs(x) < 15) continue;
+    if (lanes.some((lz) => Math.abs(z - lz) < 8)) continue;
+    tree(x, z, 0.8 + rnd() * 0.7, rnd() < 0.3);
   }
   // табличка з назвою міста біля дороги
-  const sign = { type: "sign", id: id++, x0: 8, x1: 24, z0: -66, z1: -65.4, y0: 4, h: 11, cx: 16, cz: -66, cy: 8, name: cityName, rgb: hexRgb("#1f7a45") };
+  const sign = { type: "sign", id: id++, x0: 14, x1: 30, z0: -66, z1: -65.4, y0: 4, h: 11, cx: 22, cz: -66, cy: 8, name: cityName, rgb: hexRgb("#1f7a45") };
   items.push(sign);
-  items.push({ type: "box", id: id++, x0: 9, x1: 9.8, z0: -66.2, z1: -65.2, h: 4, rgb: hexRgb("#6b5a48"), cx: 9.4, cz: -65.7, cy: 2, burnt: 0, t: false, win: false });
-  items.push({ type: "box", id: id++, x0: 22.2, x1: 23, z0: -66.2, z1: -65.2, h: 4, rgb: hexRgb("#6b5a48"), cx: 22.6, cz: -65.7, cy: 2, burnt: 0, t: false, win: false });
-  return { items, boxes: items.filter((b) => b.type === "box" && !b.roofOnly), target, cell, zStart, zEnd };
+  deco(14.4, 15.2, -66.2, -65.2, 4, "#6b5a48", { far: 300 });
+  deco(28.8, 29.6, -66.2, -65.2, 4, "#6b5a48", { far: 300 });
+  const boxes = items.filter((b) => b.type === "box" && !b.deco);
+  return { items, boxes, target, cell, zStart, zEnd, parks, lanes };
+}
+
+function shadeHex(hex, k) {
+  const [r, g, b] = hexRgb(hex);
+  const h = (v) => Math.max(0, Math.min(255, Math.round(v * k))).toString(16).padStart(2, "0");
+  return "#" + h(r) + h(g) + h(b);
 }
 
 export default function DroneGame({ city, targetName, onClose }) {
@@ -105,6 +190,9 @@ export default function DroneGame({ city, targetName, onClose }) {
   const closedRef = useRef(false);
   const stateRef = useRef(null);
   const autoRef = useRef(false);
+  const thumbRef = useRef(null);
+  const autoSaveRef = useRef(false);
+  const [sharing, setSharing] = useState(false);
   const seedRef = useRef(Math.floor(Math.random() * 99999));
   const setPh = (p) => { phaseRef.current = p; setPhase(p); };
   const finish = (ok) => { if (closedRef.current) return; closedRef.current = true; onClose(ok); };
@@ -191,8 +279,13 @@ export default function DroneGame({ city, targetName, onClose }) {
         const bb = [c[3][0] + (c[2][0] - c[3][0]) * u, c[3][1] + (c[2][1] - c[3][1]) * u, c[3][2] + (c[2][2] - c[3][2]) * u];
         return scr([a[0] + (bb[0] - a[0]) * v, a[1] + (bb[1] - a[1]) * v, a[2] + (bb[2] - a[2]) * v]);
       };
+      if (b.door === face) {
+        const d0 = lerp3(0.4, 0.5), d1 = lerp3(0.6, 0.5), d2 = lerp3(0.6, 1), d3 = lerp3(0.4, 1);
+        ctx.fillStyle = "#6b4423"; ctx.beginPath(); ctx.moveTo(d0[0], d0[1]); ctx.lineTo(d1[0], d1[1]); ctx.lineTo(d2[0], d2[1]); ctx.lineTo(d3[0], d3[1]); ctx.closePath(); ctx.fill();
+      }
       for (let j = 0; j < rows; j++) {
         for (let i = 0; i < cols; i++) {
+          if (b.door === face && j === rows - 1 && Math.abs((i + 0.5) / cols - 0.5) < 0.2) continue;
           if (winBudget-- <= 0) return;
           const h = win(b.id, face, i, j);
           const u0 = (i + 0.2) / cols, u1 = (i + 0.8) / cols, v0 = (j + 0.2) / rows, v1 = (j + 0.8) / rows;
@@ -206,7 +299,7 @@ export default function DroneGame({ city, targetName, onClose }) {
     const drawBox = (b, dist) => {
       const y0 = b.y0 || 0, y1 = b.h;
       const { x0, x1, z0, z1 } = b;
-      if (cy0 > y1) fillWorld([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], b.burnt ? fogCol([42, 30, 26], 1, dist) : fogCol(b.rgb, 1.15, dist));
+      if (cy0 > y1 && !b.noTop) fillWorld([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], b.burnt ? fogCol([42, 30, 26], 1, dist) : fogCol(b.rgb, 1.15, dist));
       if (cx0 < x0) drawFace(b, 1, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], 0.62, dist, z1 - z0, y1 - y0);
       else if (cx0 > x1) drawFace(b, 2, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], 0.62, dist, z1 - z0, y1 - y0);
       if (cz0 < z0) drawFace(b, 3, [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]], 0.86, dist, x1 - x0, y1 - y0);
@@ -216,31 +309,108 @@ export default function DroneGame({ city, targetName, onClose }) {
     const drawTree = (t, dist) => {
       const p = toCam(t.cx, 0, t.cz);
       if (p[2] < NEAR) return;
-      const s = (FOCAL / p[2]) * t.s;
+      const s2 = (FOCAL / p[2]) * t.s;
       const [sx, sy] = scr(p);
-      ctx.fillStyle = fogCol([110, 74, 40], 1, dist); ctx.fillRect(sx - s * 0.35, sy - s * 2, s * 0.7, s * 2);
-      ctx.fillStyle = fogCol(hexRgb(t.c), 1, dist); ctx.beginPath(); ctx.arc(sx, sy - s * 3.4, s * 2, 0, 6.2832); ctx.fill();
-      ctx.fillStyle = "rgba(255,255,255,0.14)"; ctx.beginPath(); ctx.arc(sx - s * 0.6, sy - s * 4, s * 0.9, 0, 6.2832); ctx.fill();
+      ctx.fillStyle = fogCol([110, 74, 40], 1, dist); ctx.fillRect(sx - s2 * 0.35, sy - s2 * 2, s2 * 0.7, s2 * 2);
+      if (t.pine) {
+        const col = fogCol([34, 120, 62], 1, dist);
+        ctx.fillStyle = col;
+        for (let i = 0; i < 3; i++) {
+          const yy = sy - s2 * (1.6 + i * 1.5), ww = s2 * (2.3 - i * 0.55);
+          ctx.beginPath(); ctx.moveTo(sx, yy - s2 * 2); ctx.lineTo(sx - ww, yy + s2 * 0.4); ctx.lineTo(sx + ww, yy + s2 * 0.4); ctx.closePath(); ctx.fill();
+        }
+        return;
+      }
+      ctx.fillStyle = fogCol(hexRgb(t.c), 1, dist); ctx.beginPath(); ctx.arc(sx, sy - s2 * 3.4, s2 * 2, 0, 6.2832); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.14)"; ctx.beginPath(); ctx.arc(sx - s2 * 0.6, sy - s2 * 4, s2 * 0.9, 0, 6.2832); ctx.fill();
     };
+
+    const drawLamp = (l, dist) => {
+      const a = toCam(l.cx, 0, l.cz), b = toCam(l.cx, 6.8, l.cz);
+      if (a[2] < NEAR || b[2] < NEAR) return;
+      const A = scr(a), B = scr(b);
+      const w = Math.max(1, (FOCAL / a[2]) * 0.22);
+      ctx.strokeStyle = fogCol([60, 66, 72], 1, dist); ctx.lineWidth = w; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+      const c = toCam(l.cx + l.arm * 1.6, 6.8, l.cz);
+      if (c[2] > NEAR) {
+        const C2 = scr(c);
+        ctx.beginPath(); ctx.moveTo(B[0], B[1]); ctx.lineTo(C2[0], C2[1]); ctx.stroke();
+        ctx.fillStyle = fogCol([255, 238, 170], 1, dist); ctx.beginPath(); ctx.ellipse(C2[0], C2[1] + w, w * 2.2, w * 1.1, 0, 0, 6.2832); ctx.fill();
+      }
+    };
+
+    // двосхилий дах: усі грані з перевіркою напрямку до камери
+    const drawRoof = (r, dist) => {
+      const { x0, x1, z0, z1, y0, h: top } = r;
+      const oz = r.axis === "z" ? 0.3 : 0.6, ox = r.axis === "z" ? 0.6 : 0.3;
+      const X0 = x0 - ox, X1 = x1 + ox, Z0 = z0 - oz, Z1 = z1 + oz;
+      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+      let faces;
+      if (r.axis === "z") {
+        faces = [
+          { p: [[X0, y0, Z0], [X0, y0, Z1], [cx, top, Z1], [cx, top, Z0]], roof: true },
+          { p: [[X1, y0, Z1], [X1, y0, Z0], [cx, top, Z0], [cx, top, Z1]], roof: true },
+          { p: [[x0, y0, z0], [x1, y0, z0], [cx, top, z0]], roof: false },
+          { p: [[x1, y0, z1], [x0, y0, z1], [cx, top, z1]], roof: false },
+        ];
+      } else {
+        faces = [
+          { p: [[X0, y0, Z0], [X1, y0, Z0], [X1, top, cz], [X0, top, cz]], roof: true },
+          { p: [[X1, y0, Z1], [X0, y0, Z1], [X0, top, cz], [X1, top, cz]], roof: true },
+          { p: [[x0, y0, z0], [x0, y0, z1], [x0, top, cz]], roof: false },
+          { p: [[x1, y0, z1], [x1, y0, z0], [x1, top, cz]], roof: false },
+        ];
+      }
+      const cen = [cx, y0, cz];
+      for (const f of faces) {
+        const [p0, p1, p2] = f.p;
+        let n = [(p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]), (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]), (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])];
+        const mx = f.p.reduce((a, q) => a + q[0], 0) / f.p.length, my = f.p.reduce((a, q) => a + q[1], 0) / f.p.length, mz = f.p.reduce((a, q) => a + q[2], 0) / f.p.length;
+        if (n[0] * (mx - cen[0]) + n[1] * (my - cen[1]) + n[2] * (mz - cen[2]) < 0) n = [-n[0], -n[1], -n[2]];
+        if (n[0] * (cx0 - mx) + n[1] * (cy0 - my) + n[2] * (cz0 - mz) <= 0) continue;
+        const len = Math.hypot(n[0], n[1], n[2]) || 1;
+        const k = f.roof ? 0.72 + 0.3 * Math.max(0, n[1] / len) : 0.88;
+        fillWorld(f.p, fogCol(f.roof ? r.rgb : r.wall, k, dist));
+      }
+    };
+
+    // текстура таблички малюється один раз; потім накладається на 3D-площину шматками (афінно по клітинках)
+    const signTex = (() => {
+      const c = document.createElement("canvas");
+      c.width = 512; c.height = 224;
+      const g = c.getContext("2d");
+      g.fillStyle = "#1f7a45"; g.fillRect(0, 0, 512, 224);
+      g.strokeStyle = "#fff"; g.lineWidth = 8; g.strokeRect(14, 14, 484, 196);
+      g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.font = "600 34px sans-serif"; g.fillText("ВІТАЄМО У МІСТІ", 256, 56);
+      let fs = 120;
+      g.font = `800 ${fs}px sans-serif`;
+      while (g.measureText(cityName).width > 440 && fs > 24) { fs -= 4; g.font = `800 ${fs}px sans-serif`; }
+      g.fillText(cityName, 256, 135);
+      return c;
+    })();
 
     const drawSign = (sg, dist) => {
       const b = { ...sg, win: false, burnt: 0, t: false, id: sg.id };
       drawBox(b, dist);
-      if (cz0 < sg.z0) {
-        const a = toCam(sg.x0, sg.y0, sg.z0), c = toCam(sg.x1, sg.h, sg.z0);
-        if (a[2] < NEAR || c[2] < NEAR) return;
-        const [ax, ay] = scr(a), [cx2, cy2] = scr(c);
-        const w = Math.abs(cx2 - ax), h = Math.abs(ay - cy2);
-        if (w < 12) return;
-        ctx.strokeStyle = "#fff"; ctx.lineWidth = Math.max(1, w * 0.012);
-        ctx.strokeRect(Math.min(ax, cx2) + w * 0.03, Math.min(ay, cy2) + h * 0.06, w * 0.94, h * 0.88);
-        ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        const fs = Math.min(w / (sg.name.length * 0.62 + 0.5), h * 0.42);
-        ctx.font = `800 ${fs}px sans-serif`;
-        ctx.fillText(sg.name, (ax + cx2) / 2, Math.min(ay, cy2) + h * 0.45);
-        ctx.font = `600 ${fs * 0.38}px sans-serif`;
-        ctx.fillText("ВІТАЄМО", (ax + cx2) / 2, Math.min(ay, cy2) + h * 0.82);
-        ctx.textBaseline = "alphabetic";
+      if (cz0 >= sg.z0 || dist > 260) return;
+      const N = 8, M = 3;
+      const W = signTex.width, H = signTex.height;
+      const pt = (u, v) => toCam(sg.x0 + (sg.x1 - sg.x0) * u, sg.h - (sg.h - sg.y0) * v, sg.z0 - 0.02);
+      const grid = [];
+      for (let j = 0; j <= M; j++) { const row = []; for (let i = 0; i <= N; i++) row.push(pt(i / N, j / M)); grid.push(row); }
+      for (let j = 0; j < M; j++) {
+        for (let i = 0; i < N; i++) {
+          const tl = grid[j][i], tr = grid[j][i + 1], bl = grid[j + 1][i];
+          if (tl[2] < NEAR || tr[2] < NEAR || bl[2] < NEAR || grid[j + 1][i + 1][2] < NEAR) continue;
+          const A = scr(tl), B = scr(tr), Cc = scr(bl);
+          const sx = (W / N) * i, sy = (H / M) * j, sw = W / N, sh = H / M;
+          ctx.save();
+          ctx.transform((B[0] - A[0]) / sw, (B[1] - A[1]) / sw, (Cc[0] - A[0]) / sh, (Cc[1] - A[1]) / sh, A[0], A[1]);
+          ctx.drawImage(signTex, sx, sy, sw, sh, -0.4, -0.4, sw + 0.8, sh + 0.8);
+          ctx.restore();
+        }
       }
     };
 
@@ -394,7 +564,7 @@ export default function DroneGame({ city, targetName, onClose }) {
         const mts = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
         recMime = mts.find((m) => window.MediaRecorder.isTypeSupported(m)) || "";
         if (!recMime) return;
-        rec = new window.MediaRecorder(canvas.captureStream(30), { mimeType: recMime, videoBitsPerSecond: 3500000 });
+        rec = new window.MediaRecorder(canvas.captureStream(30), { mimeType: recMime, videoBitsPerSecond: 2000000 });
         chunks = [];
         rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         rec.onstop = () => {
@@ -409,6 +579,7 @@ export default function DroneGame({ city, targetName, onClose }) {
     const stopRec = (drop) => { discard = !!drop; try { if (rec && rec.state !== "inactive") rec.stop(); } catch (e) { /* ok */ } rec = null; };
 
     const finishReplay = () => {
+      try { canvas.toBlob((bl) => { thumbRef.current = bl; }, "image/jpeg", 0.8); } catch (e) { thumbRef.current = null; }
       stopRec(false);
       S.mode = "burn"; S.timeScale = 1; S.rep = null;
       setPh("replayEnd");
@@ -570,11 +741,39 @@ export default function DroneGame({ city, targetName, onClose }) {
       fillWorld([[-148, 0.02, C.zStart - 13], [148, 0.02, C.zStart - 13], [148, 0.02, C.zEnd], [-148, 0.02, C.zEnd]], "#5c625c");
       // дороги
       const road = (x0, x1, z0, z1, col) => fillWorld([[x0, 0.05, z0], [x1, 0.05, z0], [x1, 0.05, z1], [x0, 0.05, z1]], col);
-      road(-6.5, 6.5, -260, C.zEnd + 20, "#33373a");
+      // тротуари вздовж проспекту, перехрестя, потім суцільний проспект поверх них
+      for (const pk of C.parks) {
+        if (Math.abs(pk.z - cz0) > 260) continue;
+        road(pk.x - 11, pk.x + 11, pk.z - 11, pk.z + 11, "#74b85f");
+        road(pk.x - 1, pk.x + 1, pk.z - 11, pk.z + 11, "#c9c2a4");
+        road(pk.x - 11, pk.x + 11, pk.z - 1, pk.z + 1, "#c9c2a4");
+      }
+      // провулки в передмісті
+      for (const lz of C.lanes) {
+        road(10, 120, lz - 3, lz + 3, "#4a4e51"); road(-120, -10, lz - 3, lz + 3, "#4a4e51");
+        road(10, 120, lz - 4.4, lz - 3, "#9a9d98"); road(10, 120, lz + 3, lz + 4.4, "#9a9d98");
+        road(-120, -10, lz - 4.4, lz - 3, "#9a9d98"); road(-120, -10, lz + 3, lz + 4.4, "#9a9d98");
+      }
+      road(-14, -10, -230, C.zEnd + 20, "#8d9290");
+      road(10, 14, -230, C.zEnd + 20, "#8d9290");
       for (let z = C.zStart - 13; z <= C.zEnd; z += C.cell) road(-148, 148, z - 3.5, z + 3.5, "#3d4144");
-      for (let x = -143; x <= 143; x += C.cell) if (Math.abs(x) > 8) road(x - 3.5, x + 3.5, C.zStart - 13, C.zEnd, "#3d4144");
-      const dz0 = Math.floor((cz0 - 60) / 10) * 10;
-      for (let z = dz0; z < dz0 + 340; z += 10) { if (z < -260) continue; road(-0.35, 0.35, z, z + 5, "#f2f2f2"); }
+      for (let x = -143; x <= 143; x += C.cell) if (Math.abs(x) > 14) road(x - 3.5, x + 3.5, C.zStart - 13, C.zEnd, "#3d4144");
+      road(-10, 10, -260, C.zEnd + 20, "#33373a");
+      // розмітка: суцільні лінії по краях, пунктир між смугами й посередині
+      road(-9.6, -9.2, -260, C.zEnd + 20, "#e8e8e8");
+      road(9.2, 9.6, -260, C.zEnd + 20, "#e8e8e8");
+      // пішохідні переходи на перехрестях біля камери
+      for (let rc = C.zStart - 13; rc <= C.zEnd; rc += C.cell) {
+        if (Math.abs(rc - cz0) > 150) continue;
+        for (let x = -8.4; x <= 8.4; x += 2.1) road(x - 0.45, x + 0.45, rc - 6.2, rc - 3.9, "#ececec");
+      }
+      const dz0 = Math.floor((cz0 - 60) / 12) * 12;
+      for (let z = dz0; z < dz0 + 360; z += 12) {
+        if (z < -260 || z > C.zEnd + 20) continue;
+        road(-0.3, 0.3, z, z + 6, "#f4f4f4");
+        road(-5.15, -4.85, z, z + 4, "#d8d8d8");
+        road(4.85, 5.15, z, z + 4, "#d8d8d8");
+      }
       // підсвітка зони цілі (зелений квадрат навколо): допомагає знайти
       winBudget = 900;
       // упорядкування: дальні першими
@@ -582,18 +781,21 @@ export default function DroneGame({ city, targetName, onClose }) {
       for (const it of items) {
         const dx = it.cx - cx0, dz = it.cz - cz0, dy = (it.cy || 0) - cy0;
         const d2 = dx * dx + dz * dz + dy * dy;
-        if (d2 > 640 * 640) continue;
+        const far = it.far || 640;
+        if (d2 > far * far) continue;
         const pz = dx * fX + dz * fZ;
         if (pz < -45) continue;
-        dr.push({ it, d2 });
+        dr.push({ it, d2: d2 - (it.ly || 0) * 60 });
       }
       dr.push({ it: { type: "drone" }, d2: (S.p.x - cx0) ** 2 + (S.p.z - cz0) ** 2 + (S.p.y - cy0) ** 2 });
       dr.sort((a, b) => b.d2 - a.d2);
       // вікна найближчим: рахуємо в зворотному порядку не будемо; бюджет лишаємо першим-бо-далеким → нижчий дистанцій. Тому ліміт по відстані 150
       for (const { it, d2 } of dr) {
-        const dist = Math.sqrt(d2);
+        const dist = Math.sqrt(Math.max(0, d2));
         if (it.type === "box") drawBox(it, dist);
         else if (it.type === "tree") drawTree(it, dist);
+        else if (it.type === "lamp") drawLamp(it, dist);
+        else if (it.type === "roof") drawRoof(it, dist);
         else if (it.type === "sign") drawSign(it, dist);
         else if (it.type === "drone") { if (!S.exploded) drawDrone(dist); }
       }
@@ -740,6 +942,11 @@ export default function DroneGame({ city, targetName, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [city, round]);
 
+  useEffect(() => {
+    if (video && autoSaveRef.current) { autoSaveRef.current = false; saveVideo(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [video]);
+
   const btn = { padding: "12px 22px", borderRadius: 12, border: "none", fontWeight: 800, fontSize: 15, color: "#fff", background: "linear-gradient(180deg,#3b8cff,#1f64d6)", boxShadow: "0 4px 0 #14439a", cursor: "pointer" };
   const btn2 = { ...btn, background: "linear-gradient(180deg,#667,#445)", boxShadow: "0 4px 0 #223" };
   const btnG = { ...btn, background: "linear-gradient(180deg,#3fc25a,#1f9a3c)", boxShadow: "0 4px 0 #136b28" };
@@ -750,21 +957,83 @@ export default function DroneGame({ city, targetName, onClose }) {
     setPh("play"); setRound((r) => r + 1);
   };
   const startReplay = () => { setShareMsg(""); setVideo(null); setPh("replay"); if (stateRef.current) stateRef.current.startReplay(); };
-  const gameLink = (import.meta.env && import.meta.env.VITE_GAME_LINK) || window.location.origin;
-  const shareText = `🚁 Мій удар дроном по місту ${city?.name || ""}${targetName ? " (" + targetName + ")" : ""} у World Clicker! ${result ? "🎯 Влучив у ціль — місто у вогні 🔥" : "💥 Не влучив у ціль, але було видовищно!"}\nЗаходь і спробуй сам: ${gameLink}`;
-  const saveVideo = () => {
-    if (!video) return;
+  const GAME_TAG = "@worldclicker_bot";
+  const shareText = `🚁 Мій удар дроном по місту ${city?.name || ""}${targetName ? " (" + targetName + ")" : ""} у World Clicker! ${result ? "🎯 Влучив у ціль — місто у вогні 🔥" : "💥 Не влучив у ціль, але було видовищно!"}\nГрай у ${GAME_TAG}`;
+  const SB_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
+  const SB_KEY = "sb_publishable_Kp13ZD0NtWypUYegahB35g_X2nOWmzn";
+  const apiPost = async (payload) => {
+    const r = await fetch("/api/drone-share", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, initData: window.Telegram?.WebApp?.initData || "" }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "Помилка сервера");
+    return j;
+  };
+  const uploadSigned = async (path, token, blob, mime) => {
+    const fd = new window.FormData();
+    fd.append("cacheControl", "3600");
+    fd.append("", blob);
+    const r = await fetch(`${SB_URL}/storage/v1/object/upload/sign/drone-replays/${path}?token=${encodeURIComponent(token)}`, {
+      method: "PUT", headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, "x-upsert": "true" }, body: fd,
+    });
+    if (!r.ok) throw new Error("Не вдалося завантажити відео");
+    void mime;
+  };
+  const saveVideo = async () => {
+    if (!video || sharing) return;
+    setShareMsg("");
+    const tg = window.Telegram && window.Telegram.WebApp;
+    // у Telegram звичайне завантаження з сторінки часто заблоковане: даємо Telegram публічне посилання, і він сам зберігає файл
+    if (tg && tg.initData && typeof tg.downloadFile === "function") {
+      setSharing(true); setShareMsg("Готуємо файл…");
+      try {
+        const init = await apiPost({ action: "init", mime: video.mime });
+        await uploadSigned(init.path, init.token, video.blob, video.mime);
+        setSharing(false); setShareMsg("");
+        tg.downloadFile({ url: init.url, file_name: `drone-strike.${video.ext}` }, (ok) => setShareMsg(ok ? "Відео збережено ✓" : ""));
+        return;
+      } catch (e) { setSharing(false); setShareMsg(""); }
+    }
     try {
       const url = URL.createObjectURL(video.blob);
       const a = document.createElement("a");
       a.href = url; a.download = `drone-strike.${video.ext}`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 8000);
-      setShareMsg("Відео збережено. Додай його до повідомлення в Telegram.");
+      setShareMsg("Відео збережено на пристрій.");
     } catch (e) { setShareMsg("Не вдалося зберегти відео на цьому пристрої."); }
   };
+  // «Завантажити відео» після удару: якщо повтор ще не записаний — запускаємо його (відео записується під час перегляду)
+  const downloadFromResult = () => {
+    if (video) { saveVideo(); return; }
+    autoSaveRef.current = true;
+    startReplay();
+  };
   const shareVideo = async () => {
+    if (sharing) return;
     setShareMsg("");
+    const tg = window.Telegram && window.Telegram.WebApp;
+    // 1) у Telegram: відео вантажиться на сервер, і бот створює повідомлення з відео для вибору чату
+    if (video && tg && tg.initData) {
+      setSharing(true); setShareMsg("Готуємо відео до відправки…");
+      try {
+        const init = await apiPost({ action: "init", mime: video.mime });
+        await uploadSigned(init.path, init.token, video.blob, video.mime);
+        const thumb = thumbRef.current || new Blob([], { type: "image/jpeg" });
+        await uploadSigned(init.thumbPath, init.thumbToken, thumb, "image/jpeg");
+        const r = await apiPost({ action: "send", path: init.path, thumbPath: init.thumbPath, caption: shareText });
+        setSharing(false);
+        if (r.preparedId && tg.shareMessage) {
+          setShareMsg("");
+          tg.shareMessage(r.preparedId, (ok) => { if (ok) setShareMsg("Відео надіслано ✓"); });
+          return;
+        }
+        setShareMsg("Відео надіслано тобі в чат з ботом — перешли його друзям.");
+        return;
+      } catch (e) {
+        setSharing(false);
+        setShareMsg(String(e && e.message ? e.message : "Не вдалося надіслати відео"));
+      }
+    }
+    // 2) поза Telegram: системне меню «Поділитися» з файлом
     if (video) {
       try {
         const file = new window.File([video.blob], `drone-strike.${video.ext}`, { type: video.mime });
@@ -776,11 +1045,10 @@ export default function DroneGame({ city, targetName, onClose }) {
         if (e && e.name === "AbortError") return;
       }
     }
-    // запасний шлях: посилання в Telegram з описом; відео можна зберегти кнопкою нижче
-    const u = `https://t.me/share/url?url=${encodeURIComponent(gameLink)}&text=${encodeURIComponent(shareText)}`;
-    const tg = window.Telegram && window.Telegram.WebApp;
+    // 3) запасний шлях: Telegram з текстом (відео можна зберегти кнопкою)
+    const u = `https://t.me/share/url?url=&text=${encodeURIComponent(shareText)}`;
     if (tg && tg.openTelegramLink) tg.openTelegramLink(u); else window.open(u, "_blank");
-    if (video) setShareMsg("Цей пристрій не може надіслати відео напряму: збережи його кнопкою «Зберегти відео» і додай до повідомлення.");
+    if (video) setShareMsg("Відео напряму надіслати не вдалося: збережи його кнопкою «Зберегти відео» і додай до повідомлення.");
   };
   const onX = () => {
     if (phase === "replay") { if (stateRef.current) stateRef.current.stopReplay(); return; }
@@ -815,6 +1083,7 @@ export default function DroneGame({ city, targetName, onClose }) {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", marginTop: 4 }}>
             <button type="button" style={btn} onClick={retry}>Атакувати ще раз</button>
             <button type="button" style={btnG} onClick={startReplay}>🎬 Повтор і поділитися</button>
+            <button type="button" style={btn} onClick={downloadFromResult} disabled={sharing}>⬇ Завантажити відео</button>
             <button type="button" style={btn2} onClick={() => finish(result)}>В меню</button>
           </div>
         </div>
@@ -825,7 +1094,7 @@ export default function DroneGame({ city, targetName, onClose }) {
           <div style={{ fontSize: 13, opacity: 0.85, maxWidth: 320 }}>{video ? "Останні секунди польоту з різних ракурсів і слоу-мо удару." : "Цей пристрій не записує відео, але можна поділитися описом."}</div>
           {shareMsg && <div style={{ fontSize: 12, color: "#ffd9a0", maxWidth: 320 }}>{shareMsg}</div>}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center" }}>
-            <button type="button" style={btnG} onClick={shareVideo}>📤 Поділитися в Telegram</button>
+            <button type="button" style={btnG} onClick={shareVideo} disabled={sharing}>{sharing ? "Надсилаємо…" : "📤 Поділитися відео"}</button>
             {video && <button type="button" style={btn} onClick={saveVideo}>Зберегти відео</button>}
             <button type="button" style={btn} onClick={startReplay}>Ще раз</button>
             <button type="button" style={btn2} onClick={() => setPh("result")}>Назад</button>
