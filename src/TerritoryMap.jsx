@@ -36,25 +36,84 @@ export const MAP_COLORS = {
 
 const OWNER_OPACITY = 0.9;
 
-// М'який «градієнт» суші: вільні області мають 4 близькі відтінки зеленого (за id області).
-const FREE_LAND = ["match", ["%", ["id"], 4], 0, "#8ad84f", 1, "#79cf45", 2, "#9be05d", "#84d44c"];
+// Біоми: кожна область отримує тип місцевості (пустеля, тайга, тропіки…) і один з 3 відтінків його кольору.
+const BIOME_COLORS = [
+  ["#8ad84f", "#79cf45", "#9be05d"], // 0 помірний
+  ["#4fc24a", "#3fb54a", "#62cf55"], // 1 тропіки
+  ["#ecd28c", "#e2c17a", "#f3dc9f"], // 2 пустеля
+  ["#c6d062", "#b9c859", "#d0d97a"], // 3 степ / савана
+  ["#4f9a58", "#5aa862", "#468f52"], // 4 тайга (Сибір, Скандинавія)
+  ["#b9d4c4", "#c9dfd0", "#aecbbb"], // 5 тундра
+  ["#eef6fb", "#e2eff7", "#f6fbfe"], // 6 лід
+  ["#aacb5a", "#9cbf4f", "#b9d469"], // 7 середземноморський
+];
+const FREE_LAND_FALLBACK = "#8ad84f";
 
-// Мультяшне дерево: малюється один раз на canvas і додається як іконка (дешево для GPU).
-function makeTreeImage() {
+// Вираз кольору суші за id області: один плоский "match" без feature-state (дешево для GPU).
+function biomeExpression(biomes, indexByRid) {
+  const groups = new Map();
+  for (const rid in biomes) {
+    const idx = indexByRid.get(rid);
+    if (idx === undefined) continue;
+    const col = BIOME_COLORS[biomes[rid]][idx % 3];
+    if (!groups.has(col)) groups.set(col, []);
+    groups.get(col).push(idx);
+  }
+  if (!groups.size) return FREE_LAND_FALLBACK;
+  const expr = ["match", ["id"]];
+  for (const [col, ids] of groups) expr.push(ids, col);
+  expr.push(FREE_LAND_FALLBACK);
+  return expr;
+}
+
+// Мультяшні іконки декору малюються один раз на canvas (одна маленька картинка на тип).
+const DECOR_ICONS = ["tree", "pine", "palm", "cactus", "bush", "rock", "house", "hut", "tower", "factory"];
+function makeDecorImage(name) {
   const s = 40;
   const c = document.createElement("canvas");
   c.width = c.height = s;
   const g = c.getContext("2d");
-  g.fillStyle = "rgba(20,70,20,0.28)";
-  g.beginPath(); g.ellipse(20, 35, 10, 3.2, 0, 0, Math.PI * 2); g.fill();
-  g.fillStyle = "#7a4a22";
-  g.fillRect(18, 24, 4, 11);
+  if (!g.roundRect) g.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); };
   const blob = (x, y, r, col) => { g.fillStyle = col; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); };
-  blob(13, 20, 8, "#2f9a3a");
-  blob(27, 20, 8, "#2f9a3a");
-  blob(20, 13, 9.5, "#3cb54a");
-  blob(17, 11, 4, "#5fd06a");
-  g.strokeStyle = "rgba(15,70,25,0.55)"; g.lineWidth = 1;
+  const rect = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+  const tri = (x1, y1, x2, y2, x3, y3, col) => { g.fillStyle = col; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.lineTo(x3, y3); g.closePath(); g.fill(); };
+  g.fillStyle = "rgba(20,60,20,0.25)"; g.beginPath(); g.ellipse(20, 35, 11, 3.2, 0, 0, Math.PI * 2); g.fill();
+  if (name === "tree") {
+    rect(18, 24, 4, 11, "#7a4a22");
+    blob(13, 20, 8, "#2f9a3a"); blob(27, 20, 8, "#2f9a3a"); blob(20, 13, 9.5, "#3cb54a"); blob(17, 11, 4, "#5fd06a");
+  } else if (name === "pine") {
+    rect(18, 28, 4, 7, "#6b4120");
+    tri(20, 3, 7, 18, 33, 18, "#1f7a3c"); tri(20, 10, 5, 26, 35, 26, "#2a8f48"); tri(20, 17, 3, 32, 37, 32, "#34a355");
+  } else if (name === "palm") {
+    g.strokeStyle = "#8a5a2b"; g.lineWidth = 3.5; g.beginPath(); g.moveTo(19, 35); g.quadraticCurveTo(23, 22, 20, 12); g.stroke();
+    g.fillStyle = "#2fb04a";
+    for (const a of [-2.6, -1.9, -1.25, -0.55]) { g.beginPath(); g.ellipse(20 + Math.cos(a) * 8, 12 - Math.sin(a) * -4 + 1, 8, 2.8, a, 0, Math.PI * 2); g.fill(); }
+    blob(20, 12, 2.5, "#7a4a22");
+  } else if (name === "cactus") {
+    g.fillStyle = "#3d9a4a";
+    g.beginPath(); g.roundRect(16, 8, 8, 27, 4); g.fill();
+    g.beginPath(); g.roundRect(7, 15, 5, 12, 2.5); g.fill(); rect(9, 24, 9, 4, "#3d9a4a");
+    g.beginPath(); g.roundRect(28, 11, 5, 11, 2.5); g.fill(); rect(22, 19, 8, 4, "#3d9a4a");
+    rect(19, 10, 1.6, 22, "#5fbd6a");
+  } else if (name === "bush") {
+    blob(12, 27, 7, "#4a9a3a"); blob(28, 27, 7, "#4a9a3a"); blob(20, 23, 9, "#5cb04a"); blob(17, 20, 3.5, "#7fd06a");
+  } else if (name === "rock") {
+    g.fillStyle = "#a99372"; g.beginPath(); g.moveTo(8, 33); g.lineTo(13, 21); g.lineTo(21, 17); g.lineTo(29, 23); g.lineTo(33, 33); g.closePath(); g.fill();
+    tri(21, 17, 29, 23, 21, 33, "rgba(0,0,0,0.12)");
+  } else if (name === "house") {
+    rect(9, 20, 22, 14, "#f4ead0"); tri(5, 21, 20, 7, 35, 21, "#d6452f"); rect(17, 26, 6, 8, "#7a4a22"); rect(11, 23, 4, 4, "#7fc4f0"); rect(25, 23, 4, 4, "#7fc4f0");
+  } else if (name === "hut") {
+    rect(11, 24, 18, 10, "#c79a62"); tri(7, 25, 20, 11, 33, 25, "#d9b24a"); rect(18, 28, 5, 6, "#6b4120");
+  } else if (name === "tower") {
+    rect(6, 18, 11, 17, "#9fb0c2"); rect(18, 5, 12, 30, "#7f93a8"); rect(30, 22, 6, 13, "#9fb0c2");
+    g.fillStyle = "#e9f4ff";
+    for (let yy = 9; yy < 32; yy += 6) { g.fillRect(21, yy, 3, 3); g.fillRect(26, yy, 3, 3); }
+    for (let yy = 22; yy < 32; yy += 6) { g.fillRect(8, yy, 3, 3); g.fillRect(12, yy, 3, 3); }
+  } else if (name === "factory") {
+    rect(6, 20, 26, 15, "#b9a58a"); rect(24, 6, 6, 16, "#8a7864"); rect(25, 3, 4, 3, "#6b5a48");
+    tri(6, 20, 6, 14, 14, 20, "#a08f78"); tri(14, 20, 14, 14, 22, 20, "#a08f78");
+    rect(10, 27, 5, 8, "#6b5a48"); blob(31, 3, 3, "rgba(255,255,255,0.7)");
+  }
   return g.getImageData(0, 0, s, s);
 }
 
@@ -403,16 +462,28 @@ const TerritoryMap = forwardRef(function TerritoryMap(
 
         // Карта без текстур: чисті плоскі кольори суші й води.
 
+        let landColor = FREE_LAND_FALLBACK;
+        try {
+          const biomes = await (await fetch("/data/biomes.json")).json();
+          landColor = biomeExpression(biomes, model.indexByRid);
+        } catch (e) { /* без біомів — один зелений */ }
+        // Нижній шар без згладжування: суцільна суша без швів між областями (замість просвітів води).
+        map.addLayer({
+          id: "regions-base",
+          type: "fill",
+          source: "regions",
+          paint: { "fill-color": landColor, "fill-antialias": false },
+        });
         map.addLayer({
           id: "regions-fill",
           type: "fill",
           source: "regions",
           paint: {
-            "fill-color": ["to-color", ["coalesce", ["feature-state", "c"], FREE_LAND]],
+            "fill-color": ["to-color", ["coalesce", ["feature-state", "c"], landColor]],
             // Контур того ж кольору, що й заливка: перекриває тонкі просвіти між сусідніми областями
             // (безпечніше й легше за окремий лінійний шар, який раніше валив гру).
-            "fill-outline-color": ["to-color", ["coalesce", ["feature-state", "c"], FREE_LAND]],
-            "fill-opacity": ["case", ["==", regionOwner, ""], 0.92, OWNER_OPACITY],
+            "fill-outline-color": ["to-color", ["coalesce", ["feature-state", "c"], landColor]],
+            "fill-opacity": ["case", ["==", regionOwner, ""], 0, OWNER_OPACITY],
           },
         });
         // Текстура суші: виразна на вільних територіях, ледь помітна на зайнятих.
@@ -473,21 +544,29 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           },
         });
 
-        // Дерева: лише на середніх масштабах і з однієї дешевої іконки.
+        // Декор: дерева/кущі/кактуси за біомом і будинки поблизу міст. Лише на середніх масштабах.
         (async () => {
           try {
-            if (!map.hasImage("tree")) map.addImage("tree", makeTreeImage(), { pixelRatio: 2 });
-            const tj = await (await fetch("/data/trees.json")).json();
+            for (const n of DECOR_ICONS) if (!map.hasImage("d-" + n)) map.addImage("d-" + n, makeDecorImage(n), { pixelRatio: 2 });
+            const dj = await (await fetch("/data/decor.json")).json();
             if (cancelled || !mapRef.current) return;
+            const arr = dj.p;
             const feats = [];
-            const arr = tj.p;
-            for (let i = 0; i < arr.length; i += 4) feats.push({ type: "Feature", properties: { t: arr[i + 3] }, geometry: { type: "Point", coordinates: [arr[i], arr[i + 1]] } });
-            map.addSource("trees", { type: "geojson", data: { type: "FeatureCollection", features: feats } });
-            const before = ["geolabels-" + GEO_TIERS[0].tier, "cities-glow"].find((id) => map.getLayer(id));
-            const common = { type: "symbol", source: "trees", layout: { "icon-image": "tree", "icon-allow-overlap": false, "icon-ignore-placement": true, "icon-size": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 6, 0.8, 8, 1] }, paint: { "icon-opacity": ["interpolate", ["linear"], ["zoom"], 3, 0, 3.6, 0.95, 7.2, 0.95, 8, 0] } };
-            map.addLayer({ ...common, id: "trees-far", minzoom: 3, maxzoom: 8, filter: ["==", ["get", "t"], 0] }, before);
-            map.addLayer({ ...common, id: "trees-near", minzoom: 4.6, maxzoom: 8, filter: ["==", ["get", "t"], 1] }, before);
-          } catch (e) { /* дерева — просто декор */ }
+            for (let i = 0; i < arr.length; i += 4) feats.push({ type: "Feature", properties: { k: arr[i + 2], t: arr[i + 3] }, geometry: { type: "Point", coordinates: [arr[i], arr[i + 1]] } });
+            map.addSource("decor", { type: "geojson", data: { type: "FeatureCollection", features: feats } });
+            const before = ["geolabels-" + GEO_TIERS[0].tier].find((id) => map.getLayer(id));
+            const icon = ["match", ["get", "k"], 0, "d-tree", 1, "d-pine", 2, "d-palm", 3, "d-cactus", 4, "d-bush", 5, "d-rock", 6, "d-house", 7, "d-hut", 8, "d-tower", "d-factory"];
+            const mk = (id, tier, minzoom, maxzoom, k0, k1) => map.addLayer({
+              id, type: "symbol", source: "decor", minzoom, maxzoom, filter: ["==", ["get", "t"], tier],
+              layout: { "icon-image": icon, "icon-allow-overlap": true, "icon-ignore-placement": true, "icon-size": ["interpolate", ["linear"], ["zoom"], minzoom, k0, minzoom + 3, k1] },
+              paint: { "icon-opacity": ["interpolate", ["linear"], ["zoom"], minzoom, 0, minzoom + 0.6, 1] },
+            }, before);
+            mk("decor-far", 0, 3, 9, 0.45, 0.8);
+            mk("decor-near", 1, 4.6, 9, 0.5, 0.8);
+            mk("decor-major", 2, 4.8, 13, 0.4, 0.85);
+            mk("decor-mid", 3, 5.8, 13, 0.4, 0.8);
+            mk("decor-small", 4, 6.6, 13, 0.4, 0.75);
+          } catch (e) { /* декор — просто прикраса */ }
         })();
 
         // Підписи природних об'єктів: під містами й ігровими об'єктами, але над областями.
@@ -904,29 +983,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 360 }}>
       <style>{`
         @keyframes cn-tmap-spin { to { transform: rotate(360deg); } }
-        @keyframes cn-cloud-drift { from { transform: translate3d(-45vw,0,0); } to { transform: translate3d(130vw,0,0); } }
-        .cn-clouds { position:absolute; inset:0; pointer-events:none; overflow:hidden; border-radius:12px; z-index:2; }
-        .cn-cloud { position:absolute; left:0; width:150px; height:56px; opacity:.55; will-change:transform; animation: cn-cloud-drift linear infinite; }
-        .cn-cloud i { position:absolute; background:#fff; border-radius:50%; filter:blur(3px); }
-        @media (prefers-reduced-motion: reduce) { .cn-cloud { animation:none; } }
       `}</style>
       <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden", background: "radial-gradient(ellipse at 50% 35%, #3a9bf5 0%, #1f7fe8 60%, #1768c9 100%)" }} />
-      <div className="cn-clouds" aria-hidden="true">
-        {[
-          { top: "3%", s: 1, d: 95, o: 0 },
-          { top: "10%", s: 0.7, d: 130, o: -60 },
-          { top: "84%", s: 1.2, d: 110, o: -30 },
-          { top: "91%", s: 0.8, d: 150, o: -100 },
-          { top: "48%", s: 0.6, d: 170, o: -140 },
-        ].map((c, k) => (
-          <div key={k} className="cn-cloud" style={{ top: c.top, scale: String(c.s), animationDuration: c.d + "s", animationDelay: c.o + "s", opacity: c.s < 0.7 ? 0.35 : 0.55 }}>
-            <i style={{ left: 8, top: 22, width: 60, height: 30 }} />
-            <i style={{ left: 38, top: 6, width: 62, height: 40 }} />
-            <i style={{ left: 78, top: 18, width: 62, height: 32 }} />
-            <i style={{ left: 30, top: 26, width: 90, height: 26 }} />
-          </div>
-        ))}
-      </div>
 
       {status !== "error" && !veilGone && (
         <div
