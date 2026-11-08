@@ -9,6 +9,7 @@
 // (необов'язково) WEBAPP_URL — посилання на гру для кнопки «Відкрити гру».
 
 import { verifyTelegramInitData } from "./_telegramAuth.js";
+import { rateLimit, clientIp } from "./_security.js";
 
 const SUPABASE_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
 const PLAYER_PREFIX = "players:";
@@ -77,7 +78,15 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Сервер не налаштований" });
     return;
   }
+  if (!rateLimit("notify:" + clientIp(req), 10, 60_000)) {
+    res.status(429).json({ error: "Забагато запитів" });
+    return;
+  }
   const { initData, warId, attackerName, defenderName } = req.body || {};
+  if (typeof warId !== "string" || !/^[\w-]{1,40}$/.test(warId)) {
+    res.status(400).json({ error: "Некоректний запит" });
+    return;
+  }
   const user = verifyTelegramInitData(initData, BOT_TOKEN);
   if (!user || !warId) {
     res.status(401).json({ error: "Не вдалося підтвердити користувача" });

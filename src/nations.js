@@ -66,8 +66,16 @@ export function pickFreeColor(countries) {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+/* Прибирає керівні й невидимі символи (зокрема RTL-підміну тексту) */
+export function sanitizeName(name) {
+  return String(name || "")
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function validateCountryName(name, countries) {
-  const n = String(name || "").trim().replace(/\s+/g, " ");
+  const n = sanitizeName(name);
   if (n.length < NAME_MIN) return `Назва має містити щонайменше ${NAME_MIN} символи`;
   if (n.length > NAME_MAX) return `Назва не може бути довшою за ${NAME_MAX} символів`;
   const key = normName(n);
@@ -82,7 +90,7 @@ export async function createCountry({ name, color, leaderId, regionId }) {
   const claim = await sbStorageInsertIfAbsent(TERRITORY_PREFIX + regionId, id, true);
   if (claim === "exists") return { ok: false, taken: true, reason: "Цю територію щойно зайняла інша країна. Обери іншу." };
   if (claim !== "ok") return { ok: false, reason: "Не вдалося зв'язатися з базою даних. Спробуй ще раз." };
-  const country = { id, name: String(name).trim().replace(/\s+/g, " "), color, leaderId, createdAt: Date.now(), regionIds: [regionId] };
+  const country = { id, name: sanitizeName(name).slice(0, NAME_MAX), color, leaderId, createdAt: Date.now(), regionIds: [regionId] };
   const saved = await sbStorageSet(COUNTRY_PREFIX + id, JSON.stringify(country), true);
   if (!saved) return { ok: false, reason: "Не вдалося зберегти країну. Спробуй ще раз." };
   return { ok: true, country };

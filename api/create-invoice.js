@@ -9,7 +9,9 @@
 // реальне підтвердження оплати (successful_payment) на /api/webhook,
 // сервер точно знав, кому видавати Premium Pass — а не довіряв клієнту.
 
+import crypto from "crypto";
 import { verifyTelegramInitData } from "./_telegramAuth.js";
+import { rateLimit, clientIp } from "./_security.js";
 
 const SUPABASE_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
 const SUPABASE_KEY = "sb_publishable_Kp13ZD0NtWypUYegahB35g_X2nOWmzn";
@@ -24,7 +26,7 @@ async function getPremiumPassPrice() {
     const rows = await res.json();
     if (Array.isArray(rows) && rows[0]?.value) {
       const parsed = Number(JSON.parse(rows[0].value));
-      if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
+      if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 10000) return Math.round(parsed);
     }
   } catch {
     /* якщо запит не вдався — використовуємо ціну за замовчуванням */
@@ -44,6 +46,10 @@ export default async function handler(req, res) {
     return;
   }
 
+  if (!rateLimit("invoice:" + clientIp(req), 20, 60_000)) {
+    res.status(429).json({ error: "Забагато запитів. Спробуй за хвилину" });
+    return;
+  }
   const { initData } = req.body || {};
   const user = verifyTelegramInitData(initData, BOT_TOKEN);
   if (!user) {
@@ -53,7 +59,7 @@ export default async function handler(req, res) {
 
   try {
     const price = await getPremiumPassPrice();
-    const nonce = Math.random().toString(36).slice(2, 10);
+    const nonce = crypto.randomBytes(6).toString("hex");
     const payload = `premium_pass:${user.id}:${nonce}`;
 
     const tgRes = await fetch(
@@ -75,12 +81,14 @@ export default async function handler(req, res) {
     const data = await tgRes.json();
 
     if (!data.ok) {
-      res.status(500).json({ error: data.description || "Помилка Telegram API" });
+      console.error("create-invoice telegram error:", data.description);
+      res.status(500).json({ error: "Не вдалося створити платіж" });
       return;
     }
 
     res.status(200).json({ link: data.result, price });
   } catch (err) {
-    res.status(500).json({ error: err?.message || "Невідома помилка сервера" });
+    console.error("create-invoice error:", err?.message || err);
+    res.status(500).json({ error: "Помилка сервера" });
   }
 }

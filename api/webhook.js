@@ -13,16 +13,10 @@
 // використовуємо окремий ключ-мапінг tgmap:{telegramId} -> playerId,
 // який пише клієнт при створенні гравця (див. createPlayer у App.jsx).
 
-const SUPABASE_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
+import { safeEqual, SUPABASE_URL, serviceHeaders } from "./_security.js";
+
 const PLAYER_PREFIX = "players:";
 const TG_MAP_PREFIX = "tgmap:";
-
-function serviceHeaders() {
-  return {
-    apikey: process.env.SUPABASE_SERVICE_KEY,
-    Authorization: `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
-  };
-}
 
 async function sbGet(key) {
   const res = await fetch(
@@ -72,6 +66,36 @@ async function grantPremiumPass(telegramId) {
   return sbPatch(playerKey, JSON.stringify(updated));
 }
 
+/* Перевіряємо оплату НАПРЯМУ в Telegram: чи є в транзакціях бота платіж із таким charge id від цього користувача.
+   Так підроблений "successful_payment" (POST будь-кого на цей URL) не дасть Premium. */
+async function verifyStarPayment(botToken, chargeId, userId) {
+  if (!chargeId) return false;
+  for (let offset = 0; offset < 500; offset += 100) {
+    const r = await fetch(`https://api.telegram.org/bot${botToken}/getStarTransactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offset, limit: 100 }),
+    });
+    const d = await r.json().catch(() => null);
+    const list = d?.ok ? d.result?.transactions : null;
+    if (!Array.isArray(list)) return false;
+    const hit = list.find((t) => String(t.id) === String(chargeId));
+    if (hit) return String(hit.source?.user?.id ?? "") === String(userId) && Number(hit.amount) > 0;
+    if (list.length < 100) return false;
+  }
+  return false;
+}
+
+/* Запобігаємо повторній видачі за один і той самий платіж */
+async function claimPayment(chargeId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/kv_store`, {
+    method: "POST",
+    headers: { ...serviceHeaders(), "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ key: "payment:" + chargeId, value: String(Date.now()), shared: true }),
+  });
+  return res.ok;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(200).send("ok");
@@ -79,27 +103,45 @@ export default async function handler(req, res) {
   }
 
   const BOT_TOKEN = process.env.BOT_TOKEN;
+  /* Якщо задано TELEGRAM_WEBHOOK_SECRET — приймаємо лише запити з правильним секретним заголовком Telegram. */
+  const hookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (hookSecret && !safeEqual(req.headers["x-telegram-bot-api-secret-token"], hookSecret)) {
+    res.status(401).send("unauthorized");
+    return;
+  }
   const update = req.body || {};
 
   try {
-    if (update.pre_checkout_query && BOT_TOKEN) {
+    const pre = update.pre_checkout_query;
+    if (pre && BOT_TOKEN) {
+      const [kind, payloadId] = String(pre.invoice_payload || "").split(":");
+      const valid = kind === "premium_pass" && String(payloadId) === String(pre.from?.id) && pre.currency === "XTR";
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerPreCheckoutQuery`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pre_checkout_query_id: update.pre_checkout_query.id,
-          ok: true,
-        }),
+        body: JSON.stringify(
+          valid
+            ? { pre_checkout_query_id: pre.id, ok: true }
+            : { pre_checkout_query_id: pre.id, ok: false, error_message: "Невірні дані платежу" }
+        ),
       });
     }
 
     const payment = update.message?.successful_payment;
-    if (payment) {
+    if (payment && BOT_TOKEN) {
       const [kind, payloadId] = (payment.invoice_payload || "").split(":");
       const fromId = update.message?.from?.id;
-      if (kind === "premium_pass" && payloadId && String(payloadId) === String(fromId)) {
-        const ok = await grantPremiumPass(payloadId);
-        if (!ok) console.error("webhook: не вдалося видати Premium Pass:", payloadId);
+      const chargeId = payment.telegram_payment_charge_id;
+      if (kind === "premium_pass" && payloadId && String(payloadId) === String(fromId) && payment.currency === "XTR") {
+        const genuine = await verifyStarPayment(BOT_TOKEN, chargeId, fromId);
+        if (!genuine) {
+          console.warn("webhook: платіж не підтверджено Telegram (можливе підроблене повідомлення):", chargeId);
+        } else if (await claimPayment(chargeId)) {
+          const ok = await grantPremiumPass(payloadId);
+          if (!ok) console.error("webhook: не вдалося видати Premium Pass:", payloadId);
+        } else {
+          console.info("webhook: платіж уже оброблено:", chargeId);
+        }
       } else {
         console.warn("webhook: підозрілий successful_payment payload:", payment.invoice_payload);
       }

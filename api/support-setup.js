@@ -2,6 +2,8 @@
 // Відкрий у браузері: https://<твій-домен>/api/support-setup?key=<SUPPORT_WEBHOOK_SECRET>
 // Бот підключиться до /api/support-webhook. Токен нікуди не виводиться.
 
+import { safeEqual } from "./_security.js";
+
 export default async function handler(req, res) {
   const secret = process.env.SUPPORT_WEBHOOK_SECRET;
   const token = process.env.SUPPORT_BOT_TOKEN;
@@ -9,7 +11,7 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Не задано SUPPORT_WEBHOOK_SECRET або SUPPORT_BOT_TOKEN" });
     return;
   }
-  if (req.query?.key !== secret) {
+  if (!safeEqual(req.query?.key, secret)) {
     res.status(401).json({ error: "Невірний ключ" });
     return;
   }

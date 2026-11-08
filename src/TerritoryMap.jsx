@@ -387,6 +387,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "regions",
           paint: {
             "fill-color": ["to-color", ["coalesce", ["feature-state", "c"], MAP_COLORS.free]],
+            // Контур того ж кольору, що й заливка: перекриває тонкі просвіти між сусідніми областями
+            // (безпечніше й легше за окремий лінійний шар, який раніше валив гру).
+            "fill-outline-color": ["to-color", ["coalesce", ["feature-state", "c"], MAP_COLORS.free]],
             "fill-opacity": ["case", ["==", regionOwner, ""], 0.92, OWNER_OPACITY],
           },
         });

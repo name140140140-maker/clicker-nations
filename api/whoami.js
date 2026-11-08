@@ -2,7 +2,13 @@
 // Повертає IP клієнта (з заголовків Vercel), приблизну геолокацію та провайдера/оператора.
 // Використовується лише для адмін-інструментів гри (історія підключень гравця).
 
+import { rateLimit, clientIp } from "./_security.js";
+
 export default async function handler(req, res) {
+  if (!rateLimit("whoami:" + clientIp(req), 30, 60_000)) {
+    res.status(429).json({ error: "Забагато запитів" });
+    return;
+  }
   const xff = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
   const ip = xff || String(req.headers["x-real-ip"] || "") || req.socket?.remoteAddress || "";
   const dec = (v) => {

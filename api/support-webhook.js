@@ -16,6 +16,8 @@
 //   support:user:<tgId>   → { threadId, status, lastAt, name, rl }
 //   support:thread:<id>   → <tgId>
 
+import { safeEqual } from "./_security.js";
+
 const SUPABASE_URL = "https://zrpwgavfploiaqrqpcvv.supabase.co";
 const USER_PREFIX = "support:user:";
 const THREAD_PREFIX = "support:thread:";
@@ -268,7 +270,8 @@ export default async function handler(req, res) {
     return;
   }
   const secret = process.env.SUPPORT_WEBHOOK_SECRET;
-  if (secret && req.headers["x-telegram-bot-api-secret-token"] !== secret) {
+  // без секрету вебхук НЕ працює (раніше без нього приймав запити від будь-кого)
+  if (!secret || !safeEqual(req.headers["x-telegram-bot-api-secret-token"], secret)) {
     res.status(401).send("unauthorized");
     return;
   }
