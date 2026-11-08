@@ -24,17 +24,39 @@ const MAX_ZOOM = 12;
 const SOURCE_MAX_ZOOM = 8;
 
 export const MAP_COLORS = {
-  water: "#1a5cae", // чистий спокійний океан
-  free: "#86cf4e", // свіжа плоска зелень
+  water: "#1f7fe8", // насичений мультяшний океан
+  free: "#8ad84f", // яскраво-зелена суша
   border: "#0b2412",
   borderInternal: "#5fa83a",
   mine: "#ffffff",
   selected: "#ffd54a",
-  coast: "#e6ff8f", // світла облямівка узбережжя
-  glow: "#4fb0ff", // блакитне сяйво навколо суші
+  coast: "#f6ffc4", // світла облямівка узбережжя
+  glow: "#8fdcff", // світле сяйво навколо суші
 };
 
 const OWNER_OPACITY = 0.9;
+
+// М'який «градієнт» суші: вільні області мають 4 близькі відтінки зеленого (за id області).
+const FREE_LAND = ["match", ["%", ["id"], 4], 0, "#8ad84f", 1, "#79cf45", 2, "#9be05d", "#84d44c"];
+
+// Мультяшне дерево: малюється один раз на canvas і додається як іконка (дешево для GPU).
+function makeTreeImage() {
+  const s = 40;
+  const c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d");
+  g.fillStyle = "rgba(20,70,20,0.28)";
+  g.beginPath(); g.ellipse(20, 35, 10, 3.2, 0, 0, Math.PI * 2); g.fill();
+  g.fillStyle = "#7a4a22";
+  g.fillRect(18, 24, 4, 11);
+  const blob = (x, y, r, col) => { g.fillStyle = col; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); };
+  blob(13, 20, 8, "#2f9a3a");
+  blob(27, 20, 8, "#2f9a3a");
+  blob(20, 13, 9.5, "#3cb54a");
+  blob(17, 11, 4, "#5fd06a");
+  g.strokeStyle = "rgba(15,70,25,0.55)"; g.lineWidth = 1;
+  return g.getImageData(0, 0, s, s);
+}
 
 // Підписи міст потребують шрифтів (glyphs). Це публічний набір Noto Sans від Protomaps;
 // за потреби його можна покласти у public/fonts і змінити URL тут (див. src/map/README.md).
@@ -386,10 +408,10 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           type: "fill",
           source: "regions",
           paint: {
-            "fill-color": ["to-color", ["coalesce", ["feature-state", "c"], MAP_COLORS.free]],
+            "fill-color": ["to-color", ["coalesce", ["feature-state", "c"], FREE_LAND]],
             // Контур того ж кольору, що й заливка: перекриває тонкі просвіти між сусідніми областями
             // (безпечніше й легше за окремий лінійний шар, який раніше валив гру).
-            "fill-outline-color": ["to-color", ["coalesce", ["feature-state", "c"], MAP_COLORS.free]],
+            "fill-outline-color": ["to-color", ["coalesce", ["feature-state", "c"], FREE_LAND]],
             "fill-opacity": ["case", ["==", regionOwner, ""], 0.92, OWNER_OPACITY],
           },
         });
@@ -435,7 +457,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "borders",
           filter: ["==", ["get", "two"], 0],
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": ["case", isOwnedCoast, 0, 0.3] },
+          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": ["case", isOwnedCoast, 0.15, 0.5] },
         });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
         // рамка власної території, контур вибраної області.
@@ -450,6 +472,23 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isOwnedCoast, 0.95, isCoast, 0.85, 0.9],
           },
         });
+
+        // Дерева: лише на середніх масштабах і з однієї дешевої іконки.
+        (async () => {
+          try {
+            if (!map.hasImage("tree")) map.addImage("tree", makeTreeImage(), { pixelRatio: 2 });
+            const tj = await (await fetch("/data/trees.json")).json();
+            if (cancelled || !mapRef.current) return;
+            const feats = [];
+            const arr = tj.p;
+            for (let i = 0; i < arr.length; i += 4) feats.push({ type: "Feature", properties: { t: arr[i + 3] }, geometry: { type: "Point", coordinates: [arr[i], arr[i + 1]] } });
+            map.addSource("trees", { type: "geojson", data: { type: "FeatureCollection", features: feats } });
+            const before = ["geolabels-" + GEO_TIERS[0].tier, "cities-glow"].find((id) => map.getLayer(id));
+            const common = { type: "symbol", source: "trees", layout: { "icon-image": "tree", "icon-allow-overlap": false, "icon-ignore-placement": true, "icon-size": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 6, 0.8, 8, 1] }, paint: { "icon-opacity": ["interpolate", ["linear"], ["zoom"], 3, 0, 3.6, 0.95, 7.2, 0.95, 8, 0] } };
+            map.addLayer({ ...common, id: "trees-far", minzoom: 3, maxzoom: 8, filter: ["==", ["get", "t"], 0] }, before);
+            map.addLayer({ ...common, id: "trees-near", minzoom: 4.6, maxzoom: 8, filter: ["==", ["get", "t"], 1] }, before);
+          } catch (e) { /* дерева — просто декор */ }
+        })();
 
         // Підписи природних об'єктів: під містами й ігровими об'єктами, але над областями.
         try {
@@ -865,8 +904,29 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     <div style={{ position: "relative", width: "100%", height: "100%", minHeight: 360 }}>
       <style>{`
         @keyframes cn-tmap-spin { to { transform: rotate(360deg); } }
+        @keyframes cn-cloud-drift { from { transform: translate3d(-45vw,0,0); } to { transform: translate3d(130vw,0,0); } }
+        .cn-clouds { position:absolute; inset:0; pointer-events:none; overflow:hidden; border-radius:12px; z-index:2; }
+        .cn-cloud { position:absolute; left:0; width:150px; height:56px; opacity:.55; will-change:transform; animation: cn-cloud-drift linear infinite; }
+        .cn-cloud i { position:absolute; background:#fff; border-radius:50%; filter:blur(3px); }
+        @media (prefers-reduced-motion: reduce) { .cn-cloud { animation:none; } }
       `}</style>
-      <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden" }} />
+      <div ref={containerRef} style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden", background: "radial-gradient(ellipse at 50% 35%, #3a9bf5 0%, #1f7fe8 60%, #1768c9 100%)" }} />
+      <div className="cn-clouds" aria-hidden="true">
+        {[
+          { top: "3%", s: 1, d: 95, o: 0 },
+          { top: "10%", s: 0.7, d: 130, o: -60 },
+          { top: "84%", s: 1.2, d: 110, o: -30 },
+          { top: "91%", s: 0.8, d: 150, o: -100 },
+          { top: "48%", s: 0.6, d: 170, o: -140 },
+        ].map((c, k) => (
+          <div key={k} className="cn-cloud" style={{ top: c.top, scale: String(c.s), animationDuration: c.d + "s", animationDelay: c.o + "s", opacity: c.s < 0.7 ? 0.35 : 0.55 }}>
+            <i style={{ left: 8, top: 22, width: 60, height: 30 }} />
+            <i style={{ left: 38, top: 6, width: 62, height: 40 }} />
+            <i style={{ left: 78, top: 18, width: 62, height: 32 }} />
+            <i style={{ left: 30, top: 26, width: 90, height: 26 }} />
+          </div>
+        ))}
+      </div>
 
       {status !== "error" && !veilGone && (
         <div
