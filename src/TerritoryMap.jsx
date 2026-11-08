@@ -513,22 +513,13 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           id: "borders-internal",
           type: "line",
           source: "borders",
-          minzoom: 2.2,
+          minzoom: 1.5,
           filter: ["==", ["get", "two"], 1],
           paint: {
             "line-color": MAP_COLORS.borderInternal,
             "line-width": ["case", ["==", ownerA, ownerB], 0.6, 0],
-            "line-opacity": ["interpolate", ["linear"], ["zoom"], 2.2, 0, 4, 0.75],
+            "line-opacity": ["interpolate", ["linear"], ["zoom"], 1.5, 0.3, 4, 0.75],
           },
-        });
-        // Блакитне сяйво вздовж узбережжя (як ореол навколо планети на референсі).
-        map.addLayer({
-          id: "coast-glow",
-          type: "line",
-          source: "borders",
-          filter: ["==", ["get", "two"], 0],
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": MAP_COLORS.glow, "line-width": ["interpolate", ["linear"], ["zoom"], 1, 4, 6, 9], "line-blur": 5, "line-opacity": ["case", isOwnedCoast, 0.15, 0.5] },
         });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
         // рамка власної території, контур вибраної області.
@@ -561,11 +552,10 @@ const TerritoryMap = forwardRef(function TerritoryMap(
               layout: { "icon-image": icon, "icon-allow-overlap": true, "icon-ignore-placement": true, "icon-size": ["interpolate", ["linear"], ["zoom"], minzoom, k0, minzoom + 3, k1] },
               paint: { "icon-opacity": ["interpolate", ["linear"], ["zoom"], minzoom, 0, minzoom + 0.6, 1] },
             }, before);
-            mk("decor-far", 0, 3, 9, 0.45, 0.8);
-            mk("decor-near", 1, 4.6, 9, 0.5, 0.8);
-            mk("decor-major", 2, 4.8, 13, 0.4, 0.85);
-            mk("decor-mid", 3, 5.8, 13, 0.4, 0.8);
-            mk("decor-small", 4, 6.6, 13, 0.4, 0.75);
+            mk("decor-far", 0, 3.4, 9, 0.45, 0.8);
+            mk("decor-near", 1, 5, 9, 0.5, 0.8);
+            mk("decor-major", 2, 5.4, 13, 0.4, 0.85);
+            mk("decor-mid", 3, 6.4, 13, 0.4, 0.8);
           } catch (e) { /* декор — просто прикраса */ }
         })();
 

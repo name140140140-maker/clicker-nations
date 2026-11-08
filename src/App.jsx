@@ -1,4 +1,5 @@
 /* build: 1787523498 */
+import DroneGame from "./DroneGame.jsx";
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import {
   Zap,
@@ -29,6 +30,7 @@ import {
   Bug,
   Handshake,
   Swords,
+  Crosshair,
   ShieldCheck,
   UserCog,
   Palette,
@@ -3535,6 +3537,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
   const [warMsg, setWarMsg] = useState("");
   const [armySub, setArmySub] = useState(null); // null | id підрозділу Армії
+  const [droneRun, setDroneRun] = useState(null); // null | { city, country } — політ дрона
   const [defPick, setDefPick] = useState(false); // вибір власного міста на карті
   const [defCity, setDefCity] = useState(null); // { id, name, rid, key }
   const [defLevel, setDefLevel] = useState(0);
@@ -3690,6 +3693,20 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     setDefMsg(`✓ Оборону міста ${defCity.name} покращено до рівня ${lvl + 1}`);
   };
 
+  if (view === "army" && droneRun) {
+    return (
+      <DroneGame
+        city={droneRun.city}
+        targetName={droneRun.country ? COUNTRY_MAP[droneRun.country]?.name : ""}
+        onClose={(ok) => {
+          const c = droneRun.city;
+          setDroneRun(null);
+          setWarMsg(ok ? `✓ Дрон влучив у ціль у місті ${c.name}` : "Дрон не влучив у ціль");
+        }}
+      />
+    );
+  }
+
   if (view === "army" && defPick) {
     return (
       <div className="cn-hq" style={{ "--hq": color }}>
@@ -3729,8 +3746,15 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           pick={{
             step: warPick.step,
             country: warPick.country,
-            label: warPick.step === "country" ? "Обери країну, на яку нападаєш" : "Обери місто для атаки",
+            label: warPick.drone
+              ? (warPick.step === "country" ? "Обери країну для удару дроном" : "Обери місто для удару дроном")
+              : warPick.step === "country" ? "Обери країну, на яку нападаєш" : "Обери місто для атаки",
             onPick: (cid) => {
+              if (warPick.drone) {
+                if (cid === player.countryCode) { cnSfx.error(); setWarMsg("✗ Не можна бити по власній країні"); setWarPick(null); return; }
+                setWarPick({ step: "city", country: cid, drone: true });
+                return;
+              }
               const block = attackBlockReason(dip, player.countryCode, cid);
               if (block) {
                 cnSfx.error();
@@ -3740,7 +3764,10 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
               }
               setWarPick({ step: "city", country: cid });
             },
-            onPickCity: declareOn,
+            onPickCity: (city) => {
+              if (warPick.drone) { const country = warPick.country; setWarPick(null); cnSfx.navSwitch(); setDroneRun({ city, country }); return; }
+              declareOn(city);
+            },
             onCancel: () => setWarPick(null),
           }}
         />
@@ -3808,6 +3835,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
             defMsg={defMsg}
             onPickDefCity={() => { cnSfx.navSwitch(); setDefMsg(""); setDefPick(true); }}
             onUpgradeDef={upgradeDef}
+            onLaunchDrone={() => { cnSfx.navSwitch(); setWarMsg(""); setWarPick({ step: "country", drone: true }); }}
             onDeclare={async () => {
               setWarMsg("");
               if ((player.power || 0) < WAR_DECLARE_COST) {
@@ -3957,7 +3985,7 @@ function HqRowTile({ Icon, label, hint, onClick, badge }) {
 }
 
 /* Армія (лише лідер): Оголосити війну та Оборона міста */
-function ArmyPanel({ war, msg, onDeclare, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
+function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
   const phase = war ? warPhase(war) : null;
   if (sub === "defense") {
     const unlocked = upgLevel(player, "cdef");
@@ -4012,6 +4040,7 @@ function ArmyPanel({ war, msg, onDeclare, sub, onSub, player, defCity, defLevel,
           </span>
         </button>
       )}
+      <HqRowTile Icon={Crosshair} label="Запустити дрон" hint="Обери місто й сам керуй дроном у 3D" onClick={onLaunchDrone} />
       {ARMY_SUBS.map((x) => (
         <HqRowTile key={x.id} Icon={x.Icon} label={x.label} hint="Покращення оборони твоїх міст" onClick={() => onSub(x.id)} />
       ))}
