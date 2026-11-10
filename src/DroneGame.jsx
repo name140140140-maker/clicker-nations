@@ -177,7 +177,50 @@ function shadeHex(hex, k) {
   return "#" + h(r) + h(g) + h(b);
 }
 
-export default function DroneGame({ city, targetName, onClose }) {
+export const DRONE_MODELS = {
+  quad: { id: "quad", name: "Квадрокоптер", desc: "Маневровий, зависає й різко повертає", speed: 1 },
+  shahed: { id: "shahed", name: "Шахед", desc: "Трикутне крило, швидкий, інерційний", speed: 1.3 },
+  bayraktar: { id: "bayraktar", name: "Байрактар", desc: "Літак з крилами, плавний і керований", speed: 1.1 },
+};
+
+// моделі-літаки: полігони в локальних координатах (x вправо, y вгору, z вперед)
+const box3 = (x0, x1, y0, y1, z0, z1, col) => [
+  { c: col, p: [[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]] },
+  { c: col, k: 0.75, p: [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]] },
+  { c: col, k: 0.6, p: [[x0, y0, z0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1]] },
+  { c: col, k: 0.6, p: [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]] },
+  { c: col, k: 0.7, p: [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]] },
+];
+const PLANE_MODELS = {
+  shahed: [
+    { c: "#d9d2bf", p: [[0, 0.1, 3.4], [3, 0.1, -1.9], [-3, 0.1, -1.9]] },
+    { c: "#a9a290", k: 0.7, p: [[0, -0.12, 3.4], [3, -0.12, -1.9], [-3, -0.12, -1.9]] },
+    { c: "#cfc8b4", p: [[0, 0.1, 3.4], [0.45, 0.1, -1.9], [-0.45, 0.1, -1.9]] },
+    ...box3(-0.38, 0.38, -0.1, 0.5, -1.2, 2.6, "#e8e2d0"),
+    { c: "#2f6fd6", p: [[-0.36, 0.52, 2.6], [0.36, 0.52, 2.6], [0.3, 0.4, 3.5], [-0.3, 0.4, 3.5]] },
+    { c: "#1d1f22", k: 1, p: [[-0.3, 0.4, 3.0], [0.3, 0.4, 3.0], [0.33, 0.5, 3.1], [-0.33, 0.5, 3.1]] },
+    { c: "#9b9482", k: 0.8, p: [[3, 0.1, -1.9], [3.15, 0.1, -1.4], [3.15, 1.1, -1.9], [3, 1.1, -2.2]] },
+    { c: "#9b9482", k: 0.8, p: [[-3, 0.1, -1.9], [-3.15, 0.1, -1.4], [-3.15, 1.1, -1.9], [-3, 1.1, -2.2]] },
+    ...box3(-0.3, 0.3, -0.05, 0.4, -1.8, -1.2, "#3a3d42"),
+  ],
+  bayraktar: [
+    ...box3(-0.32, 0.32, -0.25, 0.4, -2.4, 2.6, "#cfd3d8"),
+    { c: "#e4e7ea", p: [[-0.3, 0.41, 0.4], [0.3, 0.41, 0.4], [0.2, 0.5, 2.4], [-0.2, 0.5, 2.4]] },
+    { c: "#2b3036", p: [[-0.2, -0.2, 2.7], [0.2, -0.2, 2.7], [0.25, 0.1, 2.6], [-0.25, 0.1, 2.6]] },
+    { c: "#b8bec6", p: [[-0.25, 0.28, 0.9], [-5.4, 0.28, 0.2], [-5.4, 0.28, -0.4], [-0.25, 0.28, -0.4]] },
+    { c: "#b8bec6", p: [[0.25, 0.28, 0.9], [5.4, 0.28, 0.2], [5.4, 0.28, -0.4], [0.25, 0.28, -0.4]] },
+    { c: "#8d949c", k: 1, p: [[-0.25, 0.26, -0.4], [-5.4, 0.26, -0.4], [-5.4, 0.26, -0.55], [-0.25, 0.26, -0.55]] },
+    { c: "#8d949c", k: 1, p: [[0.25, 0.26, -0.4], [5.4, 0.26, -0.4], [5.4, 0.26, -0.55], [0.25, 0.26, -0.55]] },
+    { c: "#a2a9b1", k: 0.85, p: [[-0.2, 0.0, -2.4], [-0.2, 0.0, -3.9], [-1.4, 1.4, -4.3], [-1.4, 1.4, -3.7]] },
+    { c: "#a2a9b1", k: 0.85, p: [[0.2, 0.0, -2.4], [0.2, 0.0, -3.9], [1.4, 1.4, -4.3], [1.4, 1.4, -3.7]] },
+    { c: "#c23b32", p: [[-0.9, 1.0, -4.0], [-0.7, 1.2, -4.0], [-0.7, 1.2, -3.9], [-0.9, 1.0, -3.9]] },
+    { c: "#2b3036", p: [[-0.5, -0.25, -0.2], [-0.5, -0.7, -0.2], [-0.4, -0.7, -0.1], [-0.4, -0.25, -0.1]] },
+    { c: "#2b3036", p: [[0.5, -0.25, -0.2], [0.5, -0.7, -0.2], [0.4, -0.7, -0.1], [0.4, -0.25, -0.1]] },
+  ],
+};
+
+export default function DroneGame({ city, targetName, model = "quad", onClose }) {
+  const MODEL = DRONE_MODELS[model] || DRONE_MODELS.quad;
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
   const [phase, setPhase] = useState("brief"); // brief | play | end
@@ -414,7 +457,38 @@ export default function DroneGame({ city, targetName, onClose }) {
       }
     };
 
+    const drawPlane = () => {
+      const poly = PLANE_MODELS[model];
+      const sy_ = Math.sin(S.yaw), cy_ = Math.cos(S.yaw), rl = S.lean * 0.5, sr = Math.sin(rl), cr = Math.cos(rl);
+      const sc3 = model === "bayraktar" ? 0.6 : 0.75;
+      const out = [];
+      for (const f of poly) {
+        const pts = [];
+        let ok = true, dsum = 0;
+        for (const q of f.p) {
+          // крен навколо осі польоту, потім поворот за курсом
+          const x1 = q[0] * cr - q[1] * sr, y1 = q[0] * sr + q[1] * cr, z1 = q[2];
+          const wx = S.p.x + (x1 * cy_ + z1 * sy_) * sc3, wz = S.p.z + (-x1 * sy_ + z1 * cy_) * sc3, wy = S.p.y + y1 * sc3;
+          const c = toCam(wx, wy, wz);
+          if (c[2] < NEAR) { ok = false; break; }
+          pts.push(scr(c)); dsum += c[2];
+        }
+        if (ok) out.push({ f, pts, d: dsum / pts.length });
+      }
+      out.sort((a, b) => b.d - a.d);
+      const g = toCam(S.p.x, 0.05, S.p.z);
+      if (g[2] > NEAR) { const [gx, gy] = scr(g); const w = (FOCAL / g[2]) * 5; ctx.fillStyle = "rgba(0,0,0,0.28)"; ctx.beginPath(); ctx.ellipse(gx, gy, w * 0.5, w * 0.12, 0, 0, 6.2832); ctx.fill(); }
+      for (const o of out) {
+        ctx.fillStyle = o.f.k && o.f.k < 1 ? shadeHex(o.f.c, o.f.k) : o.f.c;
+        ctx.strokeStyle = "rgba(20,22,26,0.55)"; ctx.lineWidth = 0.7;
+        ctx.beginPath(); ctx.moveTo(o.pts[0][0], o.pts[0][1]);
+        for (let i = 1; i < o.pts.length; i++) ctx.lineTo(o.pts[i][0], o.pts[i][1]);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      }
+    };
+
     const drawDrone = (dist) => {
+      if (PLANE_MODELS[model]) { drawPlane(); return; }
       const p = toCam(S.p.x, S.p.y, S.p.z);
       if (p[2] < NEAR) return;
       const [sx, sy] = scr(p);
@@ -641,7 +715,7 @@ export default function DroneGame({ city, targetName, onClose }) {
         mx = cl(mx); my = cl(my); lx = cl(lx); ly = cl(ly);
         S.yaw += lx * YAW_RATE * dt;
         const fx = Math.sin(S.yaw), fz = Math.cos(S.yaw), rx = Math.cos(S.yaw), rz = -Math.sin(S.yaw);
-        const tvx = (fx * -my + rx * mx) * SPEED, tvz = (fz * -my + rz * mx) * SPEED, tvy = -ly * VSPEED;
+        const tvx = (fx * -my + rx * mx) * SPEED * MODEL.speed, tvz = (fz * -my + rz * mx) * SPEED * MODEL.speed, tvy = -ly * VSPEED;
         const a = Math.min(1, dt * 4.5);
         S.vel.x += (tvx - S.vel.x) * a; S.vel.y += (tvy - S.vel.y) * a; S.vel.z += (tvz - S.vel.z) * a;
         S.lean += (mx * 0.3 - S.lean) * Math.min(1, dt * 6);

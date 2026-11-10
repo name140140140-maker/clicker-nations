@@ -6,6 +6,7 @@
                        тож одну вільну область не можуть зайняти двоє одночасно)
    Нові таблиці чи міграції в Supabase не потрібні. */
 
+import { loadRegionOwners, buildRealCountries } from "./realCountries";
 import { sbStorageGet, sbStorageSet, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
 
 export const COUNTRY_PREFIX = "country:";
@@ -30,32 +31,38 @@ export function newCountryId() {
   return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-/* Завантажує всі країни й володіння. Повертає null, якщо база недоступна. */
-export async function loadNations() {
-  const [cEntries, tEntries, oEntries] = await Promise.all([
+/* Завантажує країни й володіння. Країни — реальні (id = ISO), стартове володіння областей
+   береться з region-owners.json; з бази накладаємо лише лідерів країн, захоплення областей
+   (terr:*) і міст (cityown:*). Записи зі старих вигаданих країн (id не ISO) ігноруються —
+   так світ стартує з нуля без видалення чогось у базі. Повертає null, якщо дані недоступні. */
+export async function loadNations(lang = "uk") {
+  const [ro, cEntries, tEntries, oEntries] = await Promise.all([
+    loadRegionOwners(),
     sbStorageListEntries(COUNTRY_PREFIX, true),
     sbStorageListEntries(TERRITORY_PREFIX, true),
     sbStorageListEntries(CITY_OWN_PREFIX, true),
   ]);
-  if (!cEntries || !tEntries) return null;
-  const countries = [];
+  if (!ro || !cEntries || !tEntries) return null;
+  const countries = buildRealCountries(ro, lang);
+  const byId = new Map(countries.map((c) => [c.id, c]));
   for (const e of cEntries) {
     try {
-      const c = JSON.parse(e.value);
-      if (c && c.id) countries.push(c);
+      const rec = JSON.parse(e.value);
+      const c = rec && byId.get(rec.id);
+      if (c) { c.leaderId = rec.leaderId || null; c.createdAt = rec.createdAt || 0; }
     } catch {
       /* пошкоджений запис — пропускаємо */
     }
   }
-  const owners = {};
-  for (const e of tEntries) owners[e.key.slice(TERRITORY_PREFIX.length)] = e.value;
-  // Кількість областей рахуємо з фактичного володіння (джерело істини — terr:*)
+  const owners = { ...ro.r };
+  for (const e of tEntries) {
+    if (byId.has(e.value)) owners[e.key.slice(TERRITORY_PREFIX.length)] = e.value;
+  }
   const counts = {};
   for (const rid in owners) counts[owners[rid]] = (counts[owners[rid]] || 0) + 1;
   for (const c of countries) c.regionCount = counts[c.id] || 0;
-  countries.sort((a, b) => (b.regionCount || 0) - (a.regionCount || 0) || (a.createdAt || 0) - (b.createdAt || 0));
   const cityOwners = {};
-  for (const e of oEntries || []) cityOwners[e.key.slice(CITY_OWN_PREFIX.length)] = e.value;
+  for (const e of oEntries || []) if (byId.has(e.value)) cityOwners[e.key.slice(CITY_OWN_PREFIX.length)] = e.value;
   return { countries, owners, cityOwners };
 }
 

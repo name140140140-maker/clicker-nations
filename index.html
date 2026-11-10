@@ -7,10 +7,13 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
       html, body, #root { height: 100%; margin: 0; padding: 0; background: #0b0e14; }
+      .boot0 { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: radial-gradient(ellipse at 50% 30%, #16324f 0%, #0d1b33 60%, #070d1a 100%); }
+      .boot0-r { width: 46px; height: 46px; border-radius: 50%; border: 3px solid rgba(126,201,232,0.2); border-top-color: #7ec9e8; border-right-color: #f4b942; animation: boot0 0.9s linear infinite; }
+      @keyframes boot0 { to { transform: rotate(360deg); } }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="boot0"><div class="boot0-r"></div></div></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

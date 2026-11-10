@@ -74,7 +74,7 @@ export default async function handler(req, res) {
           user_id: user.id,
           result: {
             type: "video", id: crypto.randomBytes(8).toString("hex"), video_url: video, mime_type: "video/mp4",
-            thumbnail_url: thumb, title: "Удар дроном — World Clicker", caption,
+            thumbnail_url: thumb, title: String(body.title || "Удар дроном — World Clicker").replace(/[\u0000-\u001F]/g, "").slice(0, 64), caption,
           },
           allow_user_chats: true, allow_bot_chats: false, allow_group_chats: true, allow_channel_chats: true,
         });

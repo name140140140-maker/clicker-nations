@@ -1,3 +1,4 @@
+import LoadingScreen from "./LoadingScreen.jsx";
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -984,25 +985,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             background: "linear-gradient(160deg, #0d1b33 0%, #16324f 55%, #1c4a5e 100%)", borderRadius: 12,
           }}
         >
-          <div style={{ width: "min(280px, 80%)", textAlign: "center" }}>
-            <div
-              style={{
-                width: 42, height: 42, margin: "0 auto 18px", borderRadius: "50%",
-                border: "3px solid rgba(126,201,232,0.2)", borderTopColor: "#7ec9e8", borderRightColor: "#f4b942",
-                animation: "cn-tmap-spin 0.9s linear infinite",
-              }}
-            />
-            <div style={{ color: "#dfeffb", fontSize: 13, marginBottom: 12 }}>{loadStage}</div>
-            <div style={{ position: "relative", height: 6, borderRadius: 999, background: "rgba(255,255,255,0.12)", overflow: "hidden" }}>
-              <div
-                style={{
-                  position: "absolute", inset: 0, width: `${Math.max(loadPercent, 4)}%`, borderRadius: 999,
-                  background: "linear-gradient(90deg, #7ec9e8, #f4b942)", transition: "width 0.2s ease-out",
-                }}
-              />
-            </div>
-            <div style={{ color: "#9fc4dc", fontSize: 11, marginTop: 8 }}>{loadPercent}%</div>
-          </div>
+          <LoadingScreen lang={lang} variant="block" size="sm" title={false} stage={loadStage} progress={loadProgress} />
         </div>
       )}
 

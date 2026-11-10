@@ -1,5 +1,9 @@
 /* build: 1787523498 */
-import DroneGame from "./DroneGame.jsx";
+import DroneGame, { DRONE_MODELS } from "./DroneGame.jsx";
+import SniperGame from "./SniperGame.jsx";
+import LoadingScreen from "./LoadingScreen.jsx";
+import { REAL_ID_RE } from "./realCountries.js";
+import NewsBroadcast from "./NewsBroadcast.jsx";
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import {
   Zap,
@@ -31,6 +35,7 @@ import {
   Handshake,
   Swords,
   Crosshair,
+  Target,
   ShieldCheck,
   UserCog,
   Palette,
@@ -648,10 +653,11 @@ async function loadDiplomacy() {
     }
     if (!v) continue;
     if (v.kind === "req") {
-      out.requests.push(v);
+      if (REAL_ID_RE.test(String(v.fromCountry)) && REAL_ID_RE.test(String(v.toCountry))) out.requests.push(v);
       continue;
     }
     if (v.kind !== "ally" && v.kind !== "pact") continue;
+    if (!REAL_ID_RE.test(String(v.a)) || !REAL_ID_RE.test(String(v.b))) continue;
     const id = pairId(v.a, v.b);
     if (v.active) (v.kind === "ally" ? out.allies : out.pacts).push(v);
     else {
@@ -817,7 +823,8 @@ async function loadActiveWars() {
   for (const row of entries || []) {
     try {
       const w = JSON.parse(row.value);
-      if (w && w.id && w.status !== "ended") out.push(w);
+      /* війни зі старих вигаданих країн (id не ISO) ігноруємо — світ почався з нуля */
+      if (w && w.id && w.status !== "ended" && REAL_ID_RE.test(String(w.attacker)) && REAL_ID_RE.test(String(w.defender))) out.push(w);
     } catch {
       /* ignore */
     }
@@ -1158,7 +1165,7 @@ const DEFAULT_THEME = "darkblue";
 /*  Країни гравців                                                      */
 /*  Реєстр заповнюється з Supabase (див. src/nations.js). Це змінювані  */
 /*  модульні об'єкти: App оновлює їх при завантаженні й перерендерює    */
-/*  інтерфейс. Реальних держав і прапорів у грі більше немає.           */
+/*  інтерфейс. Країни реальні (id = ISO), див. src/realCountries.js.    */
 /* ------------------------------------------------------------------ */
 
 const NEUTRAL_COUNTRY_COLOR = "#64748b";
@@ -1172,26 +1179,30 @@ function setCountriesRegistry(list) {
   for (const k of Object.keys(COUNTRY_MAP)) delete COUNTRY_MAP[k];
   const sorted = [...(list || [])].sort((a, b) => String(a.name).localeCompare(String(b.name), "uk"));
   for (const c of sorted) {
-    const rec = { ...c, code: c.id, flag: "" };
+    const rec = { ...c, code: c.id, flag: c.flag || "" };
     COUNTRIES.push(rec);
     COUNTRY_MAP[rec.code] = rec;
   }
 }
 
-/* Старі записи гравців мають двобуквений код реальної держави ("UA", "PL"…).
-   Таких країн більше немає — гравець має обрати нову або створити свою. */
+/* Країни — реальні (id = ISO, "UA", "PL"…). Старі гравці з вигаданою країною (id іншого вигляду)
+   або з кодом, якого немає на карті, мають обрати нову країну; прогрес зберігається. */
 function isLegacyCountryCode(code) {
-  return !code || /^[A-Z]{2}$/.test(String(code));
+  if (!code || !REAL_ID_RE.test(String(code))) return true;
+  return countriesRev > 0 && !COUNTRY_MAP[code];
 }
 
-/* Замість прапора — кольоровий значок країни (колір обирає лідер). Пропс code — id країни. */
+/* Прапор країни (емодзі за ISO) на кольоровій плашці її кольору. Пропс code — id країни. */
 function Flag({ code, size = 20, className }) {
-  const color = COUNTRY_MAP[code]?.color || NEUTRAL_COUNTRY_COLOR;
+  const rec = COUNTRY_MAP[code];
+  const color = rec?.color || NEUTRAL_COUNTRY_COLOR;
   return (
     <span
       className={"cn-country-badge" + (className ? " " + className : "")}
-      style={{ width: size, height: size, background: color }}
-    />
+      style={{ width: size, height: size, background: color, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.62), lineHeight: 1 }}
+    >
+      {rec?.flag || ""}
+    </span>
   );
 }
 
@@ -1611,7 +1622,7 @@ const TRANSLATIONS = {
   boot_loading: { uk: "Завантаження світу…", pl: "Ładowanie świata…", de: "Welt wird geladen…", ru: "Загрузка мира…", it: "Caricamento del mondo…", fr: "Chargement du monde…", en: "Loading the world…", es: "Cargando el mundo…", ar: "جارٍ تحميل العالم…" },
 
   /* Onboarding */
-  onboard_sub: { uk: "Приєднайся до існуючої країни або створи власну.", en: "Join an existing country or create your own.", ru: "Присоединись к существующей стране или создай собственную." },
+  onboard_sub: { uk: "Обери реальну країну, за яку гратимеш.", en: "Choose the real country you will play for.", ru: "Выбери реальную страну, за которую будешь играть." },
   onboard_name_label: { uk: "Ім'я гравця", pl: "Nazwa gracza", de: "Spielername", ru: "Имя игрока", it: "Nome giocatore", fr: "Nom du joueur", en: "Player name", es: "Nombre del jugador", ar: "اسم اللاعب" },
   onboard_name_placeholder: { uk: "Введи своє ім'я", pl: "Wpisz swoje imię", de: "Gib deinen Namen ein", ru: "Введи своё имя", it: "Inserisci il tuo nome", fr: "Entrez votre nom", en: "Enter your name", es: "Escribe tu nombre", ar: "أدخل اسمك" },
   onboard_country_label: { uk: "Країна", pl: "Kraj", de: "Land", ru: "Страна", it: "Paese", fr: "Pays", en: "Country", es: "País", ar: "الدولة" },
@@ -1627,9 +1638,9 @@ const TRANSLATIONS = {
   nn_create_own: { uk: "Створити свою країну", en: "Create your own country", ru: "Создать свою страну" },
   nn_create_own_sub: { uk: "Займи вільну область на карті", en: "Claim a free region on the map", ru: "Займи свободную область на карте" },
   nn_list_title: { uk: "Обери країну", en: "Choose a country", ru: "Выбери страну" },
-  nn_list_empty: { uk: "Поки що немає жодної країни. Створи першу!", en: "There are no countries yet. Create the first one!", ru: "Пока нет ни одной страны. Создай первую!" },
+  nn_list_empty: { uk: "Країни ще завантажуються. Спробуй за мить.", en: "Countries are still loading. Try again in a moment.", ru: "Страны ещё загружаются. Попробуй через мгновение." },
   nn_confirm_title: { uk: "Підтвердження", en: "Confirmation", ru: "Подтверждение" },
-  nn_confirm_text: { uk: "Ти дійсно хочеш грати за країну «{name}»?", en: "Do you really want to play for «{name}»?", ru: "Ты действительно хочешь играть за страну «{name}»?" },
+  nn_confirm_text: { uk: "Ти дійсно хочеш грати за країну «{name}»? Змінити її пізніше можна в Штабі (розділ «Армія»).", en: "Do you really want to play for «{name}»? You can change it later in HQ (Army section).", ru: "Ты действительно хочешь играть за страну «{name}»? Позже её можно сменить в Штабе (раздел «Армия»)." },
   nn_confirm_yes: { uk: "Так, грати", en: "Yes, play", ru: "Да, играть" },
   nn_confirm_no: { uk: "Скасувати", en: "Cancel", ru: "Отмена" },
   nn_create_title: { uk: "Створи країну", en: "Create a country", ru: "Создай страну" },
@@ -1641,7 +1652,7 @@ const TRANSLATIONS = {
   nn_confirm_btn: { uk: "Підтвердити", en: "Confirm", ru: "Подтвердить" },
   nn_back: { uk: "Назад", en: "Back", ru: "Назад" },
   nn_regions_count: { uk: "областей", en: "regions", ru: "областей" },
-  nn_reassign_note: { uk: "Реальні країни прибрано з гри. Твій прогрес збережено — обери нову країну або створи свою.", en: "Real-world countries have been removed from the game. Your progress is kept — pick a new country or create your own.", ru: "Реальные страны убраны из игры. Твой прогресс сохранён — выбери новую страну или создай свою." },
+  nn_reassign_note: { uk: "У грі тепер реальні країни. Твій прогрес збережено — обери країну, за яку гратимеш далі.", en: "The game now uses real countries. Your progress is kept — pick the country you will play for.", ru: "В игре теперь реальные страны. Твой прогресс сохранён — выбери страну, за которую будешь играть." },
   nn_legend_free: { uk: "Вільні", en: "Free", ru: "Свободные" },
   nn_legend_occupied: { uk: "Зайняті", en: "Occupied", ru: "Занятые" },
   nn_legend_own: { uk: "Власні", en: "Your own", ru: "Свои" },
@@ -2026,6 +2037,13 @@ export default function App() {
         await refreshNations();
         if (!COUNTRY_MAP[targetCountry]) return { ok: false, reason: "Цієї країни більше не існує. Обери іншу." };
       }
+      /* Перший гравець реальної країни стає її лідером (далі — перевороти, повстання, голосування). */
+      let becameLeader = isCreator;
+      if (!isCreator && !(await getLeader(targetCountry))) {
+        await setLeaderStorage(targetCountry, id);
+        becameLeader = true;
+        await pushNews(`🌍 ${COUNTRY_MAP[targetCountry]?.flag || ""} ${COUNTRY_MAP[targetCountry]?.name || targetCountry} має першого гравця й лідера.`);
+      }
 
       const tgUser = getTelegramUser();
       const telegramId = base ? base.telegramId ?? tgUser?.id ?? null : tgUser?.id ?? null;
@@ -2061,7 +2079,7 @@ export default function App() {
       await storageSet(PLAYER_PREFIX + id, JSON.stringify(rec), true);
       if (telegramId) await storageSet(TG_MAP_PREFIX + telegramId, id, true);
       await refreshNations();
-      setIsLeader(isCreator);
+      setIsLeader(becameLeader);
       setPlayer(rec);
       return { ok: true };
     },
@@ -2701,14 +2719,7 @@ function GemIcon({ size = 24, className }) {
 }
 
 function BootScreen({ lang = "uk" }) {
-  return (
-    <div className="cn-boot">
-      <div className="cn-boot-glow" />
-      <GameLogo size={56} className="cn-boot-icon" />
-      <div className="cn-boot-title">WORLD CLICKER</div>
-      <div className="cn-boot-sub">{t(lang, "boot_loading")}</div>
-    </div>
-  );
+  return <LoadingScreen lang={lang} variant="full" />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2817,7 +2828,7 @@ function BlockedScreen({ reason }) {
 
 function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, reassign = false, initialName = "" }) {
   const [username] = useState(initialName || getTelegramDisplayName());
-  const [step, setStep] = useState("choice"); // choice | list | create
+  const [step, setStep] = useState("list"); // list (лише вибір реальної країни)
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState(null); // країна, яка чекає підтвердження
   const [submitting, setSubmitting] = useState(false);
@@ -2842,7 +2853,7 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return countries;
-    return countries.filter((c) => String(c.name).toLowerCase().includes(q));
+    return countries.filter((c) => String(c.name).toLowerCase().includes(q) || String(c.nameEn || "").toLowerCase().includes(q) || c.id.toLowerCase() === q);
   }, [query, countries]);
 
   const goBack = () => {
@@ -2915,14 +2926,6 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
             </span>
             <ChevronRight size={20} />
           </button>
-          <button type="button" className="cn-choice-btn" disabled={!hasName} onClick={() => { cnSfx.toggle(); setStep("create"); }}>
-            <span className="cn-choice-icon"><Plus size={26} /></span>
-            <span className="cn-choice-text">
-              <span className="cn-choice-title">{t(lang, "nn_create_own")}</span>
-              <span className="cn-choice-sub">{t(lang, "nn_create_own_sub")}</span>
-            </span>
-            <ChevronRight size={20} />
-          </button>
         </div>
         {error && <div className="cn-onboard-blocked-msg">{error}</div>}
 
@@ -2938,12 +2941,12 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
   if (step === "list") {
     return (
       <div className="cn-onboard">
-        <div className="cn-step-bar">
-          <button type="button" className="cn-back-btn" onClick={goBack} aria-label={t(lang, "nn_back")}>
-            <ArrowLeft size={20} />
-          </button>
-          <div className="cn-step-title">{t(lang, "nn_list_title")}</div>
+        <div className="cn-onboard-header">
+          <GameLogo size={48} className="cn-onboard-icon" />
+          <div className="cn-onboard-title">{t(lang, "nn_list_title")}</div>
+          <div className="cn-onboard-sub">{t(lang, "onboard_sub")}</div>
         </div>
+        {reassign && <div className="cn-onboard-reassign">{t(lang, "nn_reassign_note")}</div>}
 
         <div className="cn-country-search-wrap cn-country-search-wrap--static">
           <Search size={15} className="cn-country-search-icon" />
@@ -2961,9 +2964,6 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
           {countries.length === 0 && (
             <div className="cn-nation-empty">
               {t(lang, "nn_list_empty")}
-              <button type="button" className="cn-dev-btn" onClick={() => setStep("create")} style={{ marginTop: 10 }}>
-                {t(lang, "nn_create_own")}
-              </button>
             </div>
           )}
           {countries.length > 0 && filtered.length === 0 && (
@@ -3537,6 +3537,9 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
   const [warMsg, setWarMsg] = useState("");
   const [armySub, setArmySub] = useState(null); // null | id підрозділу Армії
+  const [droneModel, setDroneModel] = useState("quad");
+  const [droneChoose, setDroneChoose] = useState(false);
+  const [sniperRun, setSniperRun] = useState(null); // null | { country } — замах
   const [droneRun, setDroneRun] = useState(null); // null | { city, country } — політ дрона
   const [defPick, setDefPick] = useState(false); // вибір власного міста на карті
   const [defCity, setDefCity] = useState(null); // { id, name, rid, key }
@@ -3693,9 +3696,50 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
     setDefMsg(`✓ Оборону міста ${defCity.name} покращено до рівня ${lvl + 1}`);
   };
 
+  if (view === "army" && droneChoose && !droneRun) {
+    const art = {
+      quad: <svg viewBox="0 0 100 60" width="100%" height="100%"><g stroke="#20252b" strokeWidth="3" strokeLinecap="round"><path d="M50 30L18 14M50 30L82 14M50 30L18 46M50 30L82 46" /></g><g fill="#9fb4c8" opacity=".7"><ellipse cx="18" cy="14" rx="13" ry="4" /><ellipse cx="82" cy="14" rx="13" ry="4" /><ellipse cx="18" cy="46" rx="13" ry="4" /><ellipse cx="82" cy="46" rx="13" ry="4" /></g><ellipse cx="50" cy="30" rx="11" ry="8" fill="#2f3640" /><circle cx="50" cy="33" r="2.5" fill="#ff3b30" /></svg>,
+      shahed: <svg viewBox="0 0 100 60" width="100%" height="100%"><path d="M50 4L92 52L8 52Z" fill="#d9d2bf" stroke="#8d8672" strokeWidth="1.5" /><rect x="45" y="14" width="10" height="34" rx="4" fill="#ece6d4" /><path d="M45 16Q50 2 55 16Z" fill="#2f6fd6" /><rect x="6" y="40" width="3" height="14" fill="#9b9482" /><rect x="91" y="40" width="3" height="14" fill="#9b9482" /></svg>,
+      bayraktar: <svg viewBox="0 0 100 60" width="100%" height="100%"><path d="M4 34L48 26L48 32L4 38Z" fill="#b8bec6" /><path d="M96 34L52 26L52 32L96 38Z" fill="#b8bec6" /><rect x="46" y="10" width="8" height="40" rx="4" fill="#dfe3e7" /><path d="M46 50L36 58L38 52ZM54 50L64 58L62 52Z" fill="#a2a9b1" /></svg>,
+    };
+    return (
+      <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "linear-gradient(#0d1b2a,#16283d)", color: "#fff", display: "flex", flexDirection: "column", padding: "18px 16px", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Обери дрон</div>
+          <button onClick={() => { cnSfx.navSwitch(); setDroneChoose(false); }} style={{ background: "rgba(255,255,255,.12)", border: 0, color: "#fff", borderRadius: 10, padding: "8px 14px", fontSize: 15 }}>✕</button>
+        </div>
+        {Object.values(DRONE_MODELS).map((m) => (
+          <button key={m.id} onClick={() => { cnSfx.navSwitch(); setDroneModel(m.id); setDroneChoose(false); setWarPick({ step: "country", drone: true }); }}
+            style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", textAlign: "left", marginBottom: 12, padding: 12, borderRadius: 16, border: droneModel === m.id ? "2px solid #5ec2ff" : "2px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.07)", color: "#fff" }}>
+            <div style={{ width: 110, height: 70, flex: "none", background: "linear-gradient(#6fb1f0,#8cc4f5)", borderRadius: 12, padding: 6 }}>{art[m.id]}</div>
+            <div>
+              <div style={{ fontSize: 17, fontWeight: 800 }}>{m.name}</div>
+              <div style={{ fontSize: 13, opacity: 0.8, marginTop: 3 }}>{m.desc}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  if (view === "army" && sniperRun) {
+    return (
+      <SniperGame
+        country={COUNTRY_MAP[sniperRun.country]?.name || ""}
+        color={COUNTRY_MAP[sniperRun.country]?.color || ""}
+        onClose={(ok) => {
+          const n = COUNTRY_MAP[sniperRun.country]?.name || "";
+          setSniperRun(null);
+          setWarMsg(ok ? `✓ Замах на лідера країни ${n} вдався` : `Замах на лідера країни ${n} не вдався`);
+        }}
+      />
+    );
+  }
+
   if (view === "army" && droneRun) {
     return (
       <DroneGame
+        model={droneModel}
         city={droneRun.city}
         targetName={droneRun.country ? COUNTRY_MAP[droneRun.country]?.name : ""}
         onClose={(ok) => {
@@ -3746,10 +3790,17 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           pick={{
             step: warPick.step,
             country: warPick.country,
-            label: warPick.drone
+            label: warPick.sniper
+              ? "Обери країну для замаху"
+              : warPick.drone
               ? (warPick.step === "country" ? "Обери країну для удару дроном" : "Обери місто для удару дроном")
               : warPick.step === "country" ? "Обери країну, на яку нападаєш" : "Обери місто для атаки",
             onPick: (cid) => {
+              if (warPick.sniper) {
+                if (cid === player.countryCode) { cnSfx.error(); setWarMsg("✗ Не можна робити замах у власній країні"); setWarPick(null); return; }
+                setWarPick(null); cnSfx.navSwitch(); setSniperRun({ country: cid });
+                return;
+              }
               if (warPick.drone) {
                 if (cid === player.countryCode) { cnSfx.error(); setWarMsg("✗ Не можна бити по власній країні"); setWarPick(null); return; }
                 setWarPick({ step: "city", country: cid, drone: true });
@@ -3835,7 +3886,8 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
             defMsg={defMsg}
             onPickDefCity={() => { cnSfx.navSwitch(); setDefMsg(""); setDefPick(true); }}
             onUpgradeDef={upgradeDef}
-            onLaunchDrone={() => { cnSfx.navSwitch(); setWarMsg(""); setWarPick({ step: "country", drone: true }); }}
+            onSniper={() => { cnSfx.navSwitch(); setWarMsg(""); setWarPick({ step: "country", sniper: true }); }}
+            onLaunchDrone={() => { cnSfx.navSwitch(); setWarMsg(""); setDroneChoose(true); }}
             onDeclare={async () => {
               setWarMsg("");
               if ((player.power || 0) < WAR_DECLARE_COST) {
@@ -3985,7 +4037,7 @@ function HqRowTile({ Icon, label, hint, onClick, badge }) {
 }
 
 /* Армія (лише лідер): Оголосити війну та Оборона міста */
-function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
+function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, onSniper, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
   const phase = war ? warPhase(war) : null;
   if (sub === "defense") {
     const unlocked = upgLevel(player, "cdef");
@@ -4040,6 +4092,7 @@ function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, sub, onSub, player, def
           </span>
         </button>
       )}
+      <HqRowTile Icon={Target} label="Замах" hint="Снайпер на даху: дочекайся лідера й влуч" onClick={onSniper} />
       <HqRowTile Icon={Crosshair} label="Запустити дрон" hint="Обери місто й сам керуй дроном у 3D" onClick={onLaunchDrone} />
       {ARMY_SUBS.map((x) => (
         <HqRowTile key={x.id} Icon={x.Icon} label={x.label} hint="Покращення оборони твоїх міст" onClick={() => onSub(x.id)} />
@@ -4262,32 +4315,10 @@ function ControlPanel({ player, isLeader, countries, onChangeCountryColor }) {
         <div className="cn-color-title">
           <Palette size={16} /> Колір країни на карті
         </div>
-        {!isLeader && <div className="cn-control-hint">Змінювати колір може лише лідер країни.</div>}
-        <div className="cn-color-grid" role="listbox" aria-label="Колір країни">
-          {COUNTRY_COLORS.map((color) => {
-            const selected = color === current;
-            const taken = takenByOthers.has(color);
-            return (
-              <button
-                key={color}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                aria-label={color}
-                title={taken ? "Цей колір уже обрала інша країна" : color}
-                disabled={!isLeader || busy || taken}
-                className={"cn-color-swatch" + (selected ? " cn-color-swatch--active" : "") + (taken ? " cn-color-swatch--taken" : "")}
-                style={{ background: color }}
-                onClick={() => pick(color)}
-              >
-                {selected && <Check size={16} />}
-                {taken && <Ban size={14} />}
-              </button>
-            );
-          })}
+        <div className="cn-control-hint" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="cn-country-badge" style={{ width: 18, height: 18, background: current }} />
+          Колір призначається автоматично, щоб сусідні країни завжди відрізнялись.
         </div>
-        <div className="cn-control-hint">Кольори, які вже обрали інші країни, недоступні — так кожна країна на карті виглядає по-своєму.</div>
-        {msg && <div className={"cn-color-msg" + (msg.ok ? " cn-color-msg--ok" : " cn-color-msg--err")}>{msg.text}</div>}
       </div>
     </div>
   );
@@ -4299,35 +4330,7 @@ function ControlPanel({ player, isLeader, countries, onChangeCountryColor }) {
 
 function NewsModal({ news, onClose }) {
   const close = () => { cnSfx.modalClose(); onClose(); };
-  const [box, setBox] = useState("game"); // game | admin
-  const shown = (news || []).filter((n) => (box === "admin" ? n.admin : !n.admin));
-  return (
-    <div className="cn-modal-overlay" onClick={close}>
-      <div className="cn-modal-sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="cn-modal-header">
-          <div className="cn-modal-title">
-            <Newspaper size={16} /> Світові новини
-          </div>
-          <button className="cn-icon-btn" type="button" onClick={close} aria-label="Закрити">
-            <X size={16} />
-          </button>
-        </div>
-        <div className="cn-box-tabs">
-          <button type="button" className={"cn-box-tab" + (box === "game" ? " cn-box-tab--active" : "")} onClick={() => setBox("game")}>Від гри</button>
-          <button type="button" className={"cn-box-tab" + (box === "admin" ? " cn-box-tab--active" : "")} onClick={() => setBox("admin")}>Від адміністрації</button>
-        </div>
-        <div className="cn-news-list">
-          {shown.length === 0 && <div className="cn-control-empty">Новин поки немає. Тут з'являтимуться війни, захоплення міст, союзи, пакти, нові країни й сезони.</div>}
-          {shown.map((n) => (
-            <div key={n.id} className={"cn-news-item" + (n.admin ? " cn-news-item--admin" : "")}>
-              <div className="cn-news-text">{n.text}</div>
-              <div className="cn-news-time">{timeAgo(n.ts)}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
+  return <NewsBroadcast news={news} onClose={close} timeAgo={timeAgo} />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -4389,7 +4392,7 @@ function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk
       </div>
 
       {loading && players.length === 0 ? (
-        <div className="cn-lb-loading">{t(lang, "lb_loading")}</div>
+        <LoadingScreen lang={lang} variant="block" size="sm" title={false} tips={false} stage={t(lang, "lb_loading")} />
       ) : mode === "countries" ? (
         <CountryList list={countriesRanked} myCountry={me.countryCode} />
       ) : mode === "global" ? (
