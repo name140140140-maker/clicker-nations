@@ -37,6 +37,9 @@ export const MAP_COLORS = {
 
 const OWNER_OPACITY = 0.9;
 
+/* Режим глобуса з'явився в MapLibre 5. У старішій версії кнопка просто не показується. */
+export const GLOBE_SUPPORTED = typeof maplibregl.Map?.prototype?.setProjection === "function";
+
 // Біоми: кожна область отримує тип місцевості (пустеля, тайга, тропіки…) і один з 3 відтінків його кольору.
 const BIOME_COLORS = [
   ["#8ad84f", "#79cf45", "#9be05d"], // 0 помірний
@@ -229,7 +232,7 @@ function addGeoJsonSource(map, id, blob, options) {
 const worldCache = { model: null, regionsBlob: null, bordersBlob: null };
 
 const TerritoryMap = forwardRef(function TerritoryMap(
-  { mode = "view", owners, countries, myCountryId, selectedRid, onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null, onPointPick = null, overlay = null, tools = null },
+  { mode = "view", owners, countries, myCountryId, selectedRid, selectedCountryId = null, projection = "mercator", onSelectRegion, showCities = false, lang = "uk", selectedCityId = null, onSelectCity, cityOwners = null, selectedZoneOwner = null, onPointPick = null, overlay = null, tools = null },
   ref,
 ) {
   const containerRef = useRef(null);
@@ -405,6 +408,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           const btn = document.createElement("button");
           btn.type = "button";
           btn.title = t.label;
+          btn.dataset.tool = t.id;
           btn.setAttribute("aria-label", t.label);
           btn.innerHTML = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="#333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;margin:auto">${t.svg}</svg>`;
           btn.addEventListener("click", () => {
@@ -506,7 +510,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           source: "regions",
           paint: {
             "fill-color": "#ffffff",
-            "fill-opacity": ["case", ["boolean", ["feature-state", "sel"], false], 0.5, 0],
+            "fill-opacity": ["case", ["boolean", ["feature-state", "sel"], false], 0.5, ["boolean", ["feature-state", "csel"], false], 0.3, 0],
           },
         });
         // Адміністративні межі всередині одного власника: з'являються при наближенні.
@@ -514,12 +518,12 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           id: "borders-internal",
           type: "line",
           source: "borders",
-          minzoom: 1.5,
+          minzoom: 2.6,
           filter: ["==", ["get", "two"], 1],
           paint: {
             "line-color": MAP_COLORS.borderInternal,
             "line-width": ["case", ["==", ownerA, ownerB], 0.6, 0],
-            "line-opacity": ["interpolate", ["linear"], ["zoom"], 1.5, 0.3, 4, 0.75],
+            "line-opacity": ["interpolate", ["linear"], ["zoom"], 2.6, 0, 4, 0.75],
           },
         });
         // Усі інші лінії — один шар: кордон між різними власниками, узбережжя,
@@ -531,7 +535,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
             "line-color": ["case", isHighlighted, MAP_COLORS.selected, mineEdge, MAP_COLORS.mine, isOwnedCoast, MAP_COLORS.border, isCoast, MAP_COLORS.coast, MAP_COLORS.border],
-            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isOwnedCoast, 1.5, isCoast, 1.3, ["!=", ownerA, ownerB], 1.5, 0],
+            "line-width": ["case", isHighlighted, 3, mineEdge, 2.4, isOwnedCoast, 1.5, isCoast, 1.3, ["!=", ownerA, ownerB], 1.8, 0],
             "line-opacity": ["case", isHighlighted, 1, mineEdge, 1, isOwnedCoast, 0.95, isCoast, 0.85, 0.9],
           },
         });
@@ -666,7 +670,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
               }
             }
           }
-          latest.current.onSelectRegion({ rid: region.rid, name: region.name, index: idx, ownerId });
+          latest.current.onSelectRegion({ rid: region.rid, name: region.name, index: idx, ownerId, zoom: map.getZoom() });
         });
         map.on("mouseenter", "regions-fill", () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", "regions-fill", () => { map.getCanvas().style.cursor = ""; });
@@ -797,7 +801,9 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       // Та сама текстура суші, що й на решті території власника, щоб захоплена зона не відрізнялась.
       if (map.hasImage("land-tex")) map.addLayer({ id: "captured-texture", type: "fill", source: "captured", paint: { "fill-pattern": "land-tex", "fill-opacity": 0.34 } });
       // Кордон захопленої зони міста — темний, як і решта кордонів (а не кольору власника).
-      map.addLayer({ id: "captured-line", type: "line", source: "captured", layout: { "line-join": "round" }, paint: { "line-color": MAP_COLORS.border, "line-width": 1.6, "line-opacity": 0.95 } });
+      map.addLayer({ id: "captured-line", type: "line", source: "captured", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": MAP_COLORS.border, "line-width": 3, "line-opacity": 0.95 } });
+      // Подвійна лінія кордону: темна основа й тонка світла жилка поверх (як на стратегічних картах)
+      map.addLayer({ id: "captured-inner", type: "line", source: "captured", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#ffffff", "line-width": 0.9, "line-opacity": 0.55 } });
       // Зони міст усередині вибраної області (прев'ю: де проходитиме лінія фронту між містами)
       // Підсвітка вибраної території однієї країни в поділеній області
       map.addLayer({ id: "selzone-fill", type: "fill", source: "selzone", paint: { "fill-color": "#ffffff", "fill-opacity": 0.5 } });
@@ -968,6 +974,50 @@ const TerritoryMap = forwardRef(function TerritoryMap(
     w.selectedIndex = next;
   }, [status, selectedRid, citiesReady, cityOwners, countries, owners]);
 
+  // Проєкція: плоска карта або глобус (MapLibre 5+). Помилка тут не повинна ламати карту.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || status !== "ready") return;
+    const globe = projection === "globe";
+    try {
+      if (GLOBE_SUPPORTED) map.setProjection({ type: globe ? "globe" : "mercator" });
+    } catch (e) {
+      console.warn("Не вдалося змінити проєкцію карти:", e);
+    }
+    const btn = map.getContainer().querySelector('button[data-tool="globe"]');
+    if (btn) btn.style.background = globe ? "#cfe8ff" : "";
+  }, [status, projection]);
+
+  // Підсвітка всієї країни (при тапі здалека): легка заливка областей і контур по зовнішньому кордону.
+  useEffect(() => {
+    const map = mapRef.current;
+    const w = worldRef.current;
+    if (!map || status !== "ready" || !w.model) return;
+    const { model } = w;
+    const clear = () => {
+      const prev = w.countrySel;
+      if (!prev) return;
+      for (const i of prev.idxs) map.setFeatureState({ source: "regions", id: i }, { csel: false });
+      for (const a of prev.arcs) map.setFeatureState({ source: "borders", id: a }, { h: false });
+      w.countrySel = null;
+    };
+    clear();
+    if (!selectedCountryId) return;
+    const idxs = [];
+    (w.ownerByIndex || []).forEach((o, i) => { if (o === selectedCountryId) idxs.push(i); });
+    const arcs = new Set();
+    for (const i of idxs) {
+      map.setFeatureState({ source: "regions", id: i }, { csel: true });
+      for (const a of model.regionArcs[i]) {
+        const ra = model.arcRegions[2 * a], rb = model.arcRegions[2 * a + 1];
+        const other = ra === i ? rb : ra;
+        if (other < 0 || w.ownerByIndex[other] !== selectedCountryId) arcs.add(a);
+      }
+    }
+    for (const a of arcs) map.setFeatureState({ source: "borders", id: a }, { h: true });
+    w.countrySel = { idxs, arcs: [...arcs] };
+  }, [status, selectedCountryId, countries, owners]);
+
   const loadPercent = Math.round(loadProgress * 100);
 
   return (
@@ -1046,7 +1096,7 @@ function zoneSites(list, cityOwners) {
   if (cityOwners && list.length > 40) {
     for (let i = 40; i < list.length; i++) if (cityOwners[cityKey(list[i])]) top.push(list[i]);
   }
-  return top.map((c) => ({ x: c.x, y: c.y, k: c.i }));
+  return top.map((c) => ({ x: c.x, y: c.y, k: c.i, imp: c.imp || 0 }));
 }
 
 // Колір маркерів міст = колір країни, яка володіє областю міста (feature-state oc).

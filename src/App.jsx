@@ -2,7 +2,7 @@
 import DroneGame, { DRONE_MODELS } from "./DroneGame.jsx";
 import SniperGame from "./SniperGame.jsx";
 import LoadingScreen from "./LoadingScreen.jsx";
-import { REAL_ID_RE } from "./realCountries.js";
+import { REAL_ID_RE, loadRegionOwners } from "./realCountries.js";
 import NewsBroadcast from "./NewsBroadcast.jsx";
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from "react";
 import {
@@ -36,6 +36,7 @@ import {
   Swords,
   Crosshair,
   Target,
+  ArrowLeftRight,
   ShieldCheck,
   UserCog,
   Palette,
@@ -68,7 +69,7 @@ import {
   BarChart2,
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
-import TerritoryMap, { MAP_COLORS } from "./TerritoryMap";
+import TerritoryMap, { MAP_COLORS, GLOBE_SUPPORTED } from "./TerritoryMap";
 import { fmtPopulation, loadCities, cityKey } from "./map/cities";
 import {
   loadNations,
@@ -788,6 +789,7 @@ async function breakDiplomacy(kind, mine, other) {
 /* ------------------------------------------------------------------ */
 
 const WAR_PREFIX = "war:";
+const COUNTRY_CHANGE_COOLDOWN_MS = 24 * 3600 * 1000; // як часто можна змінювати країну
 const WAR_CLICKS_PREFIX = "warc:";
 const WAR_PREP_MS = 10 * 60 * 1000;
 const WAR_BATTLE_MS = 60 * 60 * 1000;
@@ -871,6 +873,11 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   const now = Date.now();
   const id = "w_" + now.toString(36) + Math.random().toString(36).slice(2, 5);
   const defLevel = await getCityDefLevel(city.key || "").catch(() => 0);
+  /* Країна без жодного гравця не лишається беззахисною: її обороняє бот, сила якого залежить від розміру країни. */
+  const defHasPlayers = (players || []).some((p) => p.countryCode === defender);
+  const botDef = defHasPlayers
+    ? 0
+    : Math.round((CITY_DEF_THRESHOLDS[defLevel] || WAR_TARGET) * (0.5 + Math.min(1, (COUNTRY_MAP[defender]?.regionCount || 1) / 50)));
   const war = {
     id,
     attacker,
@@ -886,6 +893,7 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
     defAllies: [],
     target: CITY_DEF_THRESHOLDS[defLevel] || WAR_TARGET,
     defLevel,
+    botDef,
     status: "active",
   };
   await setJSON(WAR_PREFIX + id, war, true);
@@ -974,11 +982,39 @@ async function acceptWarInvite(meta) {
   return { ok: true };
 }
 
+/* Скільки міст зараз контролює країна. null, якщо дані недоступні. */
+async function countryCityCount(code) {
+  const [nationsNow, cities] = await Promise.all([loadNations(), loadCities()]);
+  if (!nationsNow || !cities.list.length) return null;
+  const co = nationsNow.cityOwners || {};
+  let n = 0;
+  for (const c of cities.list) if ((co[cityKey(c)] || nationsNow.owners[c.rid]) === code) n++;
+  return n;
+}
+
+/* Країни, які мали міста на старті, а тепер не мають жодного, вибули з гри. */
+async function computeDeadCountries(nations) {
+  const co = nations?.cityOwners || {};
+  if (!Object.keys(co).length) return new Set();
+  const [cities, ro] = await Promise.all([loadCities(), loadRegionOwners()]);
+  if (!cities.list.length || !ro) return new Set();
+  const had = new Set();
+  const have = new Set();
+  for (const c of cities.list) {
+    const base = ro.r[c.rid];
+    if (base) had.add(base);
+    const o = co[cityKey(c)] || nations.owners[c.rid];
+    if (o) have.add(o);
+  }
+  return new Set([...had].filter((x) => !have.has(x)));
+}
+
 /* Завершення війни: лише один клієнт виконує підсумки (блокування через insert-if-absent) */
 async function finalizeWar(w, players, forcedWinner = null) {
   const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
   if (lock !== "ok") return false;
   const totals = await fetchWarTotals(w.id);
+  totals.def += w.botDef || 0; // оборона бота (країни без гравців)
   const net = totals.att - totals.def;
   const win = forcedWinner ? forcedWinner === "att" : net >= (w.target || WAR_TARGET);
   const winner = win ? w.attacker : w.defender;
@@ -995,25 +1031,12 @@ async function finalizeWar(w, players, forcedWinner = null) {
     else await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
     // нова власниця починає з нульової оборони міста
     if (w.cityKey) await storageSet(CITY_DEF_PREFIX + w.cityKey, "0", true);
-    // Якщо в захисника не лишилось ні областей, ні міст — він з'являється у вільній області
-    const nationsNow = await loadNations();
-    if (nationsNow) {
-      const regionsLeft = Object.values(nationsNow.owners).filter((c) => c === w.defender).length;
-      const citiesLeft = Object.values(nationsNow.cityOwners || {}).filter((c) => c === w.defender).length;
-      if (regionsLeft === 0 && citiesLeft === 0) {
-        try {
-          const cities = await loadCities();
-          const free = [...cities.byRid.keys()].filter((rid) => !nationsNow.owners[rid]);
-          if (free.length) {
-            const rid = free[Math.floor(Math.random() * free.length)];
-            if ((await sbStorageInsertIfAbsent(TERRITORY_PREFIX + rid, w.defender, true)) === "ok") {
-              respawnNote = " Країна втратила все, тож відроджується у вільній області.";
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-      }
+    // Країна, що втратила всі міста, вибуває з гри: її гравці обирають нову країну
+    try {
+      const left = await countryCityCount(w.defender);
+      if (left === 0) respawnNote = " Країна втратила всі міста й вибула з гри, її гравці обирають нову країну.";
+    } catch {
+      /* ignore */
     }
   }
   const attSide = [w.attacker, ...(w.attAllies || [])];
@@ -1171,6 +1194,7 @@ const DEFAULT_THEME = "darkblue";
 const NEUTRAL_COUNTRY_COLOR = "#64748b";
 const COUNTRIES = [];
 const COUNTRY_MAP = {};
+let DEAD_COUNTRIES = new Set(); // країни без жодного міста: вибули з гри
 let countriesRev = 0; // зростає при кожному оновленні реєстру — для залежностей useMemo
 
 function setCountriesRegistry(list) {
@@ -1189,7 +1213,7 @@ function setCountriesRegistry(list) {
    або з кодом, якого немає на карті, мають обрати нову країну; прогрес зберігається. */
 function isLegacyCountryCode(code) {
   if (!code || !REAL_ID_RE.test(String(code))) return true;
-  return countriesRev > 0 && !COUNTRY_MAP[code];
+  return countriesRev > 0 && (!COUNTRY_MAP[code] || DEAD_COUNTRIES.has(code));
 }
 
 /* Прапор країни (емодзі за ISO) на кольоровій плашці її кольору. Пропс code — id країни. */
@@ -1651,6 +1675,7 @@ const TRANSLATIONS = {
   nn_country_name_ph: { uk: "Наприклад, Республіка Вільних", en: "For example, Republic of the Free", ru: "Например, Республика Свободных" },
   nn_confirm_btn: { uk: "Підтвердити", en: "Confirm", ru: "Подтвердить" },
   nn_back: { uk: "Назад", en: "Back", ru: "Назад" },
+  nn_cities_count: { uk: "Міст", en: "Cities", ru: "Городов" },
   nn_regions_count: { uk: "областей", en: "regions", ru: "областей" },
   nn_reassign_note: { uk: "У грі тепер реальні країни. Твій прогрес збережено — обери країну, за яку гратимеш далі.", en: "The game now uses real countries. Your progress is kept — pick the country you will play for.", ru: "В игре теперь реальные страны. Твой прогресс сохранён — выбери страну, за которую будешь играть." },
   nn_legend_free: { uk: "Вільні", en: "Free", ru: "Свободные" },
@@ -1819,6 +1844,7 @@ export default function App() {
   }, [player]);
 
   /* Завантажує країни й володіння. Якщо база недоступна — лишаємо те, що вже було. */
+  const [, setDeadRev] = useState(0);
   const refreshNations = useCallback(async () => {
     let timer;
     const data = await Promise.race([
@@ -1830,6 +1856,12 @@ export default function App() {
     setCountriesRegistry(data.countries);
     setNations(data);
     setNationsLoaded(true);
+    computeDeadCountries(data)
+      .then((set) => {
+        const same = set.size === DEAD_COUNTRIES.size && [...set].every((x) => DEAD_COUNTRIES.has(x));
+        if (!same) { DEAD_COUNTRIES = set; setDeadRev((n) => n + 1); }
+      })
+      .catch(() => null);
     return true;
   }, []);
 
@@ -2086,6 +2118,37 @@ export default function App() {
     [player, nations, refreshNations]
   );
 
+  /* Зміна країни (Штаб → Армія): раз на добу, не під час війни своєї країни. */
+  const changeCountry = useCallback(
+    async (newId) => {
+      if (!player) return { ok: false, reason: "Немає гравця" };
+      const old = player.countryCode;
+      if (!COUNTRY_MAP[newId]) return { ok: false, reason: "Такої країни немає" };
+      if (newId === old) return { ok: false, reason: "Ти вже граєш за цю країну" };
+      const dead = DEAD_COUNTRIES.has(old);
+      const left = dead ? 0 : (player.countryChangedAt || 0) + COUNTRY_CHANGE_COOLDOWN_MS - Date.now();
+      if (left > 0) return { ok: false, reason: "Змінити країну можна раз на добу. Лишилось " + Math.ceil(left / 3600000) + " год." };
+      const wars = dead ? [] : await loadActiveWars();
+      if (wars.some((w) => w.attacker === old || w.defender === old)) return { ok: false, reason: "Поки твоя країна у війні, змінити країну не можна." };
+      const wasLeader = (await getLeader(old)) === player.id || COUNTRY_MAP[old]?.leaderId === player.id;
+      if (wasLeader) await setLeaderStorage(old, "");
+      try {
+        const adv = await getAdvisors(old);
+        if (adv.includes(player.id)) await saveAdvisors(old, adv.filter((x) => x !== player.id));
+      } catch { /* радники не критичні */ }
+      let becameLeader = false;
+      if (!(await getLeader(newId))) { await setLeaderStorage(newId, player.id); becameLeader = true; }
+      const rec = { ...player, countryCode: newId, countryChangedAt: Date.now() };
+      await storageSet(PLAYER_PREFIX + rec.id, JSON.stringify(rec), true);
+      await refreshNations();
+      setIsLeader(becameLeader);
+      setIsAdvisor(false);
+      setPlayer(rec);
+      return { ok: true };
+    },
+    [player, refreshNations]
+  );
+
   /* Лідер змінює колір своєї країни (Панель управління) */
   const changeCountryColor = useCallback(
     async (color) => {
@@ -2307,7 +2370,7 @@ export default function App() {
         if (phase === "battle") {
           await flushClicks(mine);
           const totals = await fetchWarTotals(mine.id, playerIdForWar);
-          if (!stopped) setWarTotals(totals);
+          if (!stopped) setWarTotals({ ...totals, def: totals.def + (mine.botDef || 0) });
           delay = 3000;
         } else if (phase === "prep") {
           delay = 5000;
@@ -2386,6 +2449,7 @@ export default function App() {
                 nations={nations}
                 isLeader={isLeader}
                 onChangeCountryColor={changeCountryColor}
+                onChangeCountry={changeCountry}
                 lang={language}
                 mail={mail}
                 unreadCount={unreadCount}
@@ -2809,14 +2873,24 @@ function TosDeclinedScreen({ lang, onReview }) {
 
 function BlockedScreen({ reason }) {
   return (
-    <div className="cn-tos-screen">
-      <div className="cn-tos-glow" />
-      <div className="cn-tos-card">
-        <Ban size={36} className="cn-tos-icon cn-tos-icon--dim" />
-        <div className="cn-tos-title">Акаунт заблоковано</div>
-        <div className="cn-tos-body">
-          {reason || "Доступ до гри для цього акаунту обмежено адміністрацією."}
-        </div>
+    <div className="cn-blocked">
+      <img className="cn-blocked-bg" src="/img/blocked-bg.webp" alt="" />
+      <div className="cn-blocked-shade" />
+      <div className="cn-blocked-top">
+        <div className="cn-blocked-title">Доступ закрито</div>
+        <div className="cn-blocked-sub">Твій акаунт заблоковано адміністрацією.</div>
+        {reason ? (
+          <div className="cn-blocked-reason">
+            <small>Причина</small>
+            {reason}
+          </div>
+        ) : null}
+      </div>
+      <div className="cn-blocked-bottom">
+        <div className="cn-blocked-hint">Вважаєш, що це помилка? Напиши в підтримку, і ми розглянемо розблокування твого акаунту.</div>
+        <button type="button" className="cn-blocked-btn" onClick={() => { cnSfx.modalOpen(); openSupportChat(); }}>
+          <LifeBuoy size={18} /> Написати в підтримку
+        </button>
       </div>
     </div>
   );
@@ -2852,8 +2926,9 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return countries;
-    return countries.filter((c) => String(c.name).toLowerCase().includes(q) || String(c.nameEn || "").toLowerCase().includes(q) || c.id.toLowerCase() === q);
+    const alive = countries.filter((c) => !DEAD_COUNTRIES.has(c.id)); // країни без міст вибули з гри
+    if (!q) return alive;
+    return alive.filter((c) => String(c.name).toLowerCase().includes(q) || String(c.nameEn || "").toLowerCase().includes(q) || c.id.toLowerCase() === q);
   }, [query, countries]);
 
   const goBack = () => {
@@ -3311,6 +3386,7 @@ function WarHud({ war, me, isLeader, totals, pendingRef, players = [] }) {
       <div className="cn-warhud-city">
         {phase === "prep" ? "Війна за місто" : "Битва за місто"} <b>{war.cityName}</b>
       </div>
+      {war.botDef > 0 && <div className="cn-dip-sub" style={{ textAlign: "center" }}>У країни-захисника немає гравців: її обороняє бот (+{fmt(war.botDef)}).</div>}
 
       <div className="cn-warhud-sides">
         {sideCard("att", war.attacker, attTotal)}
@@ -3528,7 +3604,7 @@ const ARMY_SUBS = [
   { id: "defense", label: "Оборона", Icon: Shield, text: "" },
 ];
 
-function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared, onUpdatePlayer }) {
+function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, onChangeCountry, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared, onUpdatePlayer }) {
   const [view, setView] = useState(null); // null | id розділу | "dev"
   const [pickKind, setPickKind] = useState(null); // null | "ally" | "pact"
   const [dip, setDip] = useState(null);
@@ -3537,6 +3613,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
   const [warPick, setWarPick] = useState(null); // null | { step: "country" } | { step: "city", country }
   const [warMsg, setWarMsg] = useState("");
   const [armySub, setArmySub] = useState(null); // null | id підрозділу Армії
+  const [switchOpen, setSwitchOpen] = useState(false); // вибір нової країни
   const [droneModel, setDroneModel] = useState("quad");
   const [droneChoose, setDroneChoose] = useState(false);
   const [sniperRun, setSniperRun] = useState(null); // null | { country } — замах
@@ -3874,6 +3951,19 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
           </button>
           <div className="cn-screen-title">{title}</div>
         </div>
+        {switchOpen && (
+          <CountrySwitchModal
+            countries={nations?.countries || []}
+            current={player.countryCode}
+            lang={lang}
+            onClose={() => setSwitchOpen(false)}
+            onConfirm={async (id) => {
+              const res = await onChangeCountry(id);
+              if (res.ok) { setSwitchOpen(false); setView(null); }
+              return res;
+            }}
+          />
+        )}
         {view === "army" ? (
           <ArmyPanel
             war={war}
@@ -3887,6 +3977,7 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, la
             onPickDefCity={() => { cnSfx.navSwitch(); setDefMsg(""); setDefPick(true); }}
             onUpgradeDef={upgradeDef}
             onSniper={() => { cnSfx.navSwitch(); setWarMsg(""); setWarPick({ step: "country", sniper: true }); }}
+            onChangeCountry={() => { cnSfx.navSwitch(); setSwitchOpen(true); }}
             onLaunchDrone={() => { cnSfx.navSwitch(); setWarMsg(""); setDroneChoose(true); }}
             onDeclare={async () => {
               setWarMsg("");
@@ -4037,7 +4128,64 @@ function HqRowTile({ Icon, label, hint, onClick, badge }) {
 }
 
 /* Армія (лише лідер): Оголосити війну та Оборона міста */
-function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, onSniper, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
+function CountrySwitchModal({ countries, current, lang = "uk", onClose, onConfirm }) {
+  const [query, setQuery] = useState("");
+  const [pending, setPending] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const list = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return countries.filter((c) => c.id !== current && !DEAD_COUNTRIES.has(c.id) && (!q || String(c.name).toLowerCase().includes(q) || String(c.nameEn || "").toLowerCase().includes(q) || c.id.toLowerCase() === q));
+  }, [countries, current, query]);
+  const confirm = async () => {
+    if (!pending || busy) return;
+    setBusy(true); setError("");
+    const res = await onConfirm(pending.id);
+    if (!res.ok) { setError(res.reason || "Не вдалося змінити країну"); setBusy(false); setPending(null); }
+  };
+  return (
+    <div className="cn-modal-overlay" onClick={() => !busy && onClose()}>
+      <div className="cn-modal-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="cn-modal-header">
+          <div className="cn-modal-title"><ArrowLeftRight size={16} /> Змінити країну</div>
+          <button className="cn-icon-btn" type="button" onClick={() => !busy && onClose()} aria-label="Закрити"><X size={16} /></button>
+        </div>
+        {pending ? (
+          <div className="cn-confirm-modal" style={{ position: "static", boxShadow: "none", background: "transparent", border: 0 }}>
+            <Flag code={pending.id} size={52} className="cn-country-badge--lg" />
+            <div className="cn-confirm-title">{pending.name}</div>
+            <div className="cn-confirm-text">Перейти до цієї країни? Наступна зміна можлива лише через добу. Якщо ти лідер своєї країни, ти втратиш цю роль.</div>
+            <div className="cn-confirm-actions">
+              <button type="button" className="cn-dev-btn" disabled={busy} onClick={() => setPending(null)}>Назад</button>
+              <button type="button" className="cn-dev-btn cn-dev-btn--primary" disabled={busy} onClick={confirm}>{busy ? "…" : "Перейти"}</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="cn-country-search-wrap cn-country-search-wrap--static">
+              <Search size={15} className="cn-country-search-icon" />
+              <input className="cn-country-search" placeholder={t(lang, "onboard_country_search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            </div>
+            {error && <div className="cn-onboard-blocked-msg">{error}</div>}
+            <div className="cn-nation-list">
+              {list.map((c) => (
+                <button key={c.id} type="button" className="cn-nation-row" onClick={() => { cnSfx.toggle(); setError(""); setPending(c); }}>
+                  <Flag code={c.id} size={30} className="cn-country-badge--lg" />
+                  <span className="cn-nation-name">{c.name}</span>
+                  <span className="cn-nation-meta">{c.regionCount || 0} {t(lang, "nn_regions_count")}</span>
+                  <ChevronRight size={18} />
+                </button>
+              ))}
+              {list.length === 0 && <div className="cn-nation-empty">{t(lang, "onboard_country_empty")}</div>}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, onSniper, onChangeCountry, sub, onSub, player, defCity, defLevel, defMsg, onPickDefCity, onUpgradeDef }) {
   const phase = war ? warPhase(war) : null;
   if (sub === "defense") {
     const unlocked = upgLevel(player, "cdef");
@@ -4094,6 +4242,7 @@ function ArmyPanel({ war, msg, onDeclare, onLaunchDrone, onSniper, sub, onSub, p
       )}
       <HqRowTile Icon={Target} label="Замах" hint="Снайпер на даху: дочекайся лідера й влуч" onClick={onSniper} />
       <HqRowTile Icon={Crosshair} label="Запустити дрон" hint="Обери місто й сам керуй дроном у 3D" onClick={onLaunchDrone} />
+      <HqRowTile Icon={ArrowLeftRight} label="Змінити країну" hint={"Зараз: " + (COUNTRY_MAP[player.countryCode]?.name || "—") + ". Раз на добу, не під час війни"} onClick={onChangeCountry} />
       {ARMY_SUBS.map((x) => (
         <HqRowTile key={x.id} Icon={x.Icon} label={x.label} hint="Покращення оборони твоїх міст" onClick={() => onSub(x.id)} />
       ))}
@@ -5282,7 +5431,6 @@ function ProfileScreen({
       <div className="cn-lb-header">
         <div className="cn-screen-title">Профіль</div>
         <div className="cn-profile-header-actions">
-
         </div>
       </div>
 
@@ -7101,11 +7249,35 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
   const [, setWarTick] = useState(0);
   const [claimBusy, setClaimBusy] = useState(false);
   const [claimMsg, setClaimMsg] = useState(null); // { ok, text }
+  const [globe, setGlobe] = useState(() => {
+    try { return GLOBE_SUPPORTED && localStorage.getItem("cn_map_globe") === "1"; } catch { return false; }
+  });
+  const toggleGlobe = () => {
+    cnSfx.toggle();
+    setGlobe((g) => {
+      const next = !g;
+      try { localStorage.setItem("cn_map_globe", next ? "1" : "0"); } catch { /* ignore */ }
+      return next;
+    });
+  };
   useEffect(() => { setClaimMsg(null); }, [selected?.rid]);
 
   const countries = nations?.countries || [];
   const owners = nations?.owners || {};
   const myCountry = COUNTRY_MAP[me?.countryCode];
+  const [citiesData, setCitiesData] = useState(null);
+  useEffect(() => { let off = false; loadCities().then((d) => { if (!off) setCitiesData(d); }).catch(() => {}); return () => { off = true; }; }, []);
+  /* Скільки міст зараз контролює кожна країна (захоплені міста мають власний запис) */
+  const cityCounts = useMemo(() => {
+    const out = {};
+    if (!citiesData) return out;
+    const co = nations?.cityOwners || {};
+    for (const c of citiesData.list) {
+      const o = co[cityKey(c)] || owners[c.rid];
+      if (o) out[o] = (out[o] || 0) + 1;
+    }
+    return out;
+  }, [citiesData, owners, nations?.cityOwners]);
 
   /* Активні конфлікти: завантажуємо при вході, при оновленні та раз на хвилину */
   const loadWars = useCallback(async () => {
@@ -7312,13 +7484,16 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             owners={owners}
             countries={countries}
             myCountryId={me?.countryCode}
-            selectedRid={selected?.rid}
+            selectedRid={selected?.countryLevel ? null : selected?.rid}
+            selectedCountryId={selected?.countryLevel ? selected.ownerId : null}
+            projection={globe ? "globe" : "mercator"}
             onSelectRegion={(r) => {
               setSelectedCity(null);
-              setSelected((prev) => (prev?.rid === r.rid && prev?.ownerId === r.ownerId ? null : r));
+              setSelected((prev) => (prev?.rid === r.rid && prev?.ownerId === r.ownerId ? null : { ...r, countryLevel: !!r.ownerId && (r.zoom ?? 99) < 4.5 }));
             }}
             showCities
             tools={[
+              ...(GLOBE_SUPPORTED ? [{ id: "globe", label: "Глобус / плоска карта", svg: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>', onClick: toggleGlobe }] : []),
               { id: "search", label: "Пошук", svg: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', onClick: () => setSearchOpen((v) => !v) },
               { id: "refresh", label: "Оновити", svg: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>', onClick: () => { onRefresh(); loadWars(); } },
             ]}
@@ -7417,16 +7592,25 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             <button className="cn-map-card-close" onClick={() => setSelected(null)} type="button" aria-label="Закрити">
               <X size={14} />
             </button>
-            <div className="cn-map-card-name">
-              {selected.name}
-              {kind === "own" && <span className="cn-map-card-tag">{t(lang, "nn_legend_own")}</span>}
-            </div>
+            {selectedCountry ? (
+              <div className="cn-country-head">
+                <Flag code={selectedCountry.id} size={46} className="cn-country-badge--lg" />
+                <div className="cn-country-head-text">
+                  <div className="cn-map-card-name">
+                    {selectedCountry.name}
+                    {kind === "own" && <span className="cn-map-card-tag">{t(lang, "nn_legend_own")}</span>}
+                  </div>
+                  <div className="cn-map-card-sub" style={{ margin: 0 }}>
+                    {selected.countryLevel ? `${selectedCountry.regionCount || 0} ${t(lang, "nn_regions_count")}` : `${t(lang, "nn_region")}: ${selected.name}`}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="cn-map-card-name">{selected.name}</div>
+            )}
             {kind === "free" && <div className="cn-map-card-sub">{t(lang, "nn_region_free_text")}</div>}
             {selectedCountry && (
               <>
-                <div className="cn-map-card-country">
-                  <Flag code={selectedCountry.id} size={22} className="cn-country-badge--lg" /> {selectedCountry.name}
-                </div>
                 <div className="cn-map-card-stats">
                   <div className="cn-map-card-stat">
                     <span className="cn-map-card-stat-label">Country Power</span>
@@ -7439,6 +7623,14 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
                   <div className="cn-map-card-stat">
                     <span className="cn-map-card-stat-label">{t(lang, "lb_players")}</span>
                     <span className="cn-map-card-stat-value">{fmt(stats.count[selectedCountry.id] || 0)}</span>
+                  </div>
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "nn_regions_count")}</span>
+                    <span className="cn-map-card-stat-value">{fmt(selectedCountry.regionCount || 0)}</span>
+                  </div>
+                  <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "nn_cities_count")}</span>
+                    <span className="cn-map-card-stat-value">{fmt(cityCounts[selectedCountry.id] || 0)}</span>
                   </div>
                   <div className="cn-map-card-stat">
                     <span className="cn-map-card-stat-label">{t(lang, "nn_leader")}</span>
@@ -8156,6 +8348,18 @@ function GlobalStyles() {
       @keyframes cn-pulse { 0%,100% { opacity: 0.6; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
 
       /* Terms of service gate */
+      .cn-blocked { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: max(env(safe-area-inset-top), 28px) 22px max(env(safe-area-inset-bottom), 26px); overflow: hidden; background: #0a1fa8; color: #fff; text-align: center; }
+      .cn-blocked-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 58%; }
+      .cn-blocked-shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(4,14,90,0.78) 0%, rgba(4,14,90,0.25) 30%, rgba(4,14,90,0) 48%, rgba(4,14,90,0.1) 72%, rgba(4,14,90,0.82) 100%); pointer-events: none; }
+      .cn-blocked-top, .cn-blocked-bottom { position: relative; z-index: 1; width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+      .cn-blocked-top { margin-top: 6vh; }
+      .cn-blocked-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 30px; letter-spacing: 0.02em; text-shadow: 0 3px 18px rgba(0,0,0,0.5); }
+      .cn-blocked-sub { font-size: 15px; line-height: 1.45; color: #dbe8ff; text-shadow: 0 2px 10px rgba(0,0,0,0.5); }
+      .cn-blocked-reason { margin-top: 6px; padding: 10px 14px; border-radius: 14px; background: rgba(5,12,70,0.62); border: 1px solid rgba(255,255,255,0.22); backdrop-filter: blur(6px); font-size: 13.5px; line-height: 1.5; max-width: 100%; overflow-wrap: anywhere; }
+      .cn-blocked-reason small { display: block; font-size: 10px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; color: #ffb4b4; margin-bottom: 3px; }
+      .cn-blocked-hint { font-size: 13px; line-height: 1.5; color: #dbe8ff; text-shadow: 0 2px 10px rgba(0,0,0,0.6); }
+      .cn-blocked-btn { display: inline-flex; align-items: center; justify-content: center; gap: 9px; width: 100%; padding: 15px 18px; border: 0; border-radius: 16px; cursor: pointer; font: 800 15.5px/1 inherit; color: #0a1fa8; background: linear-gradient(180deg, #ffffff, #d6e4ff); box-shadow: 0 8px 26px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.5) inset; }
+      .cn-blocked-btn:active { transform: translateY(1px) scale(0.99); }
       .cn-tos-screen {
         position: relative; z-index: 1; min-height: 100vh; width: 100%;
         display: flex; align-items: center; justify-content: center; padding: 24px;
@@ -9581,6 +9785,8 @@ function GlobalStyles() {
         from { opacity: 0; transform: translateY(14px) scale(0.97); }
         to { opacity: 1; transform: translateY(0) scale(1); }
       }
+      .cn-country-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+      .cn-country-head-text { min-width: 0; }
       .cn-map-card--anim { animation: cn-card-in 0.38s cubic-bezier(0.22, 1, 0.36, 1); }
       @keyframes cn-toast-in {
         from { opacity: 0; transform: translate(-50%, -10px) scale(0.95); }
