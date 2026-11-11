@@ -78,6 +78,16 @@ export default async function handler(req, res) {
     res.status(500).json({ error: "Сервер не налаштований" });
     return;
   }
+  /* Адмін може вимкнути Telegram-сповіщення для всіх гравців (ключ cfg:tgnotify = "off") */
+  try {
+    const flag = await sbGet("cfg:tgnotify");
+    if (String(flag || "").replace(/"/g, "") === "off") {
+      res.status(200).json({ ok: true, disabled: true, sent: 0, total: 0 });
+      return;
+    }
+  } catch {
+    /* якщо прапорець не прочитався — діємо як зазвичай */
+  }
   if (!rateLimit("notify:" + clientIp(req), 10, 60_000)) {
     res.status(429).json({ error: "Забагато запитів" });
     return;

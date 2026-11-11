@@ -5,7 +5,8 @@
 --
 --  Що це дає:
 --   • анонімний ключ (який лежить у клієнті) більше НЕ може видаляти записи;
---   • сервісні ключі (support:*, payment:*, warnotify:*) і ціна Premium Pass
+--   • сервісні ключі (support:*, payment:*, warnotify:*), cfg:* (вимикач сповіщень), seasonrew:* (нагороди сезону)
+--     і ціна Premium Pass
 --     закриті для анонімного читання/запису — ними керує лише сервер;
 --   • обмежено довжину ключа й розмір значення (захист від засмічення бази).
 --  Сервер (api/*) працює через service_role і RLS обходить — йому нічого не заважає.
@@ -32,18 +33,18 @@ create policy kv_insert on public.kv_store
   with check (
     length(key) <= 300
     and length(value) <= 500000
-    and key !~ '^(support:|payment:|warnotify:)'
+    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:)'
     and key <> 'premium_pass_price_stars'
   );
 
 -- Оновлення записів: ті самі обмеження
 create policy kv_update on public.kv_store
   for update to anon, authenticated
-  using (key !~ '^(support:|payment:|warnotify:)' and key <> 'premium_pass_price_stars')
+  using (key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:)' and key <> 'premium_pass_price_stars')
   with check (
     length(key) <= 300
     and length(value) <= 500000
-    and key !~ '^(support:|payment:|warnotify:)'
+    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:)'
     and key <> 'premium_pass_price_stars'
   );
 

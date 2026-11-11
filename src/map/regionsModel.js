@@ -164,6 +164,11 @@ export async function buildRegionModel(topology, yieldFn = async () => {}) {
       return out;
     },
 
+    /* Координати арки [lng0, lat0, lng1, lat1, …] — для експорту карти в зображення */
+    arcPoints(a) {
+      return arcPts[a];
+    },
+
     /* Текст арок потрібен лише для побудови GeoJSON — після цього його можна звільнити
        (координати в arcPts лишаються: вони потрібні для зон міст). */
     release() {

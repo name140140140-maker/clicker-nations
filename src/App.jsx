@@ -24,6 +24,7 @@ import {
   Search,
   Layers,
   Settings,
+  Wrench,
   Mail,
   MailOpen,
   Send,
@@ -67,10 +68,14 @@ import {
   TrendingUp,
   Landmark,
   BarChart2,
+  Play,
 } from "lucide-react";
 import { sbStorageGet, sbStorageSet, sbStorageListKeys, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
 import TerritoryMap, { MAP_COLORS, GLOBE_SUPPORTED } from "./TerritoryMap";
 import { fmtPopulation, loadCities, cityKey } from "./map/cities";
+import { WAR_ACHIEVEMENTS, normalizeAch, withLoginStreak, withWarResults, unlockedIds } from "./achievements";
+import { renderWorldImage } from "./map/exportImage";
+import { logMapEvent, loadMapEvents, prepareReplay } from "./map/replay";
 import {
   loadNations,
   createCountry,
@@ -139,6 +144,7 @@ const FREE_CAPTURE_COST = 5000; // Power за захоплення вільно�
 const FREE_CAPTURE_CD_MS = 10 * 60 * 1000; // пауза між захопленнями однієї країни
 const CAPCD_PREFIX = "capcd:"; // capcd:<країна> → час, до якого країна не може захоплювати вільні області
 const CITY_DEF_UPGRADE_COST = 5000; // Power за рівень оборони міста
+const TG_NOTIFY_KEY = "cfg:tgnotify"; // "off" — адмін вимкнув Telegram-сповіщення для всіх
 const CITY_DEF_PREFIX = "citydef:"; // citydef:<cityKey> → рівень оборони міста (0..5)
 const UPGRADES = [
   {
@@ -340,6 +346,28 @@ async function addNews(text, opts = {}) {
 /* Лист від адміністрації: приходить гравцеві в Пошту у розділ «Від адміністрації» */
 async function sendAdminMail(playerId, subject, body) {
   return addMail(playerId, { type: "admin", from: "admin", subject: String(subject || "Повідомлення від адміністрації").slice(0, 80), body: String(body || "").slice(0, 1000) });
+}
+
+/* Кінець сезону: карта скидається ЛИШЕ вручну адміном (адмін-панель → «Кінець сезону»).
+   Коли час сезону вийшов, гра один раз надсилає адміну лист у Пошту. */
+const SEASON_END_PREFIX = "seasonend:";
+const SEASON_REWARD_PREFIX = "seasonrew:"; // seasonrew:<playerId> → { season, points, rank, countryCode, claimed }
+function seasonEndsAt(season) {
+  return (season?.startedAt || 0) + (season?.durationDays || SEASON_DURATION_DAYS) * 24 * 60 * 60 * 1000;
+}
+async function notifyAdminSeasonEnded(season) {
+  const n = season?.seasonNumber || 1;
+  const lock = await sbStorageInsertIfAbsent(SEASON_END_PREFIX + n, String(Date.now()), true);
+  const adminId = await storageGet(TG_MAP_PREFIX + SUPER_ADMIN_TG_ID, true);
+  if (lock !== "ok") {
+    // лист не вдалося надіслати раніше (адмін ще не відкривав гру) — надішлемо, коли він зайде
+    if (!(isSuperAdmin() && adminId && (await storageGet(SEASON_END_PREFIX + n, true)) === "pending")) return;
+  } else if (!adminId) {
+    await storageSet(SEASON_END_PREFIX + n, "pending", true);
+    return;
+  }
+  await storageSet(SEASON_END_PREFIX + n, "sent", true);
+  await sendAdminMail(adminId, `Сезон ${n} завершився`, `Час сезону ${n} вийшов. Карта сама не скидається: зайди в Налаштування → Адмін-панель → «Кінець сезону», натисни «Скинути карту» і підтверди. Гравці отримають нагороди за місце своєї країни в рейтингу, а карта стане стартовою.`);
 }
 
 /* Season: shared across all players. First player to load it after it's
@@ -654,7 +682,7 @@ async function loadDiplomacy() {
     }
     if (!v) continue;
     if (v.kind === "req") {
-      if (REAL_ID_RE.test(String(v.fromCountry)) && REAL_ID_RE.test(String(v.toCountry))) out.requests.push(v);
+      if (REAL_ID_RE.test(String(v.from)) && REAL_ID_RE.test(String(v.to))) out.requests.push(v);
       continue;
     }
     if (v.kind !== "ally" && v.kind !== "pact") continue;
@@ -728,6 +756,8 @@ async function respondDiplomacyRequest(requestId, accept) {
   const req = await getJSON(DIP_PREFIX + "req:" + requestId, true, null);
   if (!req) return { ok: false, reason: "Пропозицію не знайдено" };
   if (req.status !== "pending") return { ok: false, reason: "На цю пропозицію вже відповіли" };
+  if (Date.now() - (req.ts || 0) > 24 * 3600 * 1000) return { ok: false, reason: "Пропозиція застаріла" };
+  if (req.type === "ceasefire") return respondCeasefireRequest(req, accept);
   await setJSON(DIP_PREFIX + "req:" + requestId, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
   if (accept) {
     await setJSON(DIP_PREFIX + req.type + ":" + pairId(req.from, req.to), { kind: req.type, a: req.from, b: req.to, active: true, ts: Date.now() }, true);
@@ -747,6 +777,74 @@ async function respondDiplomacyRequest(requestId, accept) {
         ? `${toName} прийняли вашу пропозицію: ${DIP_KIND[req.type].noun}.`
         : `${toName} відхилили вашу пропозицію: ${DIP_KIND[req.type].noun}.`,
     });
+  }
+  return { ok: true };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Перемир'я: лідери головних країн війни домовляються її зупинити.     */
+/*  Місто лишається в захисника, обидві сторони відпочивають як після    */
+/*  звичайної війни (WAR_COOLDOWN_MS). Запит — dip:req:<id> з type       */
+/*  "ceasefire", лист у Пошті той самий "dip-request" (Прийняти/Відхилити)*/
+/* ------------------------------------------------------------------ */
+
+async function sendCeasefireRequest(war, from) {
+  if (!war || war.status === "ended") return { ok: false, reason: "Війна вже завершилась" };
+  if (from !== war.attacker && from !== war.defender) return { ok: false, reason: "Перемир'я пропонує лідер головної країни війни" };
+  const phase = warPhase(war);
+  if (phase !== "prep" && phase !== "battle") return { ok: false, reason: "Війна вже завершується" };
+  const to = from === war.attacker ? war.defender : war.attacker;
+  const toLeader = await getLeader(to);
+  if (!toLeader) return { ok: false, reason: "У ворожої країни немає лідера, тож домовитись нема з ким" };
+  const dip = await loadDiplomacy();
+  if (dip.requests.some((r) => r.status === "pending" && r.type === "ceasefire" && r.warId === war.id && Date.now() - r.ts < 24 * 3600 * 1000)) {
+    return { ok: false, reason: "Пропозицію перемир'я вже надіслано — чекаємо відповіді" };
+  }
+  const id = "q_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  await setJSON(DIP_PREFIX + "req:" + id, { kind: "req", id, type: "ceasefire", warId: war.id, from, to, status: "pending", ts: Date.now() }, true);
+  const fromName = COUNTRY_MAP[from]?.name || from;
+  await addMail(toLeader, {
+    type: "dip-request",
+    subject: `Перемир'я: пропозиція від ${fromName}`,
+    body: `${COUNTRY_MAP[from]?.flag || ""} ${fromName} пропонує перемир'я у війні за ${war.cityName}. Якщо прийняти, війна припиниться, місто залишиться в захисника, а обидві сторони ${Math.round(WAR_COOLDOWN_MS / 3600000)} год. не зможуть нападати.`,
+    meta: { requestId: id, kind: "ceasefire", fromCountry: from, toCountry: to, warId: war.id },
+  });
+  return { ok: true };
+}
+
+async function ceaseWar(w) {
+  const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
+  if (lock !== "ok") return false;
+  await setJSON(WAR_PREFIX + w.id, { ...w, status: "ended", result: { winner: null, ceasefire: true, endedAt: Date.now() } }, true);
+  const attSide = [w.attacker, ...(w.attAllies || [])];
+  const defSide = [w.defender, ...(w.defAllies || [])];
+  const cdUntil = Date.now() + WAR_COOLDOWN_MS;
+  await Promise.all([...attSide, ...defSide].map((c) => storageSet(WARCD_PREFIX + c, String(cdUntil), true).catch(() => null)));
+  const an = COUNTRY_MAP[w.attacker]?.name || w.attacker;
+  const dn = COUNTRY_MAP[w.defender]?.name || w.defender;
+  await pushNews(`🕊️ ${COUNTRY_MAP[w.attacker]?.flag || ""} ${an} і ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn} уклали перемир'я. Війна за ${w.cityName} припинена, місто залишається в ${dn}.`);
+  notifyWarEvent(w, "end");
+  for (const c of [w.attacker, w.defender]) {
+    const leader = await getLeader(c);
+    if (leader) await addMail(leader, { type: "info", subject: "Перемир'я укладено", body: `Війна за ${w.cityName} припинена. Місто лишилось у ${dn}.` });
+  }
+  return true;
+}
+
+async function respondCeasefireRequest(req, accept) {
+  const war = await getJSON(WAR_PREFIX + req.warId, true, null);
+  const alive = war && war.status !== "ended" && ["prep", "battle"].includes(warPhase(war));
+  if (accept && !alive) {
+    await setJSON(DIP_PREFIX + "req:" + req.id, { ...req, status: "expired", answeredAt: Date.now() }, true);
+    return { ok: false, reason: "Війна вже завершилась" };
+  }
+  await setJSON(DIP_PREFIX + "req:" + req.id, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
+  if (accept) {
+    const done = await ceaseWar(war);
+    if (!done) return { ok: false, reason: "Війна вже завершилась" };
+  } else {
+    const fromLeader = await getLeader(req.from);
+    if (fromLeader) await addMail(fromLeader, { type: "info", subject: "Перемир'я відхилено", body: `${COUNTRY_MAP[req.to]?.name || req.to} відхилили вашу пропозицію перемир'я.` });
   }
   return { ok: true };
 }
@@ -817,6 +915,21 @@ function warPhase(w, now = Date.now()) {
   if (now < w.prepEnd) return "prep";
   if (now < w.battleEnd) return "battle";
   return "finish";
+}
+
+/* Усі завершені війни (для підрахунку досягнень гравця) */
+async function loadEndedWars() {
+  const entries = await sbStorageListEntries(WAR_PREFIX, true);
+  const out = [];
+  for (const row of entries || []) {
+    try {
+      const w = JSON.parse(row.value);
+      if (w && w.id && w.status === "ended" && w.result) out.push(w);
+    } catch {
+      /* ignore */
+    }
+  }
+  return out;
 }
 
 async function loadActiveWars() {
@@ -919,6 +1032,7 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
             const body = d && d.ok
               ? `Сервер відповів: надіслано ${d.sent ?? 0} із ${d.total ?? 0} гравців.` +
                 (d.skipped ? " Розсилку для цієї війни вже було виконано раніше." : "") +
+                (d.disabled ? " Сповіщення вимкнено в адмін-панелі." : "") +
                 (d.firstError ? `\nПомилка Telegram: ${d.firstError}` : "") +
                 (d.total === 0 ? "\nУ країн-учасниць немає гравців із Telegram ID." : "")
               : `Сервер відхилив запит: ${(d && d.error) || "невідома помилка"}`;
@@ -945,9 +1059,22 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   return { ok: true, war };
 }
 
+/* Країна не може вступити у війну проти своїх союзників і партнерів за пактом */
+function joinWarBlockReason(dip, war, side, code) {
+  const enemies = side === "att" ? [war.defender, ...(war.defAllies || [])] : [war.attacker, ...(war.attAllies || [])];
+  for (const e of enemies) {
+    const r = dipRelation(dip, code, e);
+    if (r.ally) return `Союзник — ${COUNTRY_MAP[e]?.name || e} на протилежному боці`;
+    if (r.pact) return `З ${COUNTRY_MAP[e]?.name || e} діє пакт про ненапад`;
+  }
+  return null;
+}
+
 async function inviteWarAlly(war, fromCountry, allyCountry) {
   const side = warSide(war, fromCountry);
   if (!side) return { ok: false, reason: "Твоя країна не бере участі у війні" };
+  const blockedJoin = joinWarBlockReason(await loadDiplomacy(), war, side, allyCountry);
+  if (blockedJoin) return { ok: false, reason: "Цю країну не можна покликати: " + blockedJoin };
   const active = await loadActiveWars();
   if (active.some((w) => warInvolves(w, allyCountry))) return { ok: false, reason: "Ця країна вже у війні" };
   const leaderId = await getLeader(allyCountry);
@@ -967,6 +1094,8 @@ async function acceptWarInvite(meta) {
   if (!war || war.status === "ended" || Date.now() >= war.battleEnd) return { ok: false, reason: "Війна вже завершилась" };
   const active = await loadActiveWars();
   if (active.some((w) => warInvolves(w, meta.toCountry))) return { ok: false, reason: "Твоя країна вже бере участь у війні" };
+  const blockedJoin = joinWarBlockReason(await loadDiplomacy(), war, meta.side, meta.toCountry);
+  if (blockedJoin) return { ok: false, reason: "Вступити не можна: " + blockedJoin };
   const key = meta.side === "att" ? "attAllies" : "defAllies";
   const next = { ...war, [key]: [...(war[key] || []), meta.toCountry] };
   await setJSON(WAR_PREFIX + war.id, next, true);
@@ -1009,6 +1138,29 @@ async function computeDeadCountries(nations) {
   return new Set([...had].filter((x) => !have.has(x)));
 }
 
+/* Нагадування в Telegram про подію війни (початок битви / підсумок). Сервер сам перевіряє стан війни,
+   автора й дублікати; помилки не критичні. */
+const warStartNotified = new Set();
+function notifyWarEvent(war, kind) {
+  try {
+    const initData = window.Telegram?.WebApp?.initData;
+    if (!initData || !war?.id) return;
+    fetch("/api/notify-war-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initData,
+        warId: war.id,
+        kind,
+        attackerName: COUNTRY_MAP[war.attacker]?.name || war.attacker,
+        defenderName: COUNTRY_MAP[war.defender]?.name || war.defender,
+      }),
+    }).catch(() => null);
+  } catch {
+    /* сповіщення не критичні */
+  }
+}
+
 /* Завершення війни: лише один клієнт виконує підсумки (блокування через insert-if-absent) */
 async function finalizeWar(w, players, forcedWinner = null) {
   const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
@@ -1029,12 +1181,16 @@ async function finalizeWar(w, players, forcedWinner = null) {
   if (win) {
     if (w.cityKey) await storageSet(CITY_OWN_PREFIX + w.cityKey, w.attacker, true);
     else await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
+    logMapEvent({ k: w.cityKey ? "ct" : "rg", ck: w.cityKey || undefined, rid: w.cityRid, from: w.defender, to: w.attacker, name: w.cityName, src: "war" });
     // нова власниця починає з нульової оборони міста
     if (w.cityKey) await storageSet(CITY_DEF_PREFIX + w.cityKey, "0", true);
     // Країна, що втратила всі міста, вибуває з гри: її гравці обирають нову країну
     try {
       const left = await countryCityCount(w.defender);
-      if (left === 0) respawnNote = " Країна втратила всі міста й вибула з гри, її гравці обирають нову країну.";
+      if (left === 0) {
+        respawnNote = " Країна втратила всі міста й вибула з гри, її гравці обирають нову країну.";
+        await setJSON(WAR_PREFIX + w.id, { ...w, status: "ended", result: { att: totals.att, def: totals.def, net, winner, endedAt: Date.now(), eliminated: true } }, true);
+      }
     } catch {
       /* ignore */
     }
@@ -1052,6 +1208,7 @@ async function finalizeWar(w, players, forcedWinner = null) {
       : `🛡️ ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn} відбили атаку ${an} на місто ${w.cityName}.`
   );
   await mailMany(players, [...attSide, ...defSide], { type: "info", subject: win ? `Війна завершена: ${w.cityName} захоплено` : `Війна завершена: ${w.cityName} вистояло`, body: text });
+  notifyWarEvent(w, "end");
   return true;
 }
 
@@ -2210,6 +2367,77 @@ export default function App() {
     [flush]
   );
 
+  /* Нагорода за місце країни в рейтингу сезону: забираємо один раз і пишемо лист */
+  useEffect(() => {
+    if (!player?.id) return;
+    let off = false;
+    (async () => {
+      try {
+        const initData = window.Telegram?.WebApp?.initData;
+        if (!initData || off) return;
+        /* Нагороду видає й відмічає сервер: клієнт не може змінювати seasonrew:* (RLS) */
+        const raw = await storageGet(SEASON_REWARD_PREFIX + player.id, true);
+        if (!raw) return;
+        const pre = JSON.parse(raw);
+        if (!pre || pre.claimed || !(pre.points > 0)) return;
+        const r = await fetch("/api/claim-season-reward", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData }),
+        });
+        const rec = await r.json().catch(() => null);
+        if (!r.ok || !rec || !(rec.points > 0) || off) return;
+        updatePlayer((prev) => {
+          const a = normalizeAch(prev.ach);
+          return { ...prev, points: (prev.points || 0) + rec.points, ach: { ...a, seasonTop: a.seasonTop ? Math.min(a.seasonTop, rec.rank || 99) : rec.rank || null } };
+        });
+        await addMail(player.id, {
+          type: "info",
+          subject: `Нагорода за сезон ${rec.season}`,
+          body: `Твоя країна ${COUNTRY_MAP[rec.countryCode]?.name || rec.countryCode} посіла ${rec.rank}-е місце в рейтингу сезону. Нагорода: +${fmt(rec.points)} Points. Карту скинуто, починається новий сезон!`,
+        });
+        refreshMail();
+      } catch {
+        /* нагорода підхопиться при наступному вході */
+      }
+    })();
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player?.id]);
+
+  /* Досягнення: серія входів + підсумки завершених воєн; про нові значки пишемо в Пошту */
+  useEffect(() => {
+    if (!player?.id) return;
+    let off = false;
+    (async () => {
+      try {
+        const wars = await loadEndedWars();
+        if (off) return;
+        updatePlayer((prev) => {
+          const before = normalizeAch(prev.ach);
+          const after = withWarResults(withLoginStreak(before), prev, wars);
+          if (JSON.stringify(before) === JSON.stringify(after)) return prev;
+          const had = new Set(unlockedIds(before, prev));
+          const fresh = WAR_ACHIEVEMENTS.filter((x) => unlockedIds(after, prev).includes(x.id) && !had.has(x.id));
+          for (const x of fresh) {
+            addMail(prev.id, { type: "info", subject: `Нове досягнення: ${x.name}`, body: `${x.icon} ${x.name}: ${x.desc}. Усі значки дивись у Профілі → Досягнення, ними можна поділитися з друзями.` }).catch(() => null);
+          }
+          return { ...prev, ach: after };
+        });
+      } catch {
+        /* досягнення підрахуються при наступному вході */
+      }
+    })();
+    return () => { off = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player?.id]);
+
+  /* Сезон закінчився: один раз надсилаємо адміну лист у Пошту (карту скидає лише адмін вручну) */
+  useEffect(() => {
+    if (!season?.startedAt || Date.now() < seasonEndsAt(season)) return;
+    notifyAdminSeasonEnded(season).catch(() => null);
+  }, [season?.startedAt, season?.seasonNumber, season?.durationDays]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* Click handler */
   const handleClick = useCallback(
     (spawnEffects) => {
@@ -2368,6 +2596,10 @@ export default function App() {
         setWar((prev) => (JSON.stringify(prev) === JSON.stringify(mine) ? prev : mine));
         const phase = mine ? warPhase(mine) : null;
         if (phase === "battle") {
+          if (!warStartNotified.has(mine.id)) {
+            warStartNotified.add(mine.id);
+            notifyWarEvent(mine, "start");
+          }
           await flushClicks(mine);
           const totals = await fetchWarTotals(mine.id, playerIdForWar);
           if (!stopped) setWarTotals({ ...totals, def: totals.def + (mine.botDef || 0) });
@@ -2440,6 +2672,7 @@ export default function App() {
                 onRefresh={() => refreshLeaderboard(true)}
                 onBack={() => setTab("clicker")}
                 lang={language}
+                nations={nations}
               />
             )}
             {tab === "hq" && (
@@ -3347,6 +3580,8 @@ function fmtClock(ms) {
 
 function WarHud({ war, me, isLeader, totals, pendingRef, players = [] }) {
   const [alliesOpen, setAlliesOpen] = useState(false);
+  const [ceaseMsg, setCeaseMsg] = useState("");
+  const [ceaseBusy, setCeaseBusy] = useState(false);
   const now = Date.now();
   const phase = warPhase(war, now);
   const att = COUNTRY_MAP[war.attacker];
@@ -3425,6 +3660,24 @@ function WarHud({ war, me, isLeader, totals, pendingRef, players = [] }) {
           <Handshake size={15} /> Покликати союзників
         </button>
       )}
+      {canCall && (
+        <button
+          className="cn-warhud-btn"
+          type="button"
+          disabled={ceaseBusy}
+          onClick={async () => {
+            cnSfx.modalOpen();
+            setCeaseBusy(true);
+            const res = await sendCeasefireRequest(war, me.countryCode);
+            setCeaseMsg(res.ok ? "🕊️ Пропозицію перемир'я надіслано лідеру ворога." : "✗ " + res.reason);
+            if (!res.ok) cnSfx.error();
+            setCeaseBusy(false);
+          }}
+        >
+          🕊️ Запропонувати перемир'я
+        </button>
+      )}
+      {ceaseMsg && <div className="cn-dip-sub" style={{ textAlign: "center" }}>{ceaseMsg}</div>}
       {alliesOpen && <WarAlliesModal war={war} me={me} onClose={() => setAlliesOpen(false)} />}
       <WarParticipants war={war} me={me} players={players} pendingRef={pendingRef} />
     </div>
@@ -4486,16 +4739,129 @@ function NewsModal({ news, onClose }) {
 /*  Leaderboard screen                                                  */
 /* ------------------------------------------------------------------ */
 
-function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk" }) {
+/* Повтор змін на карті: вікно 24 години / 7 днів, відтворення подій захоплення з журналу mapevt:* */
+function MapReplayModal({ lang = "uk", onClose }) {
+  const [range, setRange] = useState("day");
+  const [stage, setStage] = useState("Завантажуємо карту…");
+  const [err, setErr] = useState("");
+  const [events, setEvents] = useState([]);
+  const [idx, setIdx] = useState(0); // скільки подій уже застосовано
+  const [playing, setPlaying] = useState(false);
+  const canvasRef = useRef(null);
+  const sceneRef = useRef(null);
+  const stateRef = useRef(null);
+
+  useEffect(() => {
+    let off = false;
+    prepareReplay({ width: 900, lang })
+      .then((sc) => { if (!off) { sceneRef.current = sc; setStage(""); } })
+      .catch((e) => !off && setErr(e?.message || "Помилка"));
+    return () => { off = true; };
+  }, [lang]);
+
+  useEffect(() => {
+    let off = false;
+    const since = Date.now() - (range === "day" ? 864e5 : 7 * 864e5);
+    loadMapEvents(since).then((ev) => { if (!off) { setEvents(ev); setIdx(0); setPlaying(false); } }).catch(() => !off && setEvents([]));
+    return () => { off = true; };
+  }, [range]);
+
+  /* кадр: стан на початок вікна + перші idx подій */
+  useEffect(() => {
+    const sc = sceneRef.current;
+    const cv = canvasRef.current;
+    if (!sc || !cv || stage) return;
+    const st = sc.stateAt(events);
+    for (let i = 0; i < idx; i++) sc.apply(st, events[i]);
+    stateRef.current = st;
+    cv.width = sc.W;
+    cv.height = sc.H;
+    sc.draw(cv.getContext("2d"), st, idx > 0 ? events[idx - 1] : null);
+  }, [stage, events, idx]);
+
+  useEffect(() => {
+    if (!playing) return undefined;
+    const id = setInterval(() => {
+      setIdx((i) => {
+        if (i >= events.length) { setPlaying(false); return i; }
+        return i + 1;
+      });
+    }, 900);
+    return () => clearInterval(id);
+  }, [playing, events.length]);
+
+  const cur = idx > 0 ? events[idx - 1] : null;
+  const nm = (c) => COUNTRY_MAP[c]?.name || (c ? c : "вільна територія");
+  return (
+    <div className="cn-replay-back" onClick={onClose}>
+      <div className="cn-replay" onClick={(e) => e.stopPropagation()}>
+        <div className="cn-replay-head">
+          <b>Повтор карти</b>
+          <div className="cn-metric-chips" style={{ margin: 0 }}>
+            {[["day", "24 години"], ["week", "7 днів"]].map(([k, l]) => (
+              <button key={k} type="button" className={"cn-metric-chip" + (range === k ? " cn-metric-chip--on" : "")} onClick={() => setRange(k)}>{l}</button>
+            ))}
+          </div>
+          <button type="button" className="cn-replay-x" onClick={onClose} aria-label="Закрити">×</button>
+        </div>
+        {err ? <div className="cn-replay-note">{err}</div> : stage ? <div className="cn-replay-note">{stage}</div> : <canvas ref={canvasRef} className="cn-replay-canvas" />}
+        <div className="cn-replay-cap">
+          {cur
+            ? `${new Date(cur.t).toLocaleString("uk-UA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · ${cur.name || "Область"}: ${nm(cur.from)} → ${nm(cur.to)}`
+            : events.length ? "Початок періоду" : "За цей період змін на карті не було"}
+        </div>
+        <div className="cn-replay-ctl">
+          <button type="button" className="cn-adm-btn" disabled={!events.length} onClick={() => { if (idx >= events.length) setIdx(0); setPlaying((p) => !p); }}>
+            {playing ? "Пауза" : idx >= events.length && events.length ? "Ще раз" : "Грати"}
+          </button>
+          <input type="range" min={0} max={events.length} value={idx} disabled={!events.length} onChange={(e) => { setPlaying(false); setIdx(+e.target.value); }} style={{ flex: 1 }} />
+          <span className="cn-replay-n">{idx}/{events.length}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk", nations = null }) {
   const [mode, setMode] = useState("countries"); // countries | global | mycountry
+  const [metric, setMetric] = useState("power"); // power | cities | pop | members
+  const [cityStats, setCityStats] = useState(null); // { [країна]: [міст, населення] }
+  const [replayOpen, setReplayOpen] = useState(false);
+
+  /* Міста й населення країн: кожне місто належить власнику міста або власнику своєї області */
+  useEffect(() => {
+    let off = false;
+    loadCities().then((data) => {
+      if (off) return;
+      const m = {};
+      for (const c of data.list) {
+        const o = (nations?.cityOwners && nations.cityOwners[cityKey(c)]) || nations?.owners?.[c.rid];
+        if (!o) continue;
+        const row = m[o] || (m[o] = [0, 0]);
+        row[0] += 1;
+        row[1] += c.p || 0;
+      }
+      setCityStats(m);
+    });
+    return () => { off = true; };
+  }, [nations]);
 
   const countriesRanked = useMemo(() => {
     const map = {};
+    const members = {};
     for (const p of players) {
       map[p.countryCode] = (map[p.countryCode] || 0) + (p.power || 0);
+      members[p.countryCode] = (members[p.countryCode] || 0) + 1;
     }
-    return COUNTRIES.map((c) => ({ ...c, power: map[c.code] || 0 })).sort((a, b) => b.power - a.power);
-  }, [players, countriesRev]); // eslint-disable-line react-hooks/exhaustive-deps
+    const keyOf = { power: "power", cities: "cities", pop: "pop", members: "members" }[metric] || "power";
+    return COUNTRIES.map((c) => ({
+      ...c,
+      power: map[c.code] || 0,
+      members: members[c.code] || 0,
+      cities: cityStats?.[c.code]?.[0] || 0,
+      pop: cityStats?.[c.code]?.[1] || 0,
+    })).sort((a, b) => b[keyOf] - a[keyOf] || b.power - a.power);
+  }, [players, countriesRev, cityStats, metric]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const globalRanked = useMemo(() => {
     return [...players].sort((a, b) => (b.power || 0) - (a.power || 0));
@@ -4518,6 +4884,11 @@ function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk
           <RefreshCw size={16} className={loading ? "cn-spin" : ""} />
         </button>
       </div>
+
+      <button className="cn-replay-open" type="button" onClick={() => { cnSfx.navSwitch(); setReplayOpen(true); }}>
+        <Play size={13} /> Повтор карти: як змінювалися кордони
+      </button>
+      {replayOpen && <MapReplayModal lang={lang} onClose={() => setReplayOpen(false)} />}
 
       <div className="cn-segmented">
         <button
@@ -4543,7 +4914,14 @@ function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk
       {loading && players.length === 0 ? (
         <LoadingScreen lang={lang} variant="block" size="sm" title={false} tips={false} stage={t(lang, "lb_loading")} />
       ) : mode === "countries" ? (
-        <CountryList list={countriesRanked} myCountry={me.countryCode} />
+        <>
+          <div className="cn-metric-chips">
+            {[["power", "Армія"], ["cities", "Міста"], ["pop", "Населення"], ["members", "Гравці"]].map(([k, l]) => (
+              <button key={k} type="button" className={"cn-metric-chip" + (metric === k ? " cn-metric-chip--on" : "")} onClick={() => setMetric(k)}>{l}</button>
+            ))}
+          </div>
+          <CountryList list={countriesRanked} myCountry={me.countryCode} metric={metric} />
+        </>
       ) : mode === "global" ? (
         <PlayerList list={globalRanked} meId={me.id} lang={lang} />
       ) : (
@@ -4560,7 +4938,8 @@ function rankClass(rank) {
   return "";
 }
 
-function CountryList({ list, myCountry }) {
+function CountryList({ list, myCountry, metric = "power" }) {
+  const main = (c) => (metric === "cities" ? fmt(c.cities) : metric === "pop" ? fmtPopulation(c.pop) : metric === "members" ? fmt(c.members) : fmt(c.power));
   return (
     <div className="cn-list cn-list--dense">
       {list.map((c, i) => {
@@ -4570,8 +4949,11 @@ function CountryList({ list, myCountry }) {
           <div key={c.code} className={"cn-row cn-row--light" + (isMine ? " cn-row--mine" : "")}>
             <span className={"cn-row-rank" + rankClass(rank)}>{rank}</span>
             <Flag code={c.code} size={20} className="cn-row-flag" />
-            <span className="cn-row-name">{c.name}</span>
-            <span className="cn-row-value">{fmt(c.power)}</span>
+            <span className="cn-row-name">
+              {c.name}
+              <span className="cn-row-sub">міст {fmt(c.cities)} · нас. {fmtPopulation(c.pop)} · армія {fmt(c.power)} · гравців {fmt(c.members)}</span>
+            </span>
+            <span className="cn-row-value">{main(c)}</span>
           </div>
         );
       })}
@@ -4828,6 +5210,23 @@ const BADGE_ICON_BLUE1 = "/img/badge-icon-blue1.webp";
 const BADGE_ICON_BLUE2 = "/img/badge-icon-blue2.webp";
 const BADGE_ICON_BLUE3 = "/img/badge-icon-blue3.webp";
 
+/* Значки за війни, серію входів і сезони (логіка — src/achievements.js, лічильники — me.ach) */
+const WAR_ACH_ICONS = {
+  first_city: BADGE_ICON_BRONZE1, conqueror: BADGE_ICON_SILVER2, destroyer: BADGE_ICON_GOLD3, defender: BADGE_ICON_SILVER3,
+  veteran: BADGE_ICON_GOLD2, streak3: BADGE_ICON_BRONZE2, streak7: BADGE_ICON_SILVER1, streak30: BADGE_ICON_GOLD1,
+  podium: BADGE_ICON_BRONZE3, champion: BADGE_ICON_GOLD3, clicks10k: BADGE_ICON_BRONZE3, clicks100k: BADGE_ICON_SILVER3,
+};
+const WAR_ACH_ENTRIES = WAR_ACHIEVEMENTS.filter((x) => !x.id.startsWith("clicks")).map((x) => ({
+  id: x.id,
+  label: x.name,
+  desc: x.desc,
+  icon: WAR_ACH_ICONS[x.id],
+  req: (me) => {
+    const [cur, need] = x.prog(normalizeAch(me.ach), me);
+    return cur >= need;
+  },
+}));
+
 const ACHIEVEMENTS = [
   { id: "first_click", label: "Перший клік", desc: "Зроби свій перший клік", icon: BADGE_ICON_BRONZE1, req: (me) => (me.totalClicks || 0) >= 1 },
   { id: "clicks_100", label: "Розігрівся", desc: "Набери 100 кліків", icon: BADGE_ICON_BRONZE2, req: (me) => (me.totalClicks || 0) >= 100 },
@@ -4844,6 +5243,7 @@ const ACHIEVEMENTS = [
   { id: "pass_badge_3", label: "Майже На Вершині", desc: "Досягни 45 рівня Battle Pass", icon: BADGE_ICON_PURPLE3, req: (me) => (me.unlockedBadges || []).includes("pass_badge_3") },
   { id: "premium_badge_1", label: "Преміум Розвідник", desc: "Досягни 15 рівня Premium Pass", icon: BADGE_ICON_BLUE1, req: (me) => (me.unlockedBadges || []).includes("premium_badge_1") },
   { id: "premium_badge_2", label: "Преміум Магнат", desc: "Досягни 30 рівня Premium Pass", icon: BADGE_ICON_BLUE2, req: (me) => (me.unlockedBadges || []).includes("premium_badge_2") },
+  ...WAR_ACH_ENTRIES,
   { id: "premium_badge_3", label: "Тінь Легенди", desc: "Досягни 45 рівня Premium Pass", icon: BADGE_ICON_BLUE3, req: (me) => (me.unlockedBadges || []).includes("premium_badge_3") },
 ];
 
@@ -5431,6 +5831,7 @@ function ProfileScreen({
       <div className="cn-lb-header">
         <div className="cn-screen-title">Профіль</div>
         <div className="cn-profile-header-actions">
+
         </div>
       </div>
 
@@ -6016,11 +6417,28 @@ function AchievementsScreen({ me, ctx, equippedBadges, onBack, onToggle }) {
           <ChevronLeft size={18} />
         </button>
         <div className="cn-screen-title">Досягнення</div>
-        <div style={{ width: 34 }} />
+        <button
+          className="cn-adm-btn"
+          type="button"
+          onClick={() => {
+            cnSfx.navSwitch();
+            const got = ACHIEVEMENTS.filter((a) => a.req(me, ctx));
+            const text = `Мої досягнення у World Clicker (${got.length} з ${ACHIEVEMENTS.length}): ` + (got.length ? got.map((a) => a.label).join(", ") : "ще попереду") + ". Приєднуйся і захоплюй світ!";
+            const url = "https://t.me/share/url?url=" + encodeURIComponent("https://t.me/worldclicker_bot") + "&text=" + encodeURIComponent(text);
+            try {
+              if (window.Telegram?.WebApp?.openTelegramLink) window.Telegram.WebApp.openTelegramLink(url);
+              else window.open(url, "_blank");
+            } catch {
+              /* ignore */
+            }
+          }}
+        >
+          Поділитися
+        </button>
       </div>
 
       <div className="cn-achv-hint">
-        Обрано {equippedBadges.length}/{MAX_EQUIPPED_BADGES} значків для профілю
+        Обрано {equippedBadges.length}/{MAX_EQUIPPED_BADGES} значків для профілю · серія входів {normalizeAch(me.ach).streak} дн. (рекорд {normalizeAch(me.ach).bestStreak})
       </div>
 
       <div className="cn-achv-list">
@@ -6209,7 +6627,7 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
           return (
             <div key={m.id} className={"cn-mail-item" + (!m.read ? " cn-mail-item--unread" : "")}>
               <button className="cn-mail-item-head" type="button" onClick={() => openMessage(m)}>
-                {m.read ? <MailOpen size={16} className="cn-mail-item-icon" /> : <Mail size={16} className="cn-mail-item-icon" />}
+                {m.read ? <MailOpen size={14} className="cn-mail-item-icon" /> : <Mail size={14} className="cn-mail-item-icon" />}
                 <div className="cn-mail-item-text">
                   <div className="cn-mail-item-subject">{m.subject}</div>
                   <div className="cn-mail-item-time">{timeAgo(m.ts)}</div>
@@ -6258,7 +6676,7 @@ function MailScreen({ me, mail, onBack, onRefresh, onRefreshGameData }) {
                   {m.type === "dip-request" && m.meta && (
                     m.resolved ? (
                       <div className="cn-mail-resolved">
-                        {m.resolved === "accepted" ? "✓ Прийнято" : m.resolved === "declined" ? "✗ Відхилено" : m.resolvedNote || "Вже неактуально"}
+                        {m.resolved === "accepted" ? (m.meta.kind === "ceasefire" ? "✓ Перемир'я укладено" : "✓ Прийнято") : m.resolved === "declined" ? "✗ Відхилено" : m.resolvedNote || "Вже неактуально"}
                       </div>
                     ) : (
                       <div className="cn-mail-actions">
@@ -6598,6 +7016,21 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
   );
 }
 
+/* Компактна секція адмін-панелі: заголовок-рядок, розгортається одна за раз */
+function AdmSec({ id, cur, setCur, Icon, title, badge = null, children }) {
+  const open = cur === id;
+  return (
+    <div className={"cn-adm-sec" + (open ? " cn-adm-sec--open" : "")}>
+      <button className="cn-adm-head" type="button" onClick={() => { cnSfx.toggle(); setCur(open ? null : id); }}>
+        <Icon size={14} /> <span>{title}</span>
+        {badge !== null && <em className="cn-adm-badge">{badge}</em>}
+        <ChevronDown size={15} className={"cn-chevron" + (open ? " cn-chevron--open" : "")} />
+      </button>
+      {open && <div className="cn-adm-body">{children}</div>}
+    </div>
+  );
+}
+
 function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, season, players, isLeader, mail, unreadCount, onRefreshMail, onRefreshGameData, onOpenTutorial, lang = "uk", onSetLanguage, maintenance, onSaveMaintenance }) {
   const [adminPlayersOpen, setAdminPlayersOpen] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -6609,11 +7042,10 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
 
   /* --- Адмін-панель (лише SUPER_ADMIN_TG_ID) --- */
   const [adminOpen, setAdminOpen] = useState(false);
-  const [adminQuery, setAdminQuery] = useState("");
-  const [adminEditId, setAdminEditId] = useState(null);
-  const [adminEditPower, setAdminEditPower] = useState("");
-  const [adminEditClicks, setAdminEditClicks] = useState("");
-  const [adminBlockReason, setAdminBlockReason] = useState("");
+  const [admSec, setAdmSec] = useState(null);
+  const [seasonConfirm, setSeasonConfirm] = useState(false);
+  const [mapExp, setMapExp] = useState({ busy: false, stage: "", url: "", err: "" });
+  const [tgOff, setTgOff] = useState(null); // null — ще не завантажено; true — сповіщення вимкнено для всіх
   const [adminBusy, setAdminBusy] = useState(false);
   const [bcNews, setBcNews] = useState("");
   const [bcSubj, setBcSubj] = useState("");
@@ -6643,13 +7075,16 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     if (clStored === null) {
       loadChangelog().then((list) => setClStored(list));
     }
+    if (tgOff === null) {
+      storageGet(TG_NOTIFY_KEY, true).then((raw) => setTgOff(String(raw || "").replace(/"/g, "") === "off"));
+    }
     if (!adminPassPriceLoaded) {
       storageGet(PREMIUM_PASS_PRICE_KEY, true).then((raw) => {
         setAdminPassPrice(raw ? String(JSON.parse(raw)) : "50");
         setAdminPassPriceLoaded(true);
       });
     }
-  }, [adminOpen, season, adminPassPriceLoaded, clStored]);
+  }, [adminOpen, season, adminPassPriceLoaded, clStored, tgOff]);
 
   const reloadAdminWars = useCallback(async () => {
     setAdminWars(await loadActiveWars());
@@ -6680,49 +7115,15 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     adminWarAction(async () => {
       await setJSON(WAR_PREFIX + w.id, { ...w, battleEnd: Date.now() - 1 }, true);
     }, "Війну завершено за поточним балансом (підсумки підрахує гра за кілька секунд)");
+  const forceCeasefire = (w) =>
+    adminWarAction(async () => {
+      const done = await ceaseWar(w);
+      if (!done) throw new Error("Війну вже завершено");
+    }, "Війну припинено перемир'ям");
   const setWarWinner = (w, side) =>
     adminWarAction(async () => {
       await finalizeWar(w, players, side);
     }, `Переможець: ${COUNTRY_MAP[side === "att" ? w.attacker : w.defender]?.name || ""}`);
-
-  const adminResults = useMemo(() => {
-    if (!adminOpen || !adminPlayersOpen) return [];
-    const q = adminQuery.trim().toLowerCase();
-    const list = players || [];
-    if (!q) return list.slice(0, 25);
-    return list.filter((p) => (p.username || "").toLowerCase().includes(q) || p.id.toLowerCase().includes(q)).slice(0, 25);
-  }, [adminOpen, adminPlayersOpen, adminQuery, players]);
-
-  const startEditPlayer = (p) => {
-    setAdminEditId(p.id);
-    setAdminEditPower(String(Math.round(p.power || 0)));
-    setAdminEditClicks(String(Math.round(p.totalClicks || 0)));
-    setAdminBlockReason(p.blockedReason || "");
-    setAdminMsg("");
-  };
-
-  const saveAdminPlayerEdit = async (p) => {
-    setAdminBusy(true);
-    const power = Math.max(0, Math.round(Number(adminEditPower) || 0));
-    const totalClicks = Math.max(0, Math.round(Number(adminEditClicks) || 0));
-    const updated = { ...p, power, totalClicks };
-    await storageSet(PLAYER_PREFIX + p.id, JSON.stringify(updated), true);
-    if (me.id === p.id && onSetPlayer) onSetPlayer(updated);
-    setAdminMsg(`✓ Оновлено гравця ${p.username || p.id}`);
-    setAdminEditId(null);
-    if (onRefreshGameData) await onRefreshGameData();
-    setAdminBusy(false);
-  };
-
-  const toggleBlockPlayer = async (p) => {
-    setAdminBusy(true);
-    const updated = { ...p, blocked: !p.blocked, blockedReason: !p.blocked ? adminBlockReason || "Заблоковано адміністрацією" : "" };
-    await storageSet(PLAYER_PREFIX + p.id, JSON.stringify(updated), true);
-    if (me.id === p.id && onSetPlayer) onSetPlayer(updated);
-    setAdminMsg(updated.blocked ? `⛔ Гравця ${p.username || p.id} заблоковано` : `✓ Гравця ${p.username || p.id} розблоковано`);
-    if (onRefreshGameData) await onRefreshGameData();
-    setAdminBusy(false);
-  };
 
   const saveSeasonEndDate = async () => {
     if (!adminSeasonDate) return;
@@ -6750,6 +7151,81 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
       setAdminMsg(r.ok && d.ok ? `✓ Вартість Premium Pass тепер ${d.price} ⭐` : `✗ ${d.error || "Не вдалося змінити ціну"}`);
     } catch {
       setAdminMsg("✗ Немає зв'язку із сервером");
+    }
+    setAdminBusy(false);
+  };
+
+  const exportMapImage = async () => {
+    if (mapExp.busy) return;
+    if (mapExp.url) URL.revokeObjectURL(mapExp.url);
+    setMapExp({ busy: true, stage: "Готуємо…", url: "", err: "" });
+    try {
+      const blob = await renderWorldImage({ width: 4096, lang, onStage: (stage) => setMapExp((m) => ({ ...m, stage })) });
+      setMapExp({ busy: false, stage: "", url: URL.createObjectURL(blob), err: "", blob });
+    } catch (e) {
+      setMapExp({ busy: false, stage: "", url: "", err: e?.message || "Не вдалося створити зображення" });
+    }
+  };
+  const saveMapImage = async () => {
+    const blob = mapExp.blob;
+    if (!blob) return;
+    const name = "world-clicker-map-" + new Date().toISOString().slice(0, 10) + ".png";
+    try {
+      const file = new File([blob], name, { type: "image/png" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "World Clicker — карта світу" });
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+    const a = document.createElement("a");
+    a.href = mapExp.url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const resetSeasonNow = async () => {
+    setAdminBusy(true);
+    try {
+      const r = await fetch("/api/admin-season-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", seasonNumber: season?.seasonNumber || 1, confirm: true }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) {
+        setAdminMsg("✗ " + (d.error || "Не вдалося скинути карту"));
+      } else {
+        const top = (d.top || []).map((x, i) => `${i + 1}. ${COUNTRY_MAP[x.code]?.name || x.code}`).join(", ");
+        await pushNews(`🏆 Сезон ${(d.newSeason || 2) - 1} завершено! Карту скинуто, починається сезон ${d.newSeason}.${top ? " Переможці: " + top + "." : ""} Нагороди отримали гравці ${d.rewarded} учасників.`);
+        setAdminMsg(`✓ Карту скинуто. Сезон ${d.newSeason} розпочато, нагороди отримають ${d.rewarded} гравців. Гра перезавантажиться…`);
+        setTimeout(() => window.location.reload(), 2500);
+      }
+    } catch {
+      setAdminMsg("✗ Не вдалося зв'язатися із сервером");
+    }
+    setSeasonConfirm(false);
+    setAdminBusy(false);
+  };
+
+  const toggleTgNotify = async () => {
+    setAdminBusy(true);
+    const nextOff = !tgOff;
+    try {
+      const r = await fetch("/api/admin-tg-notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", off: nextOff }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || "Не вдалося змінити налаштування");
+      setTgOff(nextOff);
+      setAdminMsg(nextOff ? "🔕 Сповіщення в Telegram вимкнено для всіх гравців" : "🔔 Сповіщення в Telegram увімкнено");
+    } catch (e) {
+      setAdminMsg("✗ " + (e?.message || "Помилка"));
     }
     setAdminBusy(false);
   };
@@ -6876,22 +7352,6 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     setBusy(false);
   };
 
-  const devTestMessage = async () => {
-    setBusy(true);
-    try {
-      await addMail(me.id, {
-        type: "info",
-        subject: "Тестове повідомлення",
-        body: "Це тестове повідомлення, створене з Developer/Test панелі о " + new Date().toLocaleTimeString(),
-      });
-      if (onRefreshMail) await onRefreshMail();
-      flashStatus("✓ Повідомлення створено — перевір Пошту");
-    } catch (err) {
-      flashStatus("✗ Помилка: " + (err?.message || "невідома"));
-    }
-    setBusy(false);
-  };
-
   const devClearStorage = async () => {
     if (!confirmClear) {
       setConfirmClear(true);
@@ -6973,256 +7433,214 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
           </button>
 
           {adminOpen && (
-            <div className="cn-dev-panel">
-              {adminMsg && <div className="cn-dev-status-msg">{adminMsg}</div>}
-
-              <button className="cn-dev-toggle" type="button" onClick={() => { cnSfx.navSwitch(); setAdminPlayersOpen(true); }}>
-                <Users size={14} /> Список гравців ({(players || []).length})
-                <ChevronRight size={16} />
-              </button>
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Імунітет до лімітів часу</div>
-              <div className="cn-admin-row">
-                <div style={{ flex: 1, fontSize: 12, color: "var(--cn-text-dim)" }}>
-                  {me.timeImmunity ? "УВІМКНЕНО: ігноруються кулдауни війни та заборона нападу" : "Вимкнено"}
-                </div>
-                <button
-                  className="cn-dev-btn"
-                  type="button"
-                  disabled={adminBusy}
-                  onClick={async () => {
-                    setAdminBusy(true);
-                    const updated = { ...me, timeImmunity: !me.timeImmunity };
-                    await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
-                    if (onSetPlayer) onSetPlayer(updated);
-                    setAdminMsg(updated.timeImmunity ? "✓ Імунітет до лімітів часу увімкнено" : "✓ Імунітет вимкнено");
-                    setAdminBusy(false);
-                  }}
-                >
-                  {me.timeImmunity ? "Вимкнути" : "Увімкнути"}
-                </button>
-              </div>
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Дата завершення сезону</div>
-              <div className="cn-admin-row">
-                <input
-                  className="cn-admin-input"
-                  type="date"
-                  value={adminSeasonDate}
-                  onChange={(e) => setAdminSeasonDate(e.target.value)}
-                />
-                <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={saveSeasonEndDate}>
-                  Зберегти
-                </button>
-              </div>
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Вартість Premium Pass (⭐)</div>
-              <div className="cn-admin-row">
-                <input
-                  className="cn-admin-input"
-                  type="number"
-                  min="1"
-                  value={adminPassPrice}
-                  onChange={(e) => setAdminPassPrice(e.target.value)}
-                />
-                <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={savePremiumPassPrice}>
-                  Зберегти
-                </button>
-              </div>
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Війни</div>
-              {adminWarMsg && <div className="cn-dev-status-msg">{adminWarMsg}</div>}
-              {adminWars === null && <div className="cn-control-empty">Завантаження…</div>}
-              {adminWars && adminWars.length === 0 && <div className="cn-control-empty">Активних воєн немає</div>}
-              {(adminWars || []).map((w) => {
-                const phase = warPhase(w);
-                const mine = warInvolves(w, me.countryCode);
-                return (
-                  <div className="cn-admin-player-row" key={w.id}>
-                    <div className="cn-admin-player-head">
-                      <span className="cn-admin-player-name">
-                        {COUNTRY_MAP[w.attacker]?.name || w.attacker} → {COUNTRY_MAP[w.defender]?.name || w.defender}{mine ? " (твоя)" : ""}
-                      </span>
-                      <span className="cn-admin-player-sub">
-                        {w.cityName} · {phase === "prep" ? "підготовка" : phase === "battle" ? "битва" : "завершується"}
-                      </span>
-                    </div>
-                    <div className="cn-admin-edit-actions" style={{ flexWrap: "wrap" }}>
-                      {phase === "prep" && (
-                        <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => skipWarPrep(w)}>
-                          Завершити підготовку
-                        </button>
-                      )}
-                      {phase === "battle" && (
-                        <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => endWarNow(w)}>
-                          Завершити війну
-                        </button>
-                      )}
-                      <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "att")}>
-                        Переміг: атака
-                      </button>
-                      <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "def")}>
-                        Переміг: захист
-                      </button>
-                    </div>
+            <div className="cn-adm">
+              {adminMsg && <div className="cn-adm-msg">{adminMsg}</div>}
+              {mapExp.url && (
+                <div className="cn-adm-mapview">
+                  <img src={mapExp.url} alt="Карта світу" />
+                  <div className="cn-adm-hint">Якщо кнопка не зберігає, утримуй зображення й обери «Зберегти».</div>
+                  <div className="cn-adm-btns">
+                    <button className="cn-adm-btn" type="button" onClick={saveMapImage}>Зберегти на пристрій</button>
+                    <button className="cn-adm-btn" type="button" onClick={() => { URL.revokeObjectURL(mapExp.url); setMapExp({ busy: false, stage: "", url: "", err: "" }); }}>Закрити</button>
                   </div>
-                );
-              })}
-              <button className="cn-dev-btn" type="button" disabled={adminWarBusy} onClick={reloadAdminWars} style={{ marginTop: 6 }}>
-                Оновити список воєн
-              </button>
-
-              <button className="cn-dev-toggle" type="button" style={{ marginTop: 14 }} onClick={() => { cnSfx.toggle(); setClOpen((o) => !o); }}>
-                <Newspaper size={14} /> Список оновлень
-                <ChevronDown size={16} className={"cn-chevron" + (clOpen ? " cn-chevron--open" : "")} />
-              </button>
-              {clOpen && (<>
-              <div className="cn-changelog-list">
-                {clStored === null && <div className="cn-control-empty">Завантаження…</div>}
-                {changelogList.map((e) => (
-                  <div className="cn-changelog-item" key={e.id}>
-                    <div className="cn-changelog-head">
-                      <span className="cn-changelog-date">{new Date(e.date + "T12:00:00").toLocaleDateString("uk-UA", { day: "numeric", month: "long", year: "numeric" })}</span>
-                      {!e.builtin && (
-                        <button className="cn-dev-btn cn-dev-btn--danger cn-changelog-del" type="button" disabled={adminBusy} onClick={() => removeChangelogEntry(e.id)}>
-                          <Trash2 size={12} />
-                        </button>
-                      )}
-                    </div>
-                    <div className="cn-changelog-title">{e.title}</div>
-                    <div className="cn-changelog-text">{e.text}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="cn-changelog-form">
-                <input className="cn-admin-input" type="date" value={clDate} onChange={(e) => setClDate(e.target.value)} />
-                <input
-                  className="cn-admin-input"
-                  type="text"
-                  maxLength={80}
-                  placeholder="Назва оновлення"
-                  value={clTitle}
-                  onChange={(e) => setClTitle(e.target.value)}
-                />
-                <textarea
-                  className="cn-admin-input cn-changelog-textarea"
-                  maxLength={500}
-                  rows={3}
-                  placeholder="Короткий опис"
-                  value={clText}
-                  onChange={(e) => setClText(e.target.value)}
-                />
-                <button className="cn-dev-btn" type="button" disabled={adminBusy} onClick={addChangelogEntry}>
-                  Додати оновлення
-                </button>
-              </div>
-              </>)}
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Світові новини від адміністрації</div>
-              <div className="cn-changelog-form">
-                <textarea className="cn-admin-input cn-changelog-textarea" rows={3} maxLength={400} placeholder="Текст новини" value={bcNews} onChange={(e) => setBcNews(e.target.value)} />
-                <button className="cn-dev-btn" type="button" disabled={adminBusy || !bcNews.trim()} onClick={publishAdminNews}>Опублікувати в новини</button>
-              </div>
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>Лист усім гравцям</div>
-              <div className="cn-changelog-form">
-                <input className="cn-admin-input" type="text" maxLength={80} placeholder="Тема" value={bcSubj} onChange={(e) => setBcSubj(e.target.value)} />
-                <textarea className="cn-admin-input cn-changelog-textarea" rows={3} maxLength={1000} placeholder="Текст листа" value={bcBody} onChange={(e) => setBcBody(e.target.value)} />
-                <button className="cn-dev-btn" type="button" disabled={adminBusy || !bcBody.trim()} onClick={broadcastAdminMail}>Розіслати всім</button>
-                {bcInfo && <div className="cn-control-hint">{bcInfo}</div>}
-              </div>
-              <div className="cn-control-hint">Листа одному гравцеві можна написати в «Гравці» → вибрати гравця → «Написати гравцеві».</div>
-
-              <div className="cn-admin-block-title" style={{ marginTop: 14 }}>
-                Технічний перерив {maintenance.enabled ? "(зараз УВІМКНЕНО 🛠)" : "(зараз вимкнено)"}
-              </div>
-              <div className="cn-admin-row">
-                <input
-                  className="cn-admin-input"
-                  type="text"
-                  placeholder="Повідомлення для гравців (необов'язково)"
-                  value={adminMaintMsg}
-                  onChange={(e) => setAdminMaintMsg(e.target.value)}
-                />
-                <button
-                  className="cn-dev-btn"
-                  type="button"
-                  disabled={adminBusy}
-                  onClick={toggleMaintenanceMode}
-                  style={maintenance.enabled ? { background: "#dc2626" } : undefined}
-                >
-                  {maintenance.enabled ? "Вимкнути" : "Увімкнути"}
-                </button>
-              </div>
-
-              <div className="cn-admin-block-title">Тестові інструменти</div>
-              {!storagePersistenceHealthy && (
-                <div className="cn-dev-warning">
-                  ⚠️ Хмарне сховище зараз недоступне. Усе працює в межах цієї сесії, але зміни можуть не зберегтися після перезавантаження.
                 </div>
               )}
-              <div className="cn-dev-status-row">
-                <UserCog size={13} />
-                Ти {isLeader ? <b className="cn-dev-status-yes">лідер {COUNTRY_MAP[me.countryCode]?.name}</b> : <span>не лідер</span>}
-              </div>
-              <div className="cn-dev-status-row">
-                <Mail size={13} />
-                Повідомлень: <b>{mail ? mail.length : 0}</b> (непрочитаних: <b>{unreadCount || 0}</b>)
+
+              <div className="cn-adm-stats">
+                <div><b>{(players || []).length}</b><span>гравців</span></div>
+                <div><b>{(players || []).filter((p) => p.blocked).length}</b><span>заблок.</span></div>
+                <div><b>{new Set((players || []).map((p) => p.countryCode)).size}</b><span>країн</span></div>
+                <div><b>{adminWars === null ? "…" : adminWars.length}</b><span>воєн</span></div>
               </div>
 
-              {statusMsg && <div className="cn-dev-status-msg">{statusMsg}</div>}
+              <button className="cn-adm-head" type="button" onClick={() => { cnSfx.navSwitch(); setAdminPlayersOpen(true); }}>
+                <Users size={14} /> <span>Гравці</span> <ChevronRight size={15} />
+              </button>
 
-              <div className="cn-dev-row">
-                <span className="cn-dev-row-label">Країна</span>
-                <button className="cn-dev-btn" type="button" disabled={busy} onClick={() => setCountryPickerOpen((o) => !o)}>
-                  Змінити
-                </button>
-              </div>
-              {countryPickerOpen && (
-                <div className="cn-country-dropdown cn-dev-country-dropdown">
-                  <div className="cn-country-search-wrap">
-                    <Search size={15} className="cn-country-search-icon" />
-                    <input
-                      className="cn-country-search"
-                      placeholder="Пошук країни…"
-                      value={countryQuery}
-                      onChange={(e) => setCountryQuery(e.target.value)}
-                    />
+              <AdmSec id="wars" cur={admSec} setCur={setAdmSec} Icon={Swords} title="Війни" badge={adminWars && adminWars.length ? adminWars.length : null}>
+                {adminWarMsg && <div className="cn-adm-msg">{adminWarMsg}</div>}
+                {adminWars === null && <div className="cn-adm-empty">Завантаження…</div>}
+                {adminWars && adminWars.length === 0 && <div className="cn-adm-empty">Активних воєн немає</div>}
+                {(adminWars || []).map((w) => {
+                  const phase = warPhase(w);
+                  return (
+                    <div className="cn-adm-item" key={w.id}>
+                      <div className="cn-adm-item-t">
+                        {COUNTRY_MAP[w.attacker]?.name || w.attacker} → {COUNTRY_MAP[w.defender]?.name || w.defender}
+                        <small>{w.cityName} · {phase === "prep" ? "підготовка" : phase === "battle" ? "битва" : "завершується"}</small>
+                      </div>
+                      <div className="cn-adm-btns">
+                        {phase === "prep" && <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={() => skipWarPrep(w)}>До битви</button>}
+                        {phase === "battle" && <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={() => endWarNow(w)}>Завершити</button>}
+                        <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "att")}>Атака</button>
+                        <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={() => setWarWinner(w, "def")}>Захист</button>
+                        <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={() => forceCeasefire(w)}>Перемир'я</button>
+                      </div>
+                    </div>
+                  );
+                })}
+                <button className="cn-adm-btn" type="button" disabled={adminWarBusy} onClick={reloadAdminWars}>Оновити</button>
+              </AdmSec>
+
+              <AdmSec id="season" cur={admSec} setCur={setAdmSec} Icon={CalendarDays} title="Кінець сезону" badge={season?.startedAt && Date.now() >= seasonEndsAt(season) ? "!" : null}>
+                {(() => {
+                  const endsAt = seasonEndsAt(season);
+                  const left = endsAt - Date.now();
+                  return (
+                    <div className="cn-adm-state">
+                      Сезон {season?.seasonNumber || 1}: {left <= 0 ? "час вийшов, очікує твого рішення" : "ще " + Math.ceil(left / 86400000) + " дн."}
+                    </div>
+                  );
+                })()}
+                <div className="cn-adm-hint">
+                  Карта сама не скидається: коли сезон закінчується, гра надсилає тобі лист у Пошту. Скидання: країни повертаються на стартову карту, війни, союзи й пакти зникають, нагороди (Points) отримують гравці країн із топ-20 рейтингу (за сумою Power), сезон збільшується на 1. Гравці, країни й прогрес лишаються.
+                </div>
+                {!seasonConfirm ? (
+                  <button className="cn-adm-btn cn-adm-btn--danger" type="button" disabled={adminBusy} onClick={() => { cnSfx.toggle(); setSeasonConfirm(true); }}>
+                    Скинути карту й завершити сезон
+                  </button>
+                ) : (
+                  <div className="cn-adm-warn">
+                    Це незворотно: усі зміни кордонів і війни буде видалено.{season?.startedAt && Date.now() < seasonEndsAt(season) ? " Сезон ще не закінчився!" : ""}
+                    <div className="cn-adm-btns">
+                      <button className="cn-adm-btn cn-adm-btn--danger cn-adm-btn--confirm" type="button" disabled={adminBusy} onClick={resetSeasonNow}>Так, скинути карту</button>
+                      <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={() => setSeasonConfirm(false)}>Скасувати</button>
+                    </div>
                   </div>
-                  <div className="cn-country-dropdown-list">
-                    {filteredCountries.map((c) => (
-                      <button key={c.code} type="button" className="cn-country-dropdown-item" onClick={() => devChangeCountry(c.code)}>
-                        <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
-                        <span className="cn-country-dropdown-name">{c.name}</span>
-                      </button>
+                )}
+              </AdmSec>
+
+              <AdmSec id="game" cur={admSec} setCur={setAdmSec} Icon={Settings} title="Сезон і ціни">
+                <label className="cn-adm-lab">Кінець сезону</label>
+                <div className="cn-adm-row">
+                  <input className="cn-adm-in" type="date" value={adminSeasonDate} onChange={(e) => setAdminSeasonDate(e.target.value)} />
+                  <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={saveSeasonEndDate}>Зберегти</button>
+                </div>
+                <label className="cn-adm-lab">Premium Pass (⭐)</label>
+                <div className="cn-adm-row">
+                  <input className="cn-adm-in" type="number" min="1" value={adminPassPrice} onChange={(e) => setAdminPassPrice(e.target.value)} />
+                  <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={savePremiumPassPrice}>Зберегти</button>
+                </div>
+                <label className="cn-adm-lab">Імунітет до лімітів часу (кулдауни війни й заборона нападу)</label>
+                <div className="cn-adm-row">
+                  <span className="cn-adm-state">{me.timeImmunity ? "Увімкнено" : "Вимкнено"}</span>
+                  <button
+                    className="cn-adm-btn"
+                    type="button"
+                    disabled={adminBusy}
+                    onClick={async () => {
+                      setAdminBusy(true);
+                      const updated = { ...me, timeImmunity: !me.timeImmunity };
+                      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
+                      if (onSetPlayer) onSetPlayer(updated);
+                      setAdminMsg(updated.timeImmunity ? "✓ Імунітет до лімітів часу увімкнено" : "✓ Імунітет вимкнено");
+                      setAdminBusy(false);
+                    }}
+                  >
+                    {me.timeImmunity ? "Вимкнути" : "Увімкнути"}
+                  </button>
+                </div>
+              </AdmSec>
+
+              <AdmSec id="content" cur={admSec} setCur={setAdmSec} Icon={Newspaper} title="Новини, листи, оновлення">
+                <label className="cn-adm-lab">Новина від адміністрації</label>
+                <textarea className="cn-adm-in" rows={2} maxLength={400} placeholder="Текст новини" value={bcNews} onChange={(e) => setBcNews(e.target.value)} />
+                <button className="cn-adm-btn" type="button" disabled={adminBusy || !bcNews.trim()} onClick={publishAdminNews}>Опублікувати</button>
+
+                <label className="cn-adm-lab">Лист усім гравцям</label>
+                <input className="cn-adm-in" type="text" maxLength={80} placeholder="Тема" value={bcSubj} onChange={(e) => setBcSubj(e.target.value)} />
+                <textarea className="cn-adm-in" rows={2} maxLength={1000} placeholder="Текст листа" value={bcBody} onChange={(e) => setBcBody(e.target.value)} />
+                <button className="cn-adm-btn" type="button" disabled={adminBusy || !bcBody.trim()} onClick={broadcastAdminMail}>Розіслати всім</button>
+                {bcInfo && <div className="cn-adm-hint">{bcInfo}</div>}
+                <div className="cn-adm-hint">Лист одному гравцеві: Гравці → вибрати гравця → «Написати гравцеві».</div>
+
+                <label className="cn-adm-lab">Список оновлень ({changelogList.length})</label>
+                <button className="cn-adm-btn" type="button" onClick={() => { cnSfx.toggle(); setClOpen((o) => !o); }}>{clOpen ? "Сховати список" : "Показати список"}</button>
+                {clOpen && (
+                  <div className="cn-adm-cl">
+                    {clStored === null && <div className="cn-adm-empty">Завантаження…</div>}
+                    {changelogList.map((e) => (
+                      <div className="cn-adm-item" key={e.id}>
+                        <div className="cn-adm-item-t">
+                          {e.title}
+                          <small>{new Date(e.date + "T12:00:00").toLocaleDateString("uk-UA", { day: "numeric", month: "short", year: "numeric" })}</small>
+                        </div>
+                        {!e.builtin && (
+                          <button className="cn-adm-btn cn-adm-btn--danger" type="button" disabled={adminBusy} onClick={() => removeChangelogEntry(e.id)} aria-label="Видалити"><Trash2 size={12} /></button>
+                        )}
+                      </div>
                     ))}
                   </div>
+                )}
+                <input className="cn-adm-in" type="date" value={clDate} onChange={(e) => setClDate(e.target.value)} />
+                <input className="cn-adm-in" type="text" maxLength={80} placeholder="Назва оновлення" value={clTitle} onChange={(e) => setClTitle(e.target.value)} />
+                <textarea className="cn-adm-in" rows={2} maxLength={500} placeholder="Короткий опис" value={clText} onChange={(e) => setClText(e.target.value)} />
+                <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={addChangelogEntry}>Додати оновлення</button>
+              </AdmSec>
+
+              <AdmSec id="mapimg" cur={admSec} setCur={setAdmSec} Icon={Compass} title="Зображення карти">
+                <div className="cn-adm-hint">Створює повну карту світу (PNG, 4096 px): кольори країн, кордони, столиці й легенда. Відкривати вкладку «Карта» не потрібно.</div>
+                <button className="cn-adm-btn" type="button" disabled={mapExp.busy} onClick={exportMapImage}>
+                  {mapExp.busy ? mapExp.stage || "Створюємо…" : "Створити зображення карти"}
+                </button>
+                {mapExp.err && <div className="cn-adm-warn">{mapExp.err}</div>}
+              </AdmSec>
+
+              <AdmSec id="tg" cur={admSec} setCur={setAdmSec} Icon={Mail} title="Сповіщення в Telegram" badge={tgOff ? "OFF" : null}>
+                <div className="cn-adm-row">
+                  <span className="cn-adm-state">{tgOff === null ? "Завантаження…" : tgOff ? "Вимкнено для всіх гравців" : "Увімкнено: бот пише про війни"}</span>
+                  <button className={"cn-adm-btn" + (tgOff ? "" : " cn-adm-btn--danger")} type="button" disabled={adminBusy || tgOff === null} onClick={toggleTgNotify}>
+                    {tgOff ? "Увімкнути" : "Вимкнути"}
+                  </button>
                 </div>
-              )}
+                <div className="cn-adm-hint">Стосується повідомлень про війни: напад, початок битви, підсумки, перемир'я, знищення країни. Листи в грі працюють як завжди.</div>
+              </AdmSec>
 
-              <div className="cn-dev-row">
-                <span className="cn-dev-row-label">Лідер країни</span>
-                <button className="cn-dev-btn" type="button" disabled={busy || isLeader} onClick={devBecomeLeader}>
-                  {isLeader ? "Ти вже лідер ✓" : "Стати лідером"}
-                </button>
-              </div>
-              <div className="cn-dev-row">
-                <span className="cn-dev-row-label">Тестове повідомлення</span>
-                <button className="cn-dev-btn" type="button" disabled={busy} onClick={devTestMessage}>
-                  Створити
-                </button>
-              </div>
-              <div className="cn-dev-row">
-                <span className="cn-dev-row-label">Скинути дані гравця</span>
-                <button
-                  className={"cn-dev-btn cn-dev-btn--danger" + (confirmClear ? " cn-dev-btn--confirm" : "")}
-                  type="button"
-                  disabled={busy}
-                  onClick={devClearStorage}
-                >
-                  <Trash2 size={13} /> {confirmClear ? "Підтвердити" : "Очистити"}
-                </button>
-              </div>
+              <AdmSec id="maint" cur={admSec} setCur={setAdmSec} Icon={Wrench} title="Технічна перерва" badge={maintenance.enabled ? "ON" : null}>
+                <div className="cn-adm-row">
+                  <input className="cn-adm-in" type="text" placeholder="Повідомлення для гравців (необов'язково)" value={adminMaintMsg} onChange={(e) => setAdminMaintMsg(e.target.value)} />
+                  <button className={"cn-adm-btn" + (maintenance.enabled ? " cn-adm-btn--danger" : "")} type="button" disabled={adminBusy} onClick={toggleMaintenanceMode}>
+                    {maintenance.enabled ? "Вимкнути" : "Увімкнути"}
+                  </button>
+                </div>
+              </AdmSec>
 
+              <AdmSec id="test" cur={admSec} setCur={setAdmSec} Icon={UserCog} title="Тестування">
+                {!storagePersistenceHealthy && (
+                  <div className="cn-adm-warn">Хмарне сховище недоступне: зміни можуть не зберегтися після перезавантаження.</div>
+                )}
+                {statusMsg && <div className="cn-adm-msg">{statusMsg}</div>}
+                <div className="cn-adm-row">
+                  <span className="cn-adm-state">Країна: {COUNTRY_MAP[me.countryCode]?.name || me.countryCode}</span>
+                  <button className="cn-adm-btn" type="button" disabled={busy} onClick={() => setCountryPickerOpen((o) => !o)}>Змінити</button>
+                </div>
+                {countryPickerOpen && (
+                  <div className="cn-country-dropdown cn-dev-country-dropdown">
+                    <div className="cn-country-search-wrap">
+                      <Search size={15} className="cn-country-search-icon" />
+                      <input className="cn-country-search" placeholder="Пошук країни…" value={countryQuery} onChange={(e) => setCountryQuery(e.target.value)} />
+                    </div>
+                    <div className="cn-country-dropdown-list">
+                      {filteredCountries.map((c) => (
+                        <button key={c.code} type="button" className="cn-country-dropdown-item" onClick={() => devChangeCountry(c.code)}>
+                          <Flag code={c.code} size={18} className="cn-country-dropdown-flag" />
+                          <span className="cn-country-dropdown-name">{c.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="cn-adm-row">
+                  <span className="cn-adm-state">{isLeader ? "Ти лідер своєї країни" : "Ти не лідер"}</span>
+                  <button className="cn-adm-btn" type="button" disabled={busy || isLeader} onClick={devBecomeLeader}>Стати лідером</button>
+                </div>
+                <div className="cn-adm-row">
+                  <span className="cn-adm-state">Скинути дані гравця</span>
+                  <button className={"cn-adm-btn cn-adm-btn--danger" + (confirmClear ? " cn-adm-btn--confirm" : "")} type="button" disabled={busy} onClick={devClearStorage}>
+                    <Trash2 size={12} /> {confirmClear ? "Підтвердити" : "Очистити"}
+                  </button>
+                </div>
+              </AdmSec>
             </div>
           )}
 
@@ -7234,6 +7652,91 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
+}
+
+/* Адмін: редактор власників на карті. Передає місто чи всю область країні або повертає початкового власника. */
+function AdminMapEditor({ city = null, rid, regionName, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const list = useMemo(() => [...COUNTRIES].sort((a, b) => a.name.localeCompare(b.name, "uk")), []);
+  if (!isSuperAdmin()) return null;
+
+  const cityOf = async () => {
+    const data = await loadCities();
+    return data.byRid.get(rid) || [];
+  };
+  const run = async (fn, okText) => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await fn();
+      setMsg("✓ " + okText);
+      if (onDone) await onDone();
+    } catch (e) {
+      setMsg("✗ " + (e?.message || "Помилка"));
+    }
+    setBusy(false);
+  };
+  const giveCity = (owner) =>
+    run(async () => {
+      const key = cityKey(city);
+      const prevOwner = (await storageGet(CITY_OWN_PREFIX + key, true).catch(() => null)) || "";
+      await storageSet(CITY_OWN_PREFIX + key, owner, true);
+      await storageSet(CITY_DEF_PREFIX + key, "0", true);
+      logMapEvent({ k: "ct", ck: key, rid, from: prevOwner, to: owner, name: city.n, src: "admin" });
+    }, "Місто передано: " + (COUNTRY_MAP[owner]?.name || owner));
+  const giveRegion = (owner) =>
+    run(async () => {
+      const prevReg = (await storageGet(TERRITORY_PREFIX + rid, true).catch(() => null)) || "";
+      await storageSet(TERRITORY_PREFIX + rid, owner, true);
+      logMapEvent({ k: "rg", rid, from: prevReg, to: owner, name: regionName, src: "admin" });
+      for (const c of await cityOf()) {
+        await storageSet(CITY_OWN_PREFIX + cityKey(c), owner, true);
+        await storageSet(CITY_DEF_PREFIX + cityKey(c), "0", true);
+      }
+    }, "Область передано: " + (COUNTRY_MAP[owner]?.name || owner));
+  const baseOwner = async () => {
+    const ro = await loadRegionOwners();
+    const base = ro?.r?.[rid];
+    if (!base) throw new Error("Початкового власника не знайдено");
+    return base;
+  };
+  const resetCity = () => run(async () => { await storageSet(CITY_OWN_PREFIX + cityKey(city), await baseOwner(), true); }, "Місто повернуто початковому власнику");
+  const resetRegion = () =>
+    run(async () => {
+      const base = await baseOwner();
+      await storageSet(TERRITORY_PREFIX + rid, base, true);
+      for (const c of await cityOf()) await storageSet(CITY_OWN_PREFIX + cityKey(c), base, true);
+    }, "Область повернуто початковому власнику");
+
+  return (
+    <div className="cn-adm cn-adm-map">
+      <button className="cn-adm-head" type="button" onClick={() => { cnSfx.toggle(); setOpen((o) => !o); }}>
+        <ShieldCheck size={13} /> <span>Адмін: змінити власника</span>
+        <ChevronDown size={14} className={"cn-chevron" + (open ? " cn-chevron--open" : "")} />
+      </button>
+      {open && (
+        <div className="cn-adm-body" style={{ border: "1px solid rgba(var(--cn-accent-rgb),0.25)", borderRadius: 9 }}>
+          <select className="cn-adm-in" value={code} onChange={(e) => setCode(e.target.value)}>
+            <option value="">Обери країну…</option>
+            {list.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
+          </select>
+          <div className="cn-adm-btns">
+            {city && <button className="cn-adm-btn" type="button" disabled={busy || !code} onClick={() => giveCity(code)}>Передати місто</button>}
+            <button className="cn-adm-btn" type="button" disabled={busy || !code} onClick={() => giveRegion(code)}>Передати область{regionName ? "" : ""}</button>
+          </div>
+          <div className="cn-adm-btns">
+            {city && <button className="cn-adm-btn" type="button" disabled={busy} onClick={resetCity}>Місто: як було</button>}
+            <button className="cn-adm-btn" type="button" disabled={busy} onClick={resetRegion}>Область: як було</button>
+          </div>
+          {msg && <div className="cn-adm-msg">{msg}</div>}
+          <div className="cn-adm-hint">«Передати область» переписує й усі міста області. «Як було» повертає початкового власника зі стартової карти.</div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick = null, dip = null, isLeader = false, onUpdatePlayer = null }) {
@@ -7584,6 +8087,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
                 <span className="cn-primary-btn-label">{t(lang, "nn_attack_soon")}</span>
               </button>
             )}
+            <AdminMapEditor city={selectedCity.city} rid={selected.rid} regionName={selected.name} onDone={onRefresh} />
           </div>
         )}
 
@@ -7644,6 +8148,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             )}
             {pick && pick.step === "city" ? cityPickBtn : pickBtn}
             {claimBtn(selected)}
+            <AdminMapEditor rid={selected.rid} regionName={selected.name} onDone={onRefresh} />
           </div>
         )}
       </div>
@@ -8586,22 +9091,22 @@ function GlobalStyles() {
       @keyframes cn-energy-note-pulse { 0%,100% { box-shadow: 0 0 10px rgba(251,146,60,0.14); } 50% { box-shadow: 0 0 20px rgba(251,146,60,0.34); } }
       .cn-onboard-blocked-msg { color: #F87171; font-size: 12px; margin-top: 6px; text-align: center; }
       .cn-country-dropdown-item--disabled { opacity: 0.4; cursor: not-allowed; }
-      .cn-admin-block-title { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 12px; color: #FDE68A; letter-spacing: 0.03em; margin-bottom: 6px; }
+      .cn-admin-block-title { font-family: inherit; font-weight: 700; font-size: 11px; color: var(--cn-text-dim); letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px; }
       .cn-admin-input {
-        width: 100%; padding: 8px 10px; border-radius: 10px; margin-bottom: 8px;
+        width: 100%; padding: 6px 9px; border-radius: 8px; margin-bottom: 5px; box-sizing: border-box;
         background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-        color: #EAF2FF; font-size: 12.5px; font-family: inherit;
+        color: #EAF2FF; font-size: 12px; font-family: inherit;
       }
       .cn-admin-row { display: flex; gap: 8px; align-items: center; }
       .cn-admin-row .cn-admin-input { margin-bottom: 0; flex: 1; }
-      .cn-admin-player-list { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; }
-      .cn-admin-player-row { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 10px; }
-      .cn-admin-player-head { display: flex; flex-direction: column; margin-bottom: 8px; }
+      .cn-admin-player-list { display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
+      .cn-admin-player-row { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 9px; padding: 7px 9px; }
+      .cn-admin-player-head { display: flex; flex-direction: column; margin-bottom: 5px; }
       .cn-admin-player-name { font-weight: 700; font-size: 12.5px; color: #EAF2FF; }
       .cn-admin-player-sub { font-size: 10.5px; color: #8FA6C4; margin-top: 2px; }
       .cn-admin-edit-form { display: flex; flex-direction: column; gap: 4px; }
       .cn-admin-field-label { font-size: 10.5px; color: #8FA6C4; display: flex; flex-direction: column; gap: 3px; }
-      .cn-admin-edit-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .cn-admin-edit-actions { display: flex; gap: 5px; flex-wrap: wrap; }
 
       .cn-stats-row { margin-top: 22px; width: 100%; display: flex; justify-content: center; }
       .cn-pass-reward-icon--banner img { width: 44px; height: 26px; border-radius: 6px; object-fit: cover; display: block; }
@@ -8894,13 +9399,13 @@ function GlobalStyles() {
       @keyframes cnTutArrowUp { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
       @keyframes cnTutArrowDown { 0%,100% { transform: translateY(0); } 50% { transform: translateY(7px); } }
 
-      .cn-box-tabs { display: flex; gap: 6px; margin: 0 0 12px; padding: 4px; background: rgba(var(--cn-panel-rgb),0.5); border: 1px solid rgba(var(--cn-accent-rgb),0.2); border-radius: 14px; }
+      .cn-box-tabs { display: flex; gap: 6px; margin: 0 0 8px; padding: 3px; background: rgba(var(--cn-panel-rgb),0.5); border: 1px solid rgba(var(--cn-accent-rgb),0.2); border-radius: 10px; }
       .cn-box-tab {
-        flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 8px; border: none; border-radius: 10px;
-        background: transparent; color: var(--cn-text-dimmer); font-size: 12.5px; font-weight: 600; cursor: pointer; transition: background 0.2s, color 0.2s;
+        flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 8px; border: none; border-radius: 8px;
+        background: transparent; color: var(--cn-text-dimmer); font-size: 11.5px; font-weight: 600; cursor: pointer; transition: background 0.2s, color 0.2s;
       }
       .cn-box-tab--active { background: rgba(var(--cn-accent-rgb),0.22); color: var(--cn-text); }
-      .cn-box-badge { min-width: 16px; padding: 0 5px; height: 16px; border-radius: 8px; background: #EF4444; color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
+      .cn-box-badge { min-width: 14px; padding: 0 4px; height: 14px; border-radius: 7px; background: #EF4444; color: #fff; font-size: 9px; line-height: 14px; text-align: center; }
       .cn-news-item--admin { border-left: 3px solid #FBBF24; }
 
       /* Season */
@@ -9226,6 +9731,20 @@ function GlobalStyles() {
       }
       .cn-flag-wrap svg { display: block; }
       .cn-flag-emoji { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+      .cn-replay-open { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; margin: 0 0 8px; padding: 8px; border-radius: 10px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.07); color: #fff; font-size: 12px; font-weight: 700; }
+      .cn-replay-back { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,.7); display: flex; align-items: center; justify-content: center; padding: 10px; }
+      .cn-replay { width: 100%; max-width: 560px; background: #0d1b33; border-radius: 14px; padding: 10px; color: #fff; }
+      .cn-replay-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+      .cn-replay-x { background: none; border: 0; color: #fff; font-size: 22px; line-height: 1; }
+      .cn-replay-canvas { width: 100%; height: auto; border-radius: 8px; display: block; }
+      .cn-replay-note { padding: 40px 8px; text-align: center; font-size: 12px; opacity: .8; }
+      .cn-replay-cap { min-height: 30px; margin: 8px 0 6px; font-size: 12px; font-weight: 600; }
+      .cn-replay-ctl { display: flex; align-items: center; gap: 8px; }
+      .cn-replay-n { font-size: 11px; opacity: .7; min-width: 40px; text-align: right; }
+      .cn-metric-chips { display: flex; gap: 6px; margin-bottom: 8px; overflow-x: auto; }
+      .cn-metric-chip { flex-shrink: 0; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(var(--cn-accent-rgb),0.3); background: transparent; color: var(--cn-text-dim); font-size: 11.5px; font-weight: 600; cursor: pointer; }
+      .cn-metric-chip--on { background: rgba(var(--cn-accent-rgb),0.18); color: var(--cn-accent); border-color: var(--cn-accent); }
+      .cn-row-sub { display: block; font-size: 10px; color: var(--cn-text-dimmer); font-weight: 400; overflow: hidden; text-overflow: ellipsis; }
       .cn-row-name { flex: 1; font-size: 13.5px; color: var(--cn-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cn-row-value { font-size: 13.5px; font-weight: 700; color: var(--cn-accent-bright); font-family: 'Space Grotesk', sans-serif; }
       .cn-row-divider { text-align: center; color: #445A7C; letter-spacing: 0.3em; font-size: 12px; padding: 2px 0; }
@@ -10082,7 +10601,7 @@ function GlobalStyles() {
       .cn-pl-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
       .cn-pl-item-name { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .cn-pl-item-power { font-family: 'Space Grotesk', sans-serif; font-weight: 800; font-size: 13px; color: #FBBF24; }
-      .cn-mail-resolved { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--cn-text-dim); }
+      .cn-mail-resolved { margin-top: 6px; font-size: 11.5px; font-weight: 700; color: var(--cn-text-dim); }
       .cn-hq-tile--locked { opacity: 0.5; }
       .cn-hq-lock { position: absolute; top: 7px; right: 7px; color: #FBBF24; }
       .cn-hq-badge { position: absolute; top: 5px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: #EF4444; color: #fff; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
@@ -10142,20 +10661,20 @@ function GlobalStyles() {
       }
 
       /* Mail */
-      .cn-mail-list { display: flex; flex-direction: column; gap: 8px; }
-      .cn-mail-item { border-radius: 14px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.4); overflow: hidden; }
+      .cn-mail-list { display: flex; flex-direction: column; gap: 4px; }
+      .cn-mail-item { border-radius: 10px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.4); overflow: hidden; }
       .cn-mail-item--unread { border-color: rgba(var(--cn-accent-rgb),0.5); background: rgba(var(--cn-accent-rgb),0.08); }
-      .cn-mail-item-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: none; border: none; cursor: pointer; text-align: left; }
+      .cn-mail-item-head { width: 100%; display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: none; border: none; cursor: pointer; text-align: left; }
       .cn-mail-item-icon { color: var(--cn-text-dim); flex-shrink: 0; }
       .cn-mail-item-text { flex: 1; min-width: 0; }
-      .cn-mail-item-subject { font-size: 13.5px; color: var(--cn-text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .cn-mail-item-time { font-size: 11px; color: var(--cn-text-dimmer); margin-top: 2px; }
-      .cn-mail-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--cn-accent); flex-shrink: 0; }
-      .cn-mail-item-body { padding: 0 14px 14px; font-size: 13px; color: var(--cn-text-dim); line-height: 1.5; }
-      .cn-mail-actions { display: flex; gap: 8px; margin-top: 10px; }
+      .cn-mail-item-subject { font-size: 12.5px; color: var(--cn-text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .cn-mail-item-time { font-size: 10px; color: var(--cn-text-dimmer); margin-top: 1px; }
+      .cn-mail-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cn-accent); flex-shrink: 0; }
+      .cn-mail-item-body { padding: 0 10px 9px; font-size: 12px; color: var(--cn-text-dim); line-height: 1.4; }
+      .cn-mail-actions { display: flex; gap: 6px; margin-top: 7px; }
       .cn-mail-action {
         flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
-        padding: 9px; border-radius: 10px; border: none; font-size: 12.5px; font-weight: 600; cursor: pointer;
+        padding: 6px; border-radius: 8px; border: none; font-size: 11.5px; font-weight: 600; cursor: pointer;
       }
       .cn-mail-action--accept { background: rgba(16,185,129,0.15); color: #34D399; border: 1px solid rgba(16,185,129,0.35); }
       .cn-mail-action--decline { background: rgba(239,68,68,0.12); color: #F87171; border: 1px solid rgba(239,68,68,0.3); }
@@ -10229,6 +10748,43 @@ function GlobalStyles() {
         border: 1px solid rgba(251,191,36,0.3); padding: 8px 10px; border-radius: 9px;
       }
 
+
+      /* Адмін-панель: компактні однакові секції */
+      .cn-adm { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+      .cn-adm * { box-sizing: border-box; }
+      .cn-adm-msg { font-size: 11.5px; color: var(--cn-accent); background: rgba(var(--cn-accent-rgb),0.1); border: 1px solid rgba(var(--cn-accent-rgb),0.3); padding: 5px 9px; border-radius: 8px; }
+      .cn-adm-warn { font-size: 11px; line-height: 1.35; color: #FBBF24; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); padding: 5px 9px; border-radius: 8px; }
+      .cn-adm-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+      .cn-adm-stats div { padding: 5px 2px; text-align: center; border-radius: 8px; background: rgba(var(--cn-panel-rgb),0.5); border: 1px solid rgba(var(--cn-accent-rgb),0.2); }
+      .cn-adm-stats b { display: block; font-size: 15px; line-height: 1.1; color: var(--cn-text); }
+      .cn-adm-stats span { display: block; font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--cn-text-dimmer); }
+      .cn-adm-sec { border-radius: 9px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.25); overflow: hidden; }
+      .cn-adm-head { width: 100%; display: flex; align-items: center; gap: 7px; padding: 8px 10px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.25); border-radius: 9px; color: var(--cn-text-dim); font-size: 12.5px; font-weight: 600; cursor: pointer; text-align: left; }
+      .cn-adm-sec > .cn-adm-head { background: none; border: 0; border-radius: 0; }
+      .cn-adm-head span { flex: 1; }
+      .cn-adm-head .cn-chevron { margin-left: auto; }
+      .cn-adm-badge { font-style: normal; min-width: 16px; padding: 0 5px; height: 15px; border-radius: 8px; background: var(--cn-accent); color: #06121F; font-size: 9.5px; font-weight: 800; line-height: 15px; text-align: center; }
+      .cn-adm-body { display: flex; flex-direction: column; gap: 5px; padding: 2px 10px 10px; border-top: 1px solid rgba(var(--cn-accent-rgb),0.15); }
+      .cn-adm-lab { margin-top: 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--cn-text-dimmer); }
+      .cn-adm-row { display: flex; align-items: center; gap: 6px; }
+      .cn-adm-row .cn-adm-in { flex: 1; min-width: 0; }
+      .cn-adm-in { width: 100%; padding: 6px 9px; border-radius: 8px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--cn-text); font-size: 12px; font-family: inherit; resize: vertical; }
+      .cn-adm-state { flex: 1; min-width: 0; font-size: 12px; color: var(--cn-text-dim); }
+      .cn-adm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; align-self: flex-start; flex-shrink: 0; padding: 5px 10px; border-radius: 8px; border: 1px solid rgba(var(--cn-accent-rgb),0.4); background: rgba(var(--cn-accent-rgb),0.1); color: var(--cn-accent); font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+      .cn-adm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+      .cn-adm-btn--danger { background: rgba(239,68,68,0.12); color: #F87171; border-color: rgba(239,68,68,0.3); }
+      .cn-adm-btn--confirm { background: #EF4444; color: #fff; }
+      .cn-adm-btns { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+      .cn-adm-item { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; padding: 6px 8px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07); }
+      .cn-adm-item-t { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--cn-text); }
+      .cn-adm-item-t small { display: block; margin-top: 1px; font-size: 10.5px; font-weight: 400; color: var(--cn-text-dimmer); }
+      .cn-adm-item .cn-adm-btns { width: 100%; margin-top: 0; }
+      .cn-adm-cl { display: flex; flex-direction: column; gap: 3px; max-height: 200px; overflow-y: auto; }
+      .cn-adm-hint { font-size: 10.5px; color: var(--cn-text-dimmer); }
+      .cn-adm-mapview { display: flex; flex-direction: column; gap: 5px; padding: 6px; border-radius: 9px; background: rgba(var(--cn-panel-rgb),0.45); border: 1px solid rgba(var(--cn-accent-rgb),0.25); }
+      .cn-adm-mapview img { width: 100%; border-radius: 6px; display: block; }
+      .cn-adm-empty { padding: 6px; text-align: center; font-size: 11.5px; color: var(--cn-text-dim); }
+
       /* Alliance */
       .cn-alliance-icon { color: var(--cn-accent); margin-left: auto; }
       .cn-alliance-hint { font-size: 11.5px; color: var(--cn-text-dimmer); margin-left: auto; }
@@ -10283,7 +10839,7 @@ function GlobalStyles() {
     
       /* ---- Global glow pass (whole-game redesign) ---- */
       .cn-profile-card { box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.1); }
-      .cn-mail-item { box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.1); }
+      .cn-mail-item { box-shadow: none; }
       .cn-map-card { box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.1); }
       .cn-war-banner { box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.1); }
       .cn-clicker-war-banner { box-shadow: 0 0 14px rgba(var(--cn-accent-rgb),0.1); }
