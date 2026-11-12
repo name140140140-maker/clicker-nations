@@ -11,8 +11,8 @@
 //  3. Сезон збільшується на 1 і відлік 50 днів іде спочатку; результати пишуться в seasonHistory.
 // Повторний запит із тим самим номером сезону відхиляється (захист від подвійного кліку).
 
-import { verifyTelegramInitData } from "./_telegramAuth.js";
-import { adminIds, rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "./_security.js";
+import { verifyTelegramInitData } from "../_telegramAuth.js";
+import { adminIds, rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "../_security.js";
 
 const GAME_STATE_KEY = "game-state";
 const WIPE_PREFIXES = ["terr:", "cityown:", "citydef:", "war:", "warc:", "warcd:", "warend:", "warevt:", "mapevt:", "dip:", "capcd:"];

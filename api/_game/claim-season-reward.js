@@ -3,8 +3,8 @@
 // сервер (api/admin-season-reset.js), а анонімний ключ клієнта його змінювати не може (RLS), тому
 // відмітку «забрано» ставить теж сервер. Нагорода видається один раз: атомарна умовна зміна запису.
 
-import { verifyTelegramInitData } from "./_telegramAuth.js";
-import { rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "./_security.js";
+import { verifyTelegramInitData } from "../_telegramAuth.js";
+import { rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "../_security.js";
 
 async function sbGet(key) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/kv_store?key=eq.${encodeURIComponent(key)}&select=value&limit=1`, { headers: serviceHeaders() });

@@ -9,8 +9,8 @@
 //  • на кожну подію розсилка лише раз (блокування warevt:<kind>:<id>).
 // Потрібні змінні середовища Vercel: BOT_TOKEN, SUPABASE_SERVICE_KEY, (необов'язково) WEBAPP_URL.
 
-import { verifyTelegramInitData } from "./_telegramAuth.js";
-import { rateLimit, clientIp, SUPABASE_URL, serviceHeaders } from "./_security.js";
+import { verifyTelegramInitData } from "../_telegramAuth.js";
+import { rateLimit, clientIp, SUPABASE_URL, serviceHeaders } from "../_security.js";
 
 const PLAYER_PREFIX = "players:";
 const TG_MAP_PREFIX = "tgmap:";

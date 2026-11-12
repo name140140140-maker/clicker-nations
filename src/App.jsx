@@ -1145,7 +1145,7 @@ function notifyWarEvent(war, kind) {
   try {
     const initData = window.Telegram?.WebApp?.initData;
     if (!initData || !war?.id) return;
-    fetch("/api/notify-war-event", {
+    fetch("/api/game?action=notify-war-event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2380,7 +2380,7 @@ export default function App() {
         if (!raw) return;
         const pre = JSON.parse(raw);
         if (!pre || pre.claimed || !(pre.points > 0)) return;
-        const r = await fetch("/api/claim-season-reward", {
+        const r = await fetch("/api/game?action=claim-season-reward", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ initData }),
@@ -5831,7 +5831,6 @@ function ProfileScreen({
       <div className="cn-lb-header">
         <div className="cn-screen-title">Профіль</div>
         <div className="cn-profile-header-actions">
-
         </div>
       </div>
 
@@ -7190,7 +7189,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
   const resetSeasonNow = async () => {
     setAdminBusy(true);
     try {
-      const r = await fetch("/api/admin-season-reset", {
+      const r = await fetch("/api/game?action=admin-season-reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", seasonNumber: season?.seasonNumber || 1, confirm: true }),
@@ -7215,7 +7214,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     setAdminBusy(true);
     const nextOff = !tgOff;
     try {
-      const r = await fetch("/api/admin-tg-notify", {
+      const r = await fetch("/api/game?action=admin-tg-notify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", off: nextOff }),

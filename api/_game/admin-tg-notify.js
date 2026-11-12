@@ -3,8 +3,8 @@
 // Ключ закритий для анонімного запису (supabase/hardening.sql): змінює його лише сервер після
 // перевірки підпису Telegram initData і ADMIN_TELEGRAM_IDS.
 
-import { verifyTelegramInitData } from "./_telegramAuth.js";
-import { adminIds, rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "./_security.js";
+import { verifyTelegramInitData } from "../_telegramAuth.js";
+import { adminIds, rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "../_security.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return fail(res, 405, "Method not allowed");
