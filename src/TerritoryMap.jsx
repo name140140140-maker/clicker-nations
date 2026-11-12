@@ -455,7 +455,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         worldRef.current.ownerByIndex = new Array(model.regions.length).fill("");
         worldRef.current.colorByIndex = new Array(model.regions.length).fill("");
 
-        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.9, buffer: 32 });
+        // Менше спрощення полігонів областей: при сильному спрощенні між сусідами лишаються тонкі просвіти (сині риски по суші).
+        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.15, buffer: 64 });
         addGeoJsonSource(map, "borders", bordersBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.9, buffer: 32 });
 
         // Усі вирази залежать лише від feature-state: після створення шарів їх не змінюємо

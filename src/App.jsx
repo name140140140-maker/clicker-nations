@@ -4750,10 +4750,63 @@ function MapReplayModal({ lang = "uk", onClose }) {
   const canvasRef = useRef(null);
   const sceneRef = useRef(null);
   const stateRef = useRef(null);
+  /* зум і переміщення: масштаб k, зсув (x, y) у пікселях вікна */
+  const [view, setView] = useState({ k: 1, x: 0, y: 0 });
+  const boxRef = useRef(null);
+  const ptrs = useRef(new Map());
+  const gest = useRef(null);
+  const clampView = (v) => {
+    const el = boxRef.current;
+    if (!el) return v;
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    const k = Math.min(12, Math.max(1, v.k));
+    return { k, x: Math.min(0, Math.max(w - w * k, v.x)), y: Math.min(0, Math.max(h - h * k, v.y)) };
+  };
+  const zoomAt = (cx, cy, factor) =>
+    setView((v) => {
+      const k = Math.min(12, Math.max(1, v.k * factor));
+      const f = k / v.k;
+      return clampView({ k, x: cx - (cx - v.x) * f, y: cy - (cy - v.y) * f });
+    });
+  const onPtrDown = (e) => {
+    ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    gest.current = null;
+  };
+  const onPtrMove = (e) => {
+    const m = ptrs.current;
+    if (!m.has(e.pointerId)) return;
+    const prev = m.get(e.pointerId);
+    m.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const rect = boxRef.current.getBoundingClientRect();
+    if (m.size === 1) {
+      setView((v) => clampView({ ...v, x: v.x + e.clientX - prev.x, y: v.y + e.clientY - prev.y }));
+    } else if (m.size === 2) {
+      const [a, b] = [...m.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      const cx = (a.x + b.x) / 2 - rect.left;
+      const cy = (a.y + b.y) / 2 - rect.top;
+      if (gest.current) zoomAt(cx, cy, d / gest.current);
+      gest.current = d;
+    }
+  };
+  const onPtrUp = (e) => {
+    ptrs.current.delete(e.pointerId);
+    gest.current = null;
+  };
+  const onWheel = (e) => {
+    const rect = boxRef.current.getBoundingClientRect();
+    zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.25 : 0.8);
+  };
+  const zoomBtn = (f) => {
+    const el = boxRef.current;
+    if (el) zoomAt(el.clientWidth / 2, el.clientHeight / 2, f);
+  };
 
   useEffect(() => {
     let off = false;
-    prepareReplay({ width: 900, lang })
+    prepareReplay({ width: 1800, lang })
       .then((sc) => { if (!off) { sceneRef.current = sc; setStage(""); } })
       .catch((e) => !off && setErr(e?.message || "Помилка"));
     return () => { off = true; };
@@ -4804,7 +4857,16 @@ function MapReplayModal({ lang = "uk", onClose }) {
           </div>
           <button type="button" className="cn-replay-x" onClick={onClose} aria-label="Закрити">×</button>
         </div>
-        {err ? <div className="cn-replay-note">{err}</div> : stage ? <div className="cn-replay-note">{stage}</div> : <canvas ref={canvasRef} className="cn-replay-canvas" />}
+        {err ? <div className="cn-replay-note">{err}</div> : stage ? <div className="cn-replay-note">{stage}</div> : (
+          <div className="cn-replay-view" ref={boxRef} onPointerDown={onPtrDown} onPointerMove={onPtrMove} onPointerUp={onPtrUp} onPointerCancel={onPtrUp} onWheel={onWheel} onDoubleClick={() => setView({ k: 1, x: 0, y: 0 })}>
+            <canvas ref={canvasRef} className="cn-replay-canvas" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})`, transformOrigin: "0 0" }} />
+            <div className="cn-replay-zoom">
+              <button type="button" onClick={() => zoomBtn(1.6)} aria-label="Наблизити">+</button>
+              <button type="button" onClick={() => zoomBtn(1 / 1.6)} aria-label="Віддалити">−</button>
+              <button type="button" onClick={() => setView({ k: 1, x: 0, y: 0 })} aria-label="Скинути">⟲</button>
+            </div>
+          </div>
+        )}
         <div className="cn-replay-cap">
           {cur
             ? `${new Date(cur.t).toLocaleString("uk-UA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · ${cur.name || "Область"}: ${nm(cur.from)} → ${nm(cur.to)}`
@@ -5831,6 +5893,7 @@ function ProfileScreen({
       <div className="cn-lb-header">
         <div className="cn-screen-title">Профіль</div>
         <div className="cn-profile-header-actions">
+
         </div>
       </div>
 
@@ -7165,6 +7228,36 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
       setMapExp({ busy: false, stage: "", url: "", err: e?.message || "Не вдалося створити зображення" });
     }
   };
+  /* Надсилає карту адміну в Telegram документом (надійно; збереження blob у Telegram WebView часто не працює) */
+  const sendMapImage = async () => {
+    const initData = window.Telegram?.WebApp?.initData;
+    if (!mapExp.blob) return;
+    if (!initData) { setAdminMsg("✗ Відкрий гру через бота в Telegram, щоб надіслати карту"); return; }
+    setAdminBusy(true);
+    setAdminMsg("");
+    try {
+      let blob = mapExp.blob;
+      if (blob.size > 4_000_000) {
+        /* завелике для сервера — стискаємо в JPEG */
+        const bmp = await createImageBitmap(blob);
+        const cv = document.createElement("canvas");
+        cv.width = bmp.width;
+        cv.height = bmp.height;
+        cv.getContext("2d").drawImage(bmp, 0, 0);
+        blob = await new Promise((res) => cv.toBlob(res, "image/jpeg", 0.9));
+      }
+      const r = await fetch("/api/game?action=admin-map-send", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream", "x-init-data": initData },
+        body: blob,
+      });
+      const d = await r.json().catch(() => ({}));
+      setAdminMsg(r.ok && d.ok ? "✓ Карту надіслано в чат з ботом (файлом)" : "✗ " + (d.error || "Не вдалося надіслати"));
+    } catch {
+      setAdminMsg("✗ Немає зв'язку із сервером");
+    }
+    setAdminBusy(false);
+  };
   const saveMapImage = async () => {
     const blob = mapExp.blob;
     if (!blob) return;
@@ -7178,12 +7271,16 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     } catch (e) {
       if (e && e.name === "AbortError") return;
     }
-    const a = document.createElement("a");
-    a.href = mapExp.url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    try {
+      const a = document.createElement("a");
+      a.href = mapExp.url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      /* ignore */
+    }
   };
 
   const resetSeasonNow = async () => {
@@ -7437,8 +7534,9 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
               {mapExp.url && (
                 <div className="cn-adm-mapview">
                   <img src={mapExp.url} alt="Карта світу" />
-                  <div className="cn-adm-hint">Якщо кнопка не зберігає, утримуй зображення й обери «Зберегти».</div>
+                  <div className="cn-adm-hint">У Telegram найнадійніше — «Надіслати в Telegram»: бот пришле карту файлом у чат, звідти її можна зберегти.</div>
                   <div className="cn-adm-btns">
+                    <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={sendMapImage}>Надіслати в Telegram</button>
                     <button className="cn-adm-btn" type="button" onClick={saveMapImage}>Зберегти на пристрій</button>
                     <button className="cn-adm-btn" type="button" onClick={() => { URL.revokeObjectURL(mapExp.url); setMapExp({ busy: false, stage: "", url: "", err: "" }); }}>Закрити</button>
                   </div>
@@ -9735,7 +9833,10 @@ function GlobalStyles() {
       .cn-replay { width: 100%; max-width: 560px; background: #0d1b33; border-radius: 14px; padding: 10px; color: #fff; }
       .cn-replay-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 13px; }
       .cn-replay-x { background: none; border: 0; color: #fff; font-size: 22px; line-height: 1; }
-      .cn-replay-canvas { width: 100%; height: auto; border-radius: 8px; display: block; }
+      .cn-replay-view { position: relative; overflow: hidden; border-radius: 8px; touch-action: none; background: #1f7fe8; cursor: grab; }
+      .cn-replay-canvas { width: 100%; height: auto; display: block; will-change: transform; user-select: none; }
+      .cn-replay-zoom { position: absolute; right: 6px; bottom: 6px; display: flex; flex-direction: column; gap: 4px; }
+      .cn-replay-zoom button { width: 30px; height: 30px; border-radius: 8px; border: 0; background: rgba(6,16,36,.78); color: #fff; font-size: 18px; line-height: 1; }
       .cn-replay-note { padding: 40px 8px; text-align: center; font-size: 12px; opacity: .8; }
       .cn-replay-cap { min-height: 30px; margin: 8px 0 6px; font-size: 12px; font-weight: 600; }
       .cn-replay-ctl { display: flex; align-items: center; gap: 8px; }
@@ -10282,6 +10383,15 @@ function GlobalStyles() {
       .cn-map-bottom .cn-tmap-legend { margin: 0; gap: 4px 12px; padding: 7px 12px; border-radius: 999px; background: rgba(6,14,28,0.78); border: 1px solid rgba(var(--cn-accent-rgb),0.3); font-size: 11px; color: #E6F0FF; flex-wrap: nowrap; }
       .cn-map-bottom .cn-tmap-legend-item { gap: 5px; white-space: nowrap; }
       .cn-map-bottom .cn-tmap-legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+      /* Компактні плашки на карті: менше накладань, більше видно карту */
+      .cn-content--map .cn-map-title { font-size: 14px; letter-spacing: 0.12em; text-shadow: 0 1px 6px rgba(0,0,0,0.85); }
+      .cn-content--map .cn-map-sub { font-size: 10px; max-width: 72%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.8; }
+      .cn-map-bottom { left: 8px; bottom: 8px; gap: 6px; }
+      .cn-map-bottom .cn-conflicts-head { padding: 7px 12px; font-size: 12.5px; }
+      .cn-map-bottom .cn-conflicts { border-radius: 12px; background: rgba(6,14,28,0.7); }
+      .cn-map-bottom .cn-tmap-legend { padding: 5px 9px; gap: 3px 8px; font-size: 10px; }
+      .cn-map-bottom .cn-tmap-legend-dot { width: 8px; height: 8px; }
+      .cn-map-mine-pill { padding: 6px 10px; font-size: 10.5px; }
       .cn-map-mine-pill { display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 700; color: var(--cn-accent-bright); background: rgba(6,14,28,0.78); border: 1px solid rgba(var(--cn-accent-rgb),0.5); cursor: pointer; white-space: nowrap; }
       .cn-map-viewport {
         position: relative; width: 100%; aspect-ratio: 4 / 3; border-radius: 22px; max-height: 84vh;

@@ -3,12 +3,14 @@
 import notifyWarEvent from "./_game/notify-war-event.js";
 import adminSeasonReset from "./_game/admin-season-reset.js";
 import adminTgNotify from "./_game/admin-tg-notify.js";
+import adminMapSend from "./_game/admin-map-send.js";
 import claimSeasonReward from "./_game/claim-season-reward.js";
 
 const ACTIONS = {
   "notify-war-event": notifyWarEvent,
   "admin-season-reset": adminSeasonReset,
   "admin-tg-notify": adminTgNotify,
+  "admin-map-send": adminMapSend,
   "claim-season-reward": claimSeasonReward,
 };
 
