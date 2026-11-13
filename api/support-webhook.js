@@ -84,7 +84,11 @@ async function playerInfo(tgId) {
   try {
     const pid = await sbGet(TG_MAP_PREFIX + tgId);
     if (!pid) return null;
-    return await getJson(PLAYER_PREFIX + pid);
+    const rec = await getJson(PLAYER_PREFIX + pid);
+    if (!rec) return rec;
+    /* Power веде сервер: pwr:<id> важливіший за поле в записі гравця */
+    const pw = await getJson("pwr:" + pid);
+    return pw && Number.isFinite(pw.p) ? { ...rec, power: pw.p } : rec;
   } catch {
     return null;
   }

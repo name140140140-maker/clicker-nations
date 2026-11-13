@@ -92,15 +92,9 @@ export function validateCountryName(name, countries) {
 
 /* Створює країну: атомарно займає вільну область, потім записує країну.
    Повертає { ok:true, country } або { ok:false, reason, taken? } */
-export async function createCountry({ name, color, leaderId, regionId }) {
-  const id = newCountryId();
-  const claim = await sbStorageInsertIfAbsent(TERRITORY_PREFIX + regionId, id, true);
-  if (claim === "exists") return { ok: false, taken: true, reason: "Цю територію щойно зайняла інша країна. Обери іншу." };
-  if (claim !== "ok") return { ok: false, reason: "Не вдалося зв'язатися з базою даних. Спробуй ще раз." };
-  const country = { id, name: sanitizeName(name).slice(0, NAME_MAX), color, leaderId, createdAt: Date.now(), regionIds: [regionId] };
-  const saved = await sbStorageSet(COUNTRY_PREFIX + id, JSON.stringify(country), true);
-  if (!saved) return { ok: false, reason: "Не вдалося зберегти країну. Спробуй ще раз." };
-  return { ok: true, country };
+export async function createCountry() {
+  // Нові країни більше не створюються: світ складається зі справжніх країн, а власність карти веде сервер
+  return { ok: false, reason: "Створення власних країн вимкнено. Обери одну з існуючих країн." };
 }
 
 /* Лише лідер змінює колір (перевірка на боці інтерфейсу). */

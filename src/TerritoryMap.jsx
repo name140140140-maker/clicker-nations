@@ -388,7 +388,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
       touchPitch: false,
       maxPitch: 0,
       renderWorldCopies: false,
-      fadeDuration: 250, // плавна поява/зникнення підписів міст
+      fadeDuration: 120, // коротка поява підписів: менше перемальовувань
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2), // на екранах 3x+ карта не рендериться в зайвих пікселях
       maxTileCacheSize: 32, // менше плиток у пам'яті: на слабких телефонах WebView інакше вилітає
       style: { version: 8, glyphs: GLYPHS_URL, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": MAP_COLORS.water } }] },
       center: [15, 30],
@@ -456,7 +457,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
         worldRef.current.colorByIndex = new Array(model.regions.length).fill("");
 
         // Менше спрощення полігонів областей: при сильному спрощенні між сусідами лишаються тонкі просвіти (сині риски по суші).
-        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.15, buffer: 64 });
+        addGeoJsonSource(map, "regions", regionsBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.45, buffer: 32 });
         addGeoJsonSource(map, "borders", bordersBlob, { maxzoom: SOURCE_MAX_ZOOM, tolerance: 0.9, buffer: 32 });
 
         // Усі вирази залежать лише від feature-state: після створення шарів їх не змінюємо
@@ -498,6 +499,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             id: "regions-texture",
             type: "fill",
             source: "regions",
+            minzoom: 3.5, // текстура-патерн дорога для GPU: на дальніх масштабах її не малюємо
             paint: {
               "fill-pattern": "land-tex",
               "fill-opacity": ["case", ["==", regionOwner, ""], 0.9, 0.34],
@@ -558,8 +560,8 @@ const TerritoryMap = forwardRef(function TerritoryMap(
               layout: { "icon-image": icon, "icon-allow-overlap": true, "icon-ignore-placement": true, "icon-size": ["interpolate", ["linear"], ["zoom"], minzoom, k0, minzoom + 3, k1] },
               paint: { "icon-opacity": ["interpolate", ["linear"], ["zoom"], minzoom, 0, minzoom + 0.6, 1] },
             }, before);
-            mk("decor-far", 0, 3.4, 9, 0.45, 0.8);
-            mk("decor-near", 1, 5, 9, 0.5, 0.8);
+            mk("decor-far", 0, 5.2, 9, 0.5, 0.8);
+            mk("decor-near", 1, 5.8, 9, 0.5, 0.8);
             mk("decor-major", 2, 5.4, 13, 0.4, 0.85);
             mk("decor-mid", 3, 6.4, 13, 0.4, 0.8);
           } catch (e) { /* декор — просто прикраса */ }

@@ -75,6 +75,12 @@ import TerritoryMap, { MAP_COLORS, GLOBE_SUPPORTED } from "./TerritoryMap";
 import { fmtPopulation, loadCities, cityKey } from "./map/cities";
 import { WAR_ACHIEVEMENTS, normalizeAch, withLoginStreak, withWarResults, unlockedIds } from "./achievements";
 import { renderWorldImage } from "./map/exportImage";
+import { activeFor, activePandemics } from "./worldEvents";
+import { powerSync, powerSpend, powerRefund, powerAdminSet, adminPlayerOp, linkTelegram, claimLeader, releaseLeader, adminSetLeader, loadPowerMap, hasServerPower, worldOp } from "./powerApi";
+import { loadBank, bankDeposit, bankWithdraw, cureVirus, loadCures, ensureSnaps, cureCost, CURE_BASE } from "./bank";
+import { setPandemicState, getCures, countryStatus, onPandemicChange, stateVersion, closedBordersOf, DISEASES, PANDEMIC_ORIGINS, diseaseByName, CONTAG_LABEL, lethalLabel } from "./pandemic";
+import { virusByCountry, worldVirus, fmtBig, fmtPct, virusColor, VIRUS_SCALE, VIRUS_HEALTHY } from "./virusStats";
+import { computeNationPops, fmtPop, fmtDelta } from "./population";
 import { logMapEvent, loadMapEvents, prepareReplay } from "./map/replay";
 import {
   loadNations,
@@ -128,7 +134,7 @@ function openSupportChat() {
   else window.open(url, "_blank");
 }
 const NO_WARS = [];
-/* Кулдаун між діями лідера/радника/повстанця (8 годин) */
+/* Кулдаун між діями лідера (8 годин) */
 const ACTION_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 export { cnSfx };
 
@@ -144,6 +150,7 @@ const FREE_CAPTURE_COST = 5000; // Power за захоплення вільно�
 const FREE_CAPTURE_CD_MS = 10 * 60 * 1000; // пауза між захопленнями однієї країни
 const CAPCD_PREFIX = "capcd:"; // capcd:<країна> → час, до якого країна не може захоплювати вільні області
 const CITY_DEF_UPGRADE_COST = 5000; // Power за рівень оборони міста
+const PANDEMIC_CFG_KEY = "cfg:pandemic"; // { manual: [{ id, code, disease, start, dur }], cancelAt } — пише лише сервер
 const TG_NOTIFY_KEY = "cfg:tgnotify"; // "off" — адмін вимкнув Telegram-сповіщення для всіх
 const CITY_DEF_PREFIX = "citydef:"; // citydef:<cityKey> → рівень оборони міста (0..5)
 const UPGRADES = [
@@ -217,11 +224,7 @@ const THEME_KEY = "theme";
 const PREP_MS = 10 * 60 * 1000;
 const BATTLE_MS = 60 * 60 * 1000;
 
-/* Government roles: Лідер (1), Радники (до MAX_ADVISORS). Звичайні громадяни:
-   Звичайний громадянин / Повстанець. Ролі 2-4 купуються в магазині за
-   ROLE_PRICE Power кожна. */
-const ROLE_PRICE = 20000;
-const MAX_ADVISORS = 20;
+/* Влада: у кожній країні один лідер. Радників і повстань у грі немає. */
 
 async function getJSON(key, shared, fallback) {
   const raw = await storageGet(key, shared);
@@ -269,9 +272,6 @@ const EMPTY_GAME_STATE = {
   cityDefense: {},
   news: [],
   season: { seasonNumber: 1, durationDays: SEASON_DURATION_DAYS, startedAt: null, rev: SEASON_REV },
-  advisors: {}, // { [countryCode]: [playerId, ...] } — Рада (до MAX_ADVISORS)
-  councilProposals: {}, // { [countryCode]: [proposal, ...] }
-  rebellions: [], // повстання проти лідера/радника всередині країни
   maintenance: { enabled: false, message: "" },
 };
 
@@ -475,112 +475,6 @@ async function declareWarAction(attackerCode, defenderCode, city) {
   return { ok: true, war };
 }
 
-/* ------------------------------------------------------------------ */
-/*  Повстання: Повстанець проти лідера чи одного з радників             */
-/* ------------------------------------------------------------------ */
-
-async function getRebellions() {
-  return (await loadGameState()).rebellions || [];
-}
-async function saveRebellions(list) {
-  return saveGameStatePart({ rebellions: list });
-}
-
-/* A country can only have one active rebellion at a time */
-function countryAtRebellion(rebellions, code) {
-  return (rebellions || []).some((r) => r.status !== "ended" && r.countryCode === code);
-}
-
-/* Shared: start a rebellion, with exclusivity checks + mail + news.
-   targetType is "leader" or "advisor"; targetPlayerId is the player being
-   challenged. Returns { ok, reason, rebellion? } */
-async function declareRebellionAction(rebelId, rebelName, countryCode, targetType, targetPlayerId, targetName) {
-  const rebellions = await getRebellions();
-  if (countryAtRebellion(rebellions, countryCode)) {
-    return { ok: false, reason: "У країні вже точиться повстання" };
-  }
-  if (!targetPlayerId) return { ok: false, reason: "Не обрано ціль повстання" };
-  if (targetPlayerId === rebelId) return { ok: false, reason: "Не можна повстати проти самого себе" };
-
-  const now2 = Date.now();
-  const rebellion = {
-    id: "reb_" + now2.toString(36) + Math.random().toString(36).slice(2, 7),
-    countryCode,
-    rebelId,
-    rebelName,
-    targetType, // "leader" | "advisor"
-    targetPlayerId,
-    targetName,
-    declaredAt: now2,
-    prepEndsAt: now2 + PREP_MS,
-    battleEndsAt: now2 + PREP_MS + BATTLE_MS,
-    status: "prep",
-    rebelPower: 0,
-    authorityPower: 0,
-  };
-  const list = [...rebellions, rebellion];
-  await saveRebellions(list);
-
-  const leaderId = await getLeader(countryCode);
-  if (leaderId) {
-    await addMail(leaderId, {
-      type: "rebellion-declared",
-      subject: `Повстання проти ${targetType === "leader" ? "тебе" : targetName}!`,
-      body: `${rebelName} підняв(ла) повстання проти ${targetType === "leader" ? "лідера" : "радника " + targetName}. Підготовка триває 10 хвилин, далі — година битви. Заходь у Панель управління → Влада → Повстання, щоб внести Power на бік влади.`,
-      meta: { rebellionId: rebellion.id },
-    });
-  }
-  await addNews(
-    `🔥 ${COUNTRY_MAP[countryCode]?.flag || ""} ${rebelName} підняв(ла) повстання проти ${
-      targetType === "leader" ? "лідера" : "радника " + (targetName || "")
-    } у ${COUNTRY_MAP[countryCode]?.name || countryCode}.`
-  );
-
-  return { ok: true, rebellion };
-}
-
-/* Centralized rebellion reconciliation (prep -> battle -> ended), mirrors
-   reconcileWars(). Called from refreshGameData so it runs regardless of
-   which screen is open. */
-async function reconcileRebellions() {
-  const now = Date.now();
-  const rebellions = await getRebellions();
-  let changed = false;
-  for (const r of rebellions) {
-    if (r.status === "prep" && now >= r.prepEndsAt) {
-      r.status = "battle";
-      changed = true;
-    } else if (r.status === "battle" && now >= r.battleEndsAt) {
-      const rebelWins = (r.rebelPower || 0) > (r.authorityPower || 0);
-      r.status = "ended";
-      r.winner = rebelWins ? "rebel" : "authority";
-      changed = true;
-
-      let resultText;
-      if (rebelWins) {
-        if (r.targetType === "leader") {
-          await storageSet(LEADER_PREFIX + r.countryCode, "", true);
-        } else {
-          const advisors = await getAdvisors(r.countryCode);
-          await saveAdvisors(r.countryCode, advisors.filter((id) => id !== r.targetPlayerId));
-        }
-        resultText = `${r.rebelName} переміг(ла) у повстанні: ${
-          r.targetType === "leader" ? "лідера" : "радника " + (r.targetName || "")
-        } усунено від влади в ${COUNTRY_MAP[r.countryCode]?.name || r.countryCode}!`;
-      } else {
-        resultText = `Влада ${COUNTRY_MAP[r.countryCode]?.name || r.countryCode} придушила повстання ${r.rebelName}.`;
-      }
-
-      const leaderId = await getLeader(r.countryCode);
-      if (leaderId) await addMail(leaderId, { type: "info", subject: "Повстання завершено", body: resultText });
-      await addMail(r.rebelId, { type: "info", subject: "Повстання завершено", body: resultText });
-      await addNews("🔥 " + resultText);
-    }
-  }
-  if (changed) await saveRebellions(rebellions);
-  return changed ? rebellions : null;
-}
-
 /* Shared: send an alliance request, with mail + validation. Returns { ok, reason } */
 async function sendAllianceRequestAction(fromCode, toCode) {
   if (fromCode === toCode) return { ok: false, reason: "Не можна укласти союз із собою" };
@@ -643,9 +537,6 @@ async function reconcileWars() {
 async function getLeader(code) {
   return storageGet(LEADER_PREFIX + code, true);
 }
-async function setLeaderStorage(code, playerId) {
-  return storageSet(LEADER_PREFIX + code, playerId, true);
-}
 
 function areAllies(alliances, a, b) {
   return alliances.some((pair) => (pair[0] === a && pair[1] === b) || (pair[0] === b && pair[1] === a));
@@ -670,7 +561,7 @@ function pairId(a, b) {
 }
 
 async function loadDiplomacy() {
-  const out = { allies: [], pacts: [], truces: {}, requests: [] };
+  const out = { allies: [], pacts: [], truces: {}, requests: [], borders: [] };
   const entries = await sbStorageListEntries(DIP_PREFIX, true);
   const brokenAllyPairs = new Set();
   for (const row of entries || []) {
@@ -683,6 +574,10 @@ async function loadDiplomacy() {
     if (!v) continue;
     if (v.kind === "req") {
       if (REAL_ID_RE.test(String(v.from)) && REAL_ID_RE.test(String(v.to))) out.requests.push(v);
+      continue;
+    }
+    if (v.kind === "border") {
+      if (REAL_ID_RE.test(String(v.a)) && REAL_ID_RE.test(String(v.b)) && Array.isArray(v.hist)) out.borders.push(v);
       continue;
     }
     if (v.kind !== "ally" && v.kind !== "pact") continue;
@@ -729,56 +624,11 @@ function attackBlockReason(dip, a, b, ignoreTime = false) {
 
 async function sendDiplomacyRequest(kind, from, to) {
   if (from === to) return { ok: false, reason: "Не можна обрати власну країну" };
-  if (!COUNTRY_MAP[to]) return { ok: false, reason: "Країну не знайдено" };
-  const toLeader = await getLeader(to);
-  if (!toLeader) return { ok: false, reason: "У цієї країни немає лідера" };
-  const dip = await loadDiplomacy();
-  const rel = dipRelation(dip, from, to);
-  if (kind === "ally" && rel.ally) return { ok: false, reason: "Ви вже союзники" };
-  if (kind === "pact" && (rel.pact || rel.ally)) return { ok: false, reason: rel.ally ? "Союзникам пакт не потрібен" : "Пакт уже підписано" };
-  if (dip.requests.some((r) => r.status === "pending" && r.type === kind && pairId(r.from, r.to) === pairId(from, to) && Date.now() - r.ts < 24 * 3600 * 1000)) {
-    return { ok: false, reason: "Пропозицію вже надіслано — чекаємо відповіді" };
-  }
-  const id = "q_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const req = { kind: "req", id, type: kind, from, to, status: "pending", ts: Date.now() };
-  await setJSON(DIP_PREFIX + "req:" + id, req, true);
-  const fromName = COUNTRY_MAP[from]?.name || from;
-  await addMail(toLeader, {
-    type: "dip-request",
-    subject: `${DIP_KIND[kind].req} від ${fromName}`,
-    body: `${COUNTRY_MAP[from]?.flag || ""} ${fromName} пропонує ${kind === "ally" ? "укласти союз" : "підписати пакт про ненапад"}. Можна прийняти, відхилити або проігнорувати.`,
-    meta: { requestId: id, kind, fromCountry: from, toCountry: to },
-  });
-  return { ok: true };
+  return worldOp("dip-request", { kind, to });
 }
 
 async function respondDiplomacyRequest(requestId, accept) {
-  const req = await getJSON(DIP_PREFIX + "req:" + requestId, true, null);
-  if (!req) return { ok: false, reason: "Пропозицію не знайдено" };
-  if (req.status !== "pending") return { ok: false, reason: "На цю пропозицію вже відповіли" };
-  if (Date.now() - (req.ts || 0) > 24 * 3600 * 1000) return { ok: false, reason: "Пропозиція застаріла" };
-  if (req.type === "ceasefire") return respondCeasefireRequest(req, accept);
-  await setJSON(DIP_PREFIX + "req:" + requestId, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
-  if (accept) {
-    await setJSON(DIP_PREFIX + req.type + ":" + pairId(req.from, req.to), { kind: req.type, a: req.from, b: req.to, active: true, ts: Date.now() }, true);
-    await pushNews(
-      req.type === "ally"
-        ? `🤝 ${COUNTRY_MAP[req.from]?.flag || ""} ${COUNTRY_MAP[req.from]?.name || req.from} і ${COUNTRY_MAP[req.to]?.flag || ""} ${COUNTRY_MAP[req.to]?.name || req.to} уклали союз.`
-        : `📜 ${COUNTRY_MAP[req.from]?.flag || ""} ${COUNTRY_MAP[req.from]?.name || req.from} і ${COUNTRY_MAP[req.to]?.flag || ""} ${COUNTRY_MAP[req.to]?.name || req.to} підписали пакт про ненапад.`
-    );
-  }
-  const fromLeader = await getLeader(req.from);
-  if (fromLeader) {
-    const toName = COUNTRY_MAP[req.to]?.name || req.to;
-    await addMail(fromLeader, {
-      type: "info",
-      subject: accept ? `${DIP_KIND[req.type].title} укладено` : "Пропозицію відхилено",
-      body: accept
-        ? `${toName} прийняли вашу пропозицію: ${DIP_KIND[req.type].noun}.`
-        : `${toName} відхилили вашу пропозицію: ${DIP_KIND[req.type].noun}.`,
-    });
-  }
-  return { ok: true };
+  return worldOp("dip-respond", { requestId, accept: !!accept });
 }
 
 /* ------------------------------------------------------------------ */
@@ -788,93 +638,31 @@ async function respondDiplomacyRequest(requestId, accept) {
 /*  "ceasefire", лист у Пошті той самий "dip-request" (Прийняти/Відхилити)*/
 /* ------------------------------------------------------------------ */
 
-async function sendCeasefireRequest(war, from) {
+async function sendCeasefireRequest(war) {
   if (!war || war.status === "ended") return { ok: false, reason: "Війна вже завершилась" };
-  if (from !== war.attacker && from !== war.defender) return { ok: false, reason: "Перемир'я пропонує лідер головної країни війни" };
-  const phase = warPhase(war);
-  if (phase !== "prep" && phase !== "battle") return { ok: false, reason: "Війна вже завершується" };
-  const to = from === war.attacker ? war.defender : war.attacker;
-  const toLeader = await getLeader(to);
-  if (!toLeader) return { ok: false, reason: "У ворожої країни немає лідера, тож домовитись нема з ким" };
+  return worldOp("ceasefire-request", { warId: war.id });
+}
+
+
+
+/* Закриті кордони (захист від пандемій). dip:border:<пара> = { kind:"border", a, b, by, hist:[[закрито, відкрито|0], …] }.
+   Закритий кордон блокує поширення вірусу між двома країнами (src/pandemic.js) з моменту закриття. */
+const MAX_CLOSED_BORDERS = 5;
+const isOpenHist = (b) => b.hist.length > 0 && !b.hist[b.hist.length - 1][1];
+async function closeBorder(mine, other) {
+  if (!COUNTRY_MAP[other] || other === mine) return { ok: false, reason: "Обери іншу країну" };
+  const r = await worldOp("border-close", { other });
+  if (!r.ok) return r;
   const dip = await loadDiplomacy();
-  if (dip.requests.some((r) => r.status === "pending" && r.type === "ceasefire" && r.warId === war.id && Date.now() - r.ts < 24 * 3600 * 1000)) {
-    return { ok: false, reason: "Пропозицію перемир'я вже надіслано — чекаємо відповіді" };
-  }
-  const id = "q_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  await setJSON(DIP_PREFIX + "req:" + id, { kind: "req", id, type: "ceasefire", warId: war.id, from, to, status: "pending", ts: Date.now() }, true);
-  const fromName = COUNTRY_MAP[from]?.name || from;
-  await addMail(toLeader, {
-    type: "dip-request",
-    subject: `Перемир'я: пропозиція від ${fromName}`,
-    body: `${COUNTRY_MAP[from]?.flag || ""} ${fromName} пропонує перемир'я у війні за ${war.cityName}. Якщо прийняти, війна припиниться, місто залишиться в захисника, а обидві сторони ${Math.round(WAR_COOLDOWN_MS / 3600000)} год. не зможуть нападати.`,
-    meta: { requestId: id, kind: "ceasefire", fromCountry: from, toCountry: to, warId: war.id },
-  });
+  setPandemicState({ borders: dip.borders, cfg: undefined });
   return { ok: true };
 }
-
-async function ceaseWar(w) {
-  const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
-  if (lock !== "ok") return false;
-  await setJSON(WAR_PREFIX + w.id, { ...w, status: "ended", result: { winner: null, ceasefire: true, endedAt: Date.now() } }, true);
-  const attSide = [w.attacker, ...(w.attAllies || [])];
-  const defSide = [w.defender, ...(w.defAllies || [])];
-  const cdUntil = Date.now() + WAR_COOLDOWN_MS;
-  await Promise.all([...attSide, ...defSide].map((c) => storageSet(WARCD_PREFIX + c, String(cdUntil), true).catch(() => null)));
-  const an = COUNTRY_MAP[w.attacker]?.name || w.attacker;
-  const dn = COUNTRY_MAP[w.defender]?.name || w.defender;
-  await pushNews(`🕊️ ${COUNTRY_MAP[w.attacker]?.flag || ""} ${an} і ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn} уклали перемир'я. Війна за ${w.cityName} припинена, місто залишається в ${dn}.`);
-  notifyWarEvent(w, "end");
-  for (const c of [w.attacker, w.defender]) {
-    const leader = await getLeader(c);
-    if (leader) await addMail(leader, { type: "info", subject: "Перемир'я укладено", body: `Війна за ${w.cityName} припинена. Місто лишилось у ${dn}.` });
-  }
-  return true;
-}
-
-async function respondCeasefireRequest(req, accept) {
-  const war = await getJSON(WAR_PREFIX + req.warId, true, null);
-  const alive = war && war.status !== "ended" && ["prep", "battle"].includes(warPhase(war));
-  if (accept && !alive) {
-    await setJSON(DIP_PREFIX + "req:" + req.id, { ...req, status: "expired", answeredAt: Date.now() }, true);
-    return { ok: false, reason: "Війна вже завершилась" };
-  }
-  await setJSON(DIP_PREFIX + "req:" + req.id, { ...req, status: accept ? "accepted" : "declined", answeredAt: Date.now() }, true);
-  if (accept) {
-    const done = await ceaseWar(war);
-    if (!done) return { ok: false, reason: "Війна вже завершилась" };
-  } else {
-    const fromLeader = await getLeader(req.from);
-    if (fromLeader) await addMail(fromLeader, { type: "info", subject: "Перемир'я відхилено", body: `${COUNTRY_MAP[req.to]?.name || req.to} відхилили вашу пропозицію перемир'я.` });
-  }
-  return { ok: true };
+async function openBorder(mine, other) {
+  return worldOp("border-open", { other });
 }
 
 async function breakDiplomacy(kind, mine, other) {
-  await setJSON(
-    DIP_PREFIX + kind + ":" + pairId(mine, other),
-    { kind, a: mine, b: other, active: false, brokenAt: Date.now(), brokenBy: mine },
-    true
-  );
-  await pushNews(
-    `💔 ${COUNTRY_MAP[mine]?.flag || ""} ${COUNTRY_MAP[mine]?.name || mine} розірвали ${kind === "ally" ? "союз" : "пакт про ненапад"} з ${COUNTRY_MAP[other]?.flag || ""} ${COUNTRY_MAP[other]?.name || other}.`
-  );
-  if (kind === "ally") {
-    try {
-      const list = await getAlliances();
-      await saveAlliances(list.filter((pr) => pairId(pr[0], pr[1]) !== pairId(mine, other)));
-    } catch {
-      /* ignore */
-    }
-  }
-  const otherLeader = await getLeader(other);
-  if (otherLeader) {
-    await addMail(otherLeader, {
-      type: "info",
-      subject: kind === "ally" ? "Союз розірвано" : "Пакт розірвано",
-      body: `${COUNTRY_MAP[mine]?.name || mine} розірвали ${DIP_KIND[kind].noun}. Протягом 4 годин нападати одне на одного заборонено.`,
-    });
-  }
-  return { ok: true };
+  return worldOp("dip-break", { kind, other });
 }
 
 
@@ -969,52 +757,15 @@ async function mailMany(players, codes, message) {
   await Promise.all(targets.map((pl) => addMail(pl.id, message).catch(() => null)));
 }
 
-async function declareWar2({ attacker, defender, city, owners, cityOwners, players, immune = false, selfId = null }) {
+async function declareWar2({ attacker, defender, city, selfId = null, onUpdatePlayer = null }) {
   if (!COUNTRY_MAP[defender]) return { ok: false, reason: "Країну не знайдено" };
   if (attacker === defender) return { ok: false, reason: "Не можна нападати на себе" };
-  if (owners && ((cityOwners && cityOwners[city.key]) || owners[city.rid]) !== defender) return { ok: false, reason: "Це місто вже не належить цій країні" };
-  const blocked = attackBlockReason(await loadDiplomacy(), attacker, defender, immune);
-  if (blocked) return { ok: false, reason: blocked };
-  const active = await loadActiveWars();
-  if (active.some((w) => warInvolves(w, attacker))) return { ok: false, reason: "Твоя країна вже бере участь у війні" };
-  if (active.some((w) => warInvolves(w, defender))) return { ok: false, reason: "Ця країна вже веде війну або готується до неї" };
-  if (!immune) {
-    const [cdA, cdD] = await Promise.all([getWarCooldown(attacker), getWarCooldown(defender)]);
-    if (cdA) return { ok: false, reason: "Твоя країна відновлюється після війни: нападати можна через " + fmtDuration(cdA - Date.now()) };
-    if (cdD) return { ok: false, reason: "Ця країна щойно закінчила війну: напад можливий через " + fmtDuration(cdD - Date.now()) };
-  }
-  const now = Date.now();
-  const id = "w_" + now.toString(36) + Math.random().toString(36).slice(2, 5);
-  const defLevel = await getCityDefLevel(city.key || "").catch(() => 0);
-  /* Країна без жодного гравця не лишається беззахисною: її обороняє бот, сила якого залежить від розміру країни. */
-  const defHasPlayers = (players || []).some((p) => p.countryCode === defender);
-  const botDef = defHasPlayers
-    ? 0
-    : Math.round((CITY_DEF_THRESHOLDS[defLevel] || WAR_TARGET) * (0.5 + Math.min(1, (COUNTRY_MAP[defender]?.regionCount || 1) / 50)));
-  const war = {
-    id,
-    attacker,
-    defender,
-    cityId: city.id,
-    cityName: city.name,
-    cityRid: city.rid,
-    cityKey: city.key || "",
-    createdAt: now,
-    prepEnd: now + WAR_PREP_MS,
-    battleEnd: now + WAR_PREP_MS + WAR_BATTLE_MS,
-    attAllies: [],
-    defAllies: [],
-    target: CITY_DEF_THRESHOLDS[defLevel] || WAR_TARGET,
-    defLevel,
-    botDef,
-    status: "active",
-  };
-  await setJSON(WAR_PREFIX + id, war, true);
+  const r = await worldPaid("war-declare", { defender, cityKey: city.key || "", cityId: city.id }, onUpdatePlayer);
+  if (!r.ok) return r;
+  const war = r.war;
+  const id = war.id;
   const an = COUNTRY_MAP[attacker]?.name || attacker;
   const dn = COUNTRY_MAP[defender]?.name || defender;
-  await pushNews(
-    `⚔️ ${COUNTRY_MAP[attacker]?.flag || ""} ${COUNTRY_MAP[attacker]?.name || attacker} оголосили війну ${COUNTRY_MAP[defender]?.flag || ""} ${COUNTRY_MAP[defender]?.name || defender} за місто ${city.name}. Поріг захоплення: ${fmt(war.target)}.`
-  );
   /* Бот пише в Telegram усім гравцям країни, на яку напали */
   try {
     const initData = window.Telegram?.WebApp?.initData;
@@ -1051,11 +802,6 @@ async function declareWar2({ attacker, defender, city, owners, cityOwners, playe
   } catch {
     /* сповіщення не критичні */
   }
-  await mailMany(players, [attacker, defender], {
-    type: "info",
-    subject: `⚔️ Підготовка до війни за ${city.name}`,
-    body: `${an} оголосили війну ${dn}. Битва за місто ${city.name} почнеться через 10 хвилин і триватиме годину. Усі кліки гравців підуть на шкалу битви. Залишайся в грі!`,
-  });
   return { ok: true, war };
 }
 
@@ -1071,44 +817,11 @@ function joinWarBlockReason(dip, war, side, code) {
 }
 
 async function inviteWarAlly(war, fromCountry, allyCountry) {
-  const side = warSide(war, fromCountry);
-  if (!side) return { ok: false, reason: "Твоя країна не бере участі у війні" };
-  const blockedJoin = joinWarBlockReason(await loadDiplomacy(), war, side, allyCountry);
-  if (blockedJoin) return { ok: false, reason: "Цю країну не можна покликати: " + blockedJoin };
-  const active = await loadActiveWars();
-  if (active.some((w) => warInvolves(w, allyCountry))) return { ok: false, reason: "Ця країна вже у війні" };
-  const leaderId = await getLeader(allyCountry);
-  if (!leaderId) return { ok: false, reason: "У країни немає лідера" };
-  const fromName = COUNTRY_MAP[fromCountry]?.name || fromCountry;
-  await addMail(leaderId, {
-    type: "war-invite",
-    subject: `Заклик до війни від ${fromName}`,
-    body: `${COUNTRY_MAP[fromCountry]?.flag || ""} ${fromName} просять допомогти у битві за ${war.cityName} на стороні ${side === "att" ? "атаки" : "захисту"}. Якщо приймеш, гравці твоєї країни кликатимуть за цю сторону.`,
-    meta: { warId: war.id, side, fromCountry, toCountry: allyCountry },
-  });
-  return { ok: true };
+  return worldOp("war-invite", { warId: war.id, ally: allyCountry });
 }
 
 async function acceptWarInvite(meta) {
-  const war = await getJSON(WAR_PREFIX + meta.warId, true, null);
-  if (!war || war.status === "ended" || Date.now() >= war.battleEnd) return { ok: false, reason: "Війна вже завершилась" };
-  const active = await loadActiveWars();
-  if (active.some((w) => warInvolves(w, meta.toCountry))) return { ok: false, reason: "Твоя країна вже бере участь у війні" };
-  const blockedJoin = joinWarBlockReason(await loadDiplomacy(), war, meta.side, meta.toCountry);
-  if (blockedJoin) return { ok: false, reason: "Вступити не можна: " + blockedJoin };
-  const key = meta.side === "att" ? "attAllies" : "defAllies";
-  const next = { ...war, [key]: [...(war[key] || []), meta.toCountry] };
-  await setJSON(WAR_PREFIX + war.id, next, true);
-  await pushNews(`🤝 ${COUNTRY_MAP[meta.toCountry]?.flag || ""} ${COUNTRY_MAP[meta.toCountry]?.name || meta.toCountry} вступили у війну за місто ${war.cityName} на боці ${meta.side === "att" ? "атаки" : "захисту"}.`);
-  const fromLeader = await getLeader(meta.fromCountry);
-  if (fromLeader) {
-    await addMail(fromLeader, {
-      type: "info",
-      subject: "Союзник приєднався до війни",
-      body: `${COUNTRY_MAP[meta.toCountry]?.name || meta.toCountry} прийняли заклик і вступили в битву за ${war.cityName}.`,
-    });
-  }
-  return { ok: true };
+  return worldOp("war-join", { warId: meta.warId, side: meta.side, fromCountry: meta.fromCountry });
 }
 
 /* Скільки міст зараз контролює країна. null, якщо дані недоступні. */
@@ -1162,163 +875,10 @@ function notifyWarEvent(war, kind) {
 }
 
 /* Завершення війни: лише один клієнт виконує підсумки (блокування через insert-if-absent) */
-async function finalizeWar(w, players, forcedWinner = null) {
-  const lock = await sbStorageInsertIfAbsent("warend:" + w.id, String(Date.now()), true);
-  if (lock !== "ok") return false;
-  const totals = await fetchWarTotals(w.id);
-  totals.def += w.botDef || 0; // оборона бота (країни без гравців)
-  const net = totals.att - totals.def;
-  const win = forcedWinner ? forcedWinner === "att" : net >= (w.target || WAR_TARGET);
-  const winner = win ? w.attacker : w.defender;
-  await setJSON(
-    WAR_PREFIX + w.id,
-    { ...w, status: "ended", result: { att: totals.att, def: totals.def, net, winner, endedAt: Date.now() } },
-    true
-  );
-  const an = COUNTRY_MAP[w.attacker]?.name || w.attacker;
-  const dn = COUNTRY_MAP[w.defender]?.name || w.defender;
-  let respawnNote = "";
-  if (win) {
-    if (w.cityKey) await storageSet(CITY_OWN_PREFIX + w.cityKey, w.attacker, true);
-    else await storageSet(TERRITORY_PREFIX + w.cityRid, w.attacker, true);
-    logMapEvent({ k: w.cityKey ? "ct" : "rg", ck: w.cityKey || undefined, rid: w.cityRid, from: w.defender, to: w.attacker, name: w.cityName, src: "war" });
-    // нова власниця починає з нульової оборони міста
-    if (w.cityKey) await storageSet(CITY_DEF_PREFIX + w.cityKey, "0", true);
-    // Країна, що втратила всі міста, вибуває з гри: її гравці обирають нову країну
-    try {
-      const left = await countryCityCount(w.defender);
-      if (left === 0) {
-        respawnNote = " Країна втратила всі міста й вибула з гри, її гравці обирають нову країну.";
-        await setJSON(WAR_PREFIX + w.id, { ...w, status: "ended", result: { att: totals.att, def: totals.def, net, winner, endedAt: Date.now(), eliminated: true } }, true);
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  const attSide = [w.attacker, ...(w.attAllies || [])];
-  const defSide = [w.defender, ...(w.defAllies || [])];
-  const cdUntil = Date.now() + WAR_COOLDOWN_MS;
-  await Promise.all([...attSide, ...defSide].map((c) => storageSet(WARCD_PREFIX + c, String(cdUntil), true).catch(() => null)));
-  const text = win
-    ? `${an} перемогли в битві за ${w.cityName} (баланс +${fmt(net)}) і забрали місто в ${dn}.${respawnNote}`
-    : `${dn} відбили атаку на ${w.cityName}: баланс ${fmt(Math.max(net, 0))} із ${fmt(w.target || WAR_TARGET)}. ${an} не змогли взяти місто.`;
-  await pushNews(
-    win
-      ? `🏴 ${COUNTRY_MAP[w.attacker]?.flag || ""} ${an} захопили місто ${w.cityName} у ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn}.${respawnNote}`
-      : `🛡️ ${COUNTRY_MAP[w.defender]?.flag || ""} ${dn} відбили атаку ${an} на місто ${w.cityName}.`
-  );
-  await mailMany(players, [...attSide, ...defSide], { type: "info", subject: win ? `Війна завершена: ${w.cityName} захоплено` : `Війна завершена: ${w.cityName} вистояло`, body: text });
-  notifyWarEvent(w, "end");
-  return true;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Влада: Рада (радники) + рішення ради                                */
-/* ------------------------------------------------------------------ */
-
-async function getAdvisors(code) {
-  return (await loadGameState()).advisors[code] || [];
-}
-async function saveAdvisors(code, list) {
-  const state = await loadGameState();
-  const advisors = { ...state.advisors, [code]: list };
-  return saveGameStatePart({ advisors });
-}
-
-/* Leader-only: kick an advisor from the council immediately, no vote needed. */
-async function leaderKickAdvisor(code, targetPlayerId) {
-  const list = await getAdvisors(code);
-  await saveAdvisors(code, list.filter((id) => id !== targetPlayerId));
-}
-
-async function getCouncilProposals(code) {
-  const list = (await loadGameState()).councilProposals[code] || [];
-  return list.filter((p) => p.status === "pending");
-}
-async function saveCouncilProposals(code, list) {
-  const state = await loadGameState();
-  const councilProposals = { ...state.councilProposals, [code]: list };
-  return saveGameStatePart({ councilProposals });
-}
-
-/* A council member (advisor) puts forward a decision: war / alliance /
-   kicking the leader / kicking another advisor. */
-async function createCouncilProposal(code, { type, payload }, proposedBy) {
-  const state = await loadGameState();
-  const list = state.councilProposals[code] || [];
-  const proposal = {
-    id: "prop_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-    type,
-    payload,
-    proposedBy,
-    votes: [proposedBy],
-    status: "pending",
-    createdAt: Date.now(),
-  };
-  await saveCouncilProposals(code, [...list, proposal]);
-  return proposal;
-}
-
-/* Cast a vote on a pending proposal. Once more than half the council has
-   voted for it, the decision is executed and marked resolved. */
-async function voteCouncilProposal(code, proposalId, voterId) {
-  const state = await loadGameState();
-  const list = state.councilProposals[code] || [];
-  const idx = list.findIndex((p) => p.id === proposalId);
-  if (idx === -1) return { ok: false, reason: "Рішення не знайдено" };
-  const proposal = { ...list[idx] };
-  if (proposal.status !== "pending") return { ok: false, reason: "Рішення вже вирішено" };
-  if (!proposal.votes.includes(voterId)) proposal.votes = [...proposal.votes, voterId];
-
-  const advisors = await getAdvisors(code);
-  const majority = Math.floor(advisors.length / 2) + 1;
-  let executed = false;
-  if (proposal.votes.length >= majority) {
-    await executeCouncilProposal(code, proposal);
-    proposal.status = "approved";
-    executed = true;
-  }
-  const updated = [...list];
-  updated[idx] = proposal;
-  await saveCouncilProposals(code, updated);
-  return { ok: true, executed };
-}
-
-async function executeCouncilProposal(code, proposal) {
-  if (proposal.type === "war") {
-    return declareWarAction(code, proposal.payload.targetCountry, proposal.payload.city);
-  }
-  if (proposal.type === "alliance") {
-    return sendAllianceRequestAction(code, proposal.payload.targetCountry);
-  }
-  if (proposal.type === "kickLeader") {
-    await storageSet(LEADER_PREFIX + code, "", true);
-    await addNews(`👑 Рада ${COUNTRY_MAP[code]?.name || code} проголосувала за відставку лідера.`);
-    return { ok: true };
-  }
-  if (proposal.type === "kickAdvisor") {
-    const advisors = await getAdvisors(code);
-    await saveAdvisors(code, advisors.filter((id) => id !== proposal.payload.targetPlayerId));
-    return { ok: true };
-  }
-  return { ok: false };
-}
-
-function roleStatusLabel(isLeader, roleField) {
-  if (isLeader) return "Лідер країни";
-  return "Громадянин";
-}
-
-function describeCouncilProposal(p) {
-  if (p.type === "war") {
-    return `Оголосити війну за «${p.payload.city}» (${COUNTRY_MAP[p.payload.targetCountry]?.name || p.payload.targetCountry})`;
-  }
-  if (p.type === "alliance") {
-    return `Укласти союз із ${COUNTRY_MAP[p.payload.targetCountry]?.name || p.payload.targetCountry}`;
-  }
-  if (p.type === "kickLeader") return "Усунути лідера країни";
-  if (p.type === "kickAdvisor") return `Вигнати з ради: ${p.payload.targetName || "радник"}`;
-  return "Рішення ради";
+async function finalizeWar(w) {
+  const r = await worldOp("war-finish", { warId: w.id });
+  if (r.ok && r.done) notifyWarEvent(w, "end");
+  return !!(r.ok && r.done);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1662,10 +1222,44 @@ async function fetchAllPlayers() {
         }
       })
     );
-    return results.filter(Boolean);
+    /* Power веде сервер: накладаємо pwr:<id> поверх поля power у записі гравця */
+    const pm = await loadPowerMap();
+    return results.filter(Boolean).map((p) => (pm && pm[p.id] !== undefined ? { ...p, power: pm[p.id] } : p));
   } catch {
     return [];
   }
+}
+
+/* Оплата дії Power: Power списує сервер. Спершу підтверджуємо кліки, що ще не дійшли до сервера. */
+let FLUSH_POWER = null;
+const POWER_COSTS = { war_declare: 5000, free_capture: 5000, city_def: 5000 }; // має збігатися з api/_game/power.js
+/* Дії світу списують Power на сервері самі: перед запитом скидаємо кліки, після — ставимо справжній баланс */
+async function worldPaid(op, body, onUpdatePlayer) {
+  if (FLUSH_POWER) await FLUSH_POWER();
+  const r = await worldOp(op, body);
+  if (r.ok && Number.isFinite(r.power)) onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: r.power }));
+  return r;
+}
+async function payPower(kind, onUpdatePlayer) {
+  if (!hasServerPower()) {
+    const c = POWER_COSTS[kind];
+    onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: Math.max(0, (prev.power || 0) - c) }));
+    return { ok: true, localCost: c };
+  }
+  if (FLUSH_POWER) await FLUSH_POWER();
+  const r = await powerSpend(kind);
+  if (!r.ok) return { ok: false, reason: r.reason };
+  onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: r.power }));
+  return { ok: true, receipt: r.receipt };
+}
+async function refundPower(pay, onUpdatePlayer) {
+  if (!pay) return;
+  if (pay.localCost) {
+    onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: (prev.power || 0) + pay.localCost }));
+    return;
+  }
+  const r = await powerRefund(pay.receipt);
+  if (r.ok) onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: r.power }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1943,11 +1537,11 @@ export default function App() {
   const [season, setSeason] = useState(EMPTY_GAME_STATE.season);
   const [maintenance, setMaintenance] = useState(EMPTY_GAME_STATE.maintenance);
   const [isLeader, setIsLeader] = useState(false);
-  const [isAdvisor, setIsAdvisor] = useState(false);
   const [war, setWar] = useState(null); // активна війна моєї країни (підготовка або битва)
   const [warTotals, setWarTotals] = useState({ att: 0, def: 0 });
   const warRef = useRef(null);
   const warPendingRef = useRef({ warId: null, n: 0, base: 0, loaded: false });
+  const powPendRef = useRef({ pow: 0, war: 0, busy: false }); // кліки, ще не підтверджені сервером
   const allPlayersRef = useRef([]);
   const gameDataStaleRef = useRef(0);
   const [showTutorial, setShowTutorial] = useState(false);
@@ -2022,6 +1616,23 @@ export default function App() {
     return true;
   }, []);
 
+  /* Стан пандемій: закриті кордони (dip:border:*) і налаштування адміна (cfg:pandemic) — раз на хвилину */
+  const syncPandemic = useCallback(async () => {
+    try {
+      const [dipData, raw, cures] = await Promise.all([loadDiplomacy(), storageGet(PANDEMIC_CFG_KEY, true), loadCures()]);
+      let cfg = null;
+      try { cfg = raw ? JSON.parse(raw) : null; } catch { cfg = null; }
+      setPandemicState({ borders: dipData.borders, cfg, cures: cures || undefined });
+    } catch {
+      /* ignore */
+    }
+  }, []);
+  useEffect(() => {
+    syncPandemic();
+    const id = setInterval(syncPandemic, 60000);
+    return () => clearInterval(id);
+  }, [syncPandemic]);
+
   const refreshGameData = useCallback(
     async (force) => {
       const now = Date.now();
@@ -2034,8 +1645,6 @@ export default function App() {
       if (player) {
         const leaderId = (await getLeader(player.countryCode)) || COUNTRY_MAP[player.countryCode]?.leaderId || null;
         setIsLeader(leaderId === player.id);
-        const advisors = await getAdvisors(player.countryCode);
-        setIsAdvisor(advisors.includes(player.id));
         // Синхронізуємо статус блокування (адмін міг заблокувати гравця з панелі)
         try {
           const freshRaw = await storageGet(PLAYER_PREFIX + player.id, true);
@@ -2190,7 +1799,7 @@ export default function App() {
               const patched = { ...rec, telegramId: tgUser.id };
               setPlayer(patched);
               await storageSet(PLAYER_PREFIX + id, JSON.stringify(patched), true);
-              await storageSet(TG_MAP_PREFIX + tgUser.id, id, true);
+              await linkTelegram(id);
             }
           } catch {
             /* corrupt record, ignore */
@@ -2220,20 +1829,11 @@ export default function App() {
         });
         if (!res.ok) return res;
         targetCountry = res.country.id;
-        await setLeaderStorage(targetCountry, id);
         await pushNews(`🌍 З'явилась нова країна «${name}». Світ став трохи тіснішим!`);
       } else if (!COUNTRY_MAP[targetCountry]) {
         await refreshNations();
         if (!COUNTRY_MAP[targetCountry]) return { ok: false, reason: "Цієї країни більше не існує. Обери іншу." };
       }
-      /* Перший гравець реальної країни стає її лідером (далі — перевороти, повстання, голосування). */
-      let becameLeader = isCreator;
-      if (!isCreator && !(await getLeader(targetCountry))) {
-        await setLeaderStorage(targetCountry, id);
-        becameLeader = true;
-        await pushNews(`🌍 ${COUNTRY_MAP[targetCountry]?.flag || ""} ${COUNTRY_MAP[targetCountry]?.name || targetCountry} має першого гравця й лідера.`);
-      }
-
       const tgUser = getTelegramUser();
       const telegramId = base ? base.telegramId ?? tgUser?.id ?? null : tgUser?.id ?? null;
       let rec;
@@ -2266,7 +1866,11 @@ export default function App() {
       if (isCreator) rec.role = "leader";
       await storageSet(ID_KEY, id, false);
       await storageSet(PLAYER_PREFIX + id, JSON.stringify(rec), true);
-      if (telegramId) await storageSet(TG_MAP_PREFIX + telegramId, id, true);
+      /* Прив'язку Telegram і лідерство веде сервер (ключі tgmap:* і leader:* закриті для запису з клієнта) */
+      if (telegramId) await linkTelegram(id);
+      const cl = await claimLeader(targetCountry);
+      const becameLeader = !!cl.leader;
+      if (becameLeader && !isCreator) await pushNews(`🌍 ${COUNTRY_MAP[targetCountry]?.flag || ""} ${COUNTRY_MAP[targetCountry]?.name || targetCountry} має першого гравця й лідера.`);
       await refreshNations();
       setIsLeader(becameLeader);
       setPlayer(rec);
@@ -2287,19 +1891,13 @@ export default function App() {
       if (left > 0) return { ok: false, reason: "Змінити країну можна раз на добу. Лишилось " + Math.ceil(left / 3600000) + " год." };
       const wars = dead ? [] : await loadActiveWars();
       if (wars.some((w) => w.attacker === old || w.defender === old)) return { ok: false, reason: "Поки твоя країна у війні, змінити країну не можна." };
-      const wasLeader = (await getLeader(old)) === player.id || COUNTRY_MAP[old]?.leaderId === player.id;
-      if (wasLeader) await setLeaderStorage(old, "");
-      try {
-        const adv = await getAdvisors(old);
-        if (adv.includes(player.id)) await saveAdvisors(old, adv.filter((x) => x !== player.id));
-      } catch { /* радники не критичні */ }
-      let becameLeader = false;
-      if (!(await getLeader(newId))) { await setLeaderStorage(newId, player.id); becameLeader = true; }
+      await releaseLeader(old); // сервер складає лідерство, лише якщо ти справді лідер старої країни
       const rec = { ...player, countryCode: newId, countryChangedAt: Date.now() };
       await storageSet(PLAYER_PREFIX + rec.id, JSON.stringify(rec), true);
+      const cl = await claimLeader(newId); // стаєш лідером, лише якщо в новій країні лідера немає
+      const becameLeader = !!cl.leader;
       await refreshNations();
       setIsLeader(becameLeader);
-      setIsAdvisor(false);
       setPlayer(rec);
       return { ok: true };
     },
@@ -2450,6 +2048,8 @@ export default function App() {
         /* Під час битви кліки йдуть на шкалу війни, а не на баланс Power */
         const w = warRef.current;
         const inBattle = !!w && warPhase(w) === "battle" && !!warSide(w, prev.countryCode);
+        if (inBattle) { powPendRef.current.war += 1; powPendRef.current.warId = w.id; }
+        else powPendRef.current.pow += 1;
         if (inBattle) {
           const pend = warPendingRef.current;
           if (pend.warId !== w.id) {
@@ -2474,6 +2074,41 @@ export default function App() {
     },
     [scheduleSave]
   );
+
+  /* Power веде сервер: кліки йдуть пакетами, у відповідь приходить справжній Power і енергія */
+  const flushPower = useCallback(async (force) => {
+    const pp = powPendRef.current;
+    if (pp.busy || !hasServerPower()) return;
+    const pow = pp.pow;
+    const war = pp.war;
+    const warId = pp.warId;
+    if (!pow && !war && !force) return;
+    pp.busy = true;
+    pp.pow = 0;
+    pp.war = 0;
+    const r = await powerSync(pow, war, warId);
+    pp.busy = false;
+    if (!r.ok) {
+      pp.pow += pow; // спробуємо ще раз із наступним пакетом
+      pp.war += war;
+      return;
+    }
+    setPlayer((prev) => (prev ? { ...prev, power: r.power + pp.pow, energy: Math.max(0, r.energy - pp.pow - pp.war), lastEnergyTs: Date.now() } : prev));
+  }, []);
+  const powerPlayerId = player?.id;
+  useEffect(() => {
+    FLUSH_POWER = () => flushPower(true);
+    return () => { FLUSH_POWER = null; };
+  }, [flushPower]);
+  useEffect(() => {
+    if (!powerPlayerId) return undefined;
+    flushPower(true);
+    let tick = 0;
+    const iv = visibleInterval(() => { tick += 1; flushPower(tick % 15 === 0); }, 4000); // раз на хвилину звіряємось із сервером і без кліків
+    const onHide = () => { if (document.hidden) flushPower(false); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onHide); };
+  }, [powerPlayerId, flushPower]);
 
   /* Leaderboard refresh */
   const refreshLeaderboard = useCallback(async (force) => {
@@ -2562,22 +2197,11 @@ export default function App() {
         pend.base = 0;
         pend.loaded = false;
       }
-      const key = WAR_CLICKS_PREFIX + w.id + ":" + playerIdForWar;
-      if (!pend.loaded) {
-        const rec = await getJSON(key, true, null);
-        pend.base = rec?.n || 0;
-        pend.loaded = true;
-      }
-      if (pend.n > 0) {
-        const take = pend.n;
-        pend.n = 0;
-        pend.base += take;
-        const ok = await setJSON(key, { side: warSide(w, playerCountryForWar), c: playerCountryForWar, n: pend.base }, true);
-        if (!ok) {
-          pend.base -= take;
-          pend.n += take;
-        }
-      }
+      if (FLUSH_POWER) await FLUSH_POWER(); // кліки в битву зараховує сервер разом із синхронізацією Power
+      const rec = await getJSON(WAR_CLICKS_PREFIX + w.id + ":" + playerIdForWar, true, null);
+      pend.base = rec?.n || 0;
+      pend.n = powPendRef.current.war; // ще не підтверджені сервером
+      pend.loaded = true;
     };
 
     const tick = async () => {
@@ -2587,7 +2211,7 @@ export default function App() {
         let mine = wars.find((w) => warInvolves(w, playerCountryForWar)) || null;
         if (mine && warPhase(mine) === "finish") {
           await flushClicks(mine);
-          await finalizeWar(mine, allPlayersRef.current);
+          await finalizeWar(mine);
           mine = null;
           await refreshNations();
           refreshMail();
@@ -2731,7 +2355,6 @@ export default function App() {
                 me={player}
                 onSetPlayer={setPlayer}
                 isLeader={isLeader}
-                isAdvisor={isAdvisor}
                 onRefreshGameData={() => refreshGameData(true)}
               />
             )}
@@ -3354,6 +2977,34 @@ function OnboardingScreen({ onFinish, lang = "uk", nations, onReloadNations, rea
   );
 }
 
+/* Легенда режиму «Вірус»: перемикач метрики, шкала кольорів, підсумок активних пандемій */
+function VirusLegend({ metric, onMetric, world }) {
+  const sc = VIRUS_SCALE[metric === "dead" ? "dead" : "sick"];
+  return (
+    <div className="cn-virus-legend">
+      <div className="cn-virus-chips">
+        <button type="button" className={"cn-metric-chip" + (metric === "sick" ? " cn-metric-chip--on" : "")} onClick={() => onMetric("sick")}>Хворі</button>
+        <button type="button" className={"cn-metric-chip" + (metric === "dead" ? " cn-metric-chip--on" : "")} onClick={() => onMetric("dead")}>Померлі</button>
+      </div>
+      {world.length === 0 ? (
+        <div className="cn-virus-line">Пандемій зараз немає, світ здоровий</div>
+      ) : (
+        world.map((w) => (
+          <div key={w.e.id} className="cn-virus-line">
+            🦠 <b>{w.disease}</b> · країн {w.countries} · хворі ≈ {fmtBig(w.ill)} · померло ≈ {fmtBig(w.dead)}
+          </div>
+        ))
+      )}
+      <div className="cn-virus-scale">
+        <span className="cn-virus-sw" style={{ background: VIRUS_HEALTHY }} />нема
+        {sc.map(([th, col, label]) => (
+          <span key={label} className="cn-virus-sw-wrap"><span className="cn-virus-sw" style={{ background: col }} />{label}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* Легенда карти: три типи територій */
 function MapLegend({ lang = "uk", myColor }) {
   return (
@@ -3668,7 +3319,7 @@ function WarHud({ war, me, isLeader, totals, pendingRef, players = [] }) {
           onClick={async () => {
             cnSfx.modalOpen();
             setCeaseBusy(true);
-            const res = await sendCeasefireRequest(war, me.countryCode);
+            const res = await sendCeasefireRequest(war);
             setCeaseMsg(res.ok ? "🕊️ Пропозицію перемир'я надіслано лідеру ворога." : "✗ " + res.reason);
             if (!res.ok) cnSfx.error();
             setCeaseBusy(false);
@@ -3844,7 +3495,7 @@ const HQ_SECTIONS = [
   { id: "mail", label: "Пошта", Icon: Mail, text: "" },
   { id: "info", label: "Інформація", Icon: Info, text: "" },
   { id: "settings", label: "Налаштування", Icon: Settings, text: "" },
-  { id: "economy", label: "Економіка", Icon: Coins, soon: true, text: "Тут з'являться податки, торгівля та бюджет країни: гроші від територій і союзів." },
+  { id: "bank", label: "Банк країни", Icon: Coins, text: "" },
   { id: "intel", label: "Розвідка", Icon: Compass, soon: true, text: "Тут можна буде розвідувати чужі країни: сила армії, оборона міст і плани ворога." },
   { id: "tech", label: "Технології", Icon: Sparkles, soon: true, text: "Тут країна відкриватиме технології, які підсилюють армію, оборону та економіку." },
 ];
@@ -3856,6 +3507,195 @@ const HQ_SUB = [
 const ARMY_SUBS = [
   { id: "defense", label: "Оборона", Icon: Shield, text: "" },
 ];
+
+/* Оперативна стрічка Штабу: що важливого зараз для твоєї країни (запити, війна, події світу, пошта) */
+function HqBrief({ me, players = [], isLeader, dip, war, unreadCount = 0, onOpenMail, onAnswered, onOpenBank, onUpdatePlayer }) {
+  const mine = me.countryCode;
+  const [bankBal, setBankBal] = useState(null);
+  const [snaps, setSnaps] = useState({}); // id пандемії → знімок Power країни
+  const [cureBusy, setCureBusy] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [note, setNote] = useState("");
+  const [, setTick] = useState(0);
+  useEffect(() => onPandemicChange(() => setTick((x) => x + 1)), []);
+  useEffect(() => {
+    const id = setInterval(() => setTick((x) => x + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+  const sickIds = activePandemics(Date.now()).filter((e) => { const st = countryStatus(e, mine, Date.now()); return st && st.arrived && !st.cured; }).map((e) => e.id).join(",");
+  useEffect(() => {
+    if (!sickIds) return undefined;
+    let dead = false;
+    (async () => {
+      const b = await loadBank(mine);
+      if (!dead && b) setBankBal(b.balance);
+      const sn = await ensureSnaps(); // знімок Power країни фіксує сервер
+      if (!dead && sn) setSnaps(sn);
+    })();
+    return () => { dead = true; };
+  }, [sickIds, mine]); // eslint-disable-line react-hooks/exhaustive-deps
+  const left = (ms) => {
+    const m = Math.max(0, Math.round(ms / 60000));
+    return m >= 60 ? `${Math.floor(m / 60)} г ${m % 60} хв` : `${m} хв`;
+  };
+  const KIND = { ally: "Союз", pact: "Пакт про ненапад", ceasefire: "Перемир'я" };
+  const now = Date.now();
+  const incoming = (dip?.requests || []).filter((r) => r.status === "pending" && r.to === mine && now - (r.ts || 0) < 24 * 3600 * 1000);
+  const outgoing = (dip?.requests || []).filter((r) => r.status === "pending" && r.from === mine && now - (r.ts || 0) < 24 * 3600 * 1000);
+  const answer = async (r, accept) => {
+    if (busyId) return;
+    setBusyId(r.id);
+    setNote("");
+    const res = await respondDiplomacyRequest(r.id, accept);
+    setNote(res.ok ? (accept ? "✓ Прийнято" : "✓ Відхилено") : "✗ " + (res.reason || "Не вдалося"));
+    setBusyId(null);
+    onAnswered && onAnswered();
+  };
+  const items = [];
+  for (const r of incoming) {
+    items.push(
+      <div key={"in" + r.id} className="cn-brief-card cn-brief-card--hot">
+        <Flag code={r.from} size={24} className="cn-country-badge--lg" />
+        <div className="cn-brief-main">
+          <div className="cn-brief-title">{KIND[r.type] || "Пропозиція"}: {COUNTRY_MAP[r.from]?.name || r.from}</div>
+          <div className="cn-brief-sub">{isLeader ? "Чекає твоєї відповіді" : "Вирішує лідер країни"} · ще {left(24 * 3600 * 1000 - (now - r.ts))}</div>
+        </div>
+        {isLeader && (
+          <div className="cn-brief-act">
+            <button type="button" className="cn-dev-btn cn-dev-btn--primary" disabled={!!busyId} onClick={() => answer(r, true)}>Прийняти</button>
+            <button type="button" className="cn-dev-btn" disabled={!!busyId} onClick={() => answer(r, false)}>Ні</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (war && war.status !== "ended") {
+    const ph = warPhase(war);
+    const side = warSide(war, mine);
+    if (ph === "prep" || ph === "battle") {
+      const endAt = ph === "prep" ? war.prepEnd : war.battleEnd;
+      items.push(
+        <div key="war" className="cn-brief-card cn-brief-card--war">
+          <Swords size={20} />
+          <div className="cn-brief-main">
+            <div className="cn-brief-title">{COUNTRY_MAP[war.attacker]?.name || war.attacker} → {COUNTRY_MAP[war.defender]?.name || war.defender}: {war.cityName}</div>
+            <div className="cn-brief-sub">{side === "att" ? "Ви нападаєте" : side === "def" ? "Ви обороняєтесь" : "Війна"} · {ph === "prep" ? "підготовка" : "битва"}, ще {left(endAt - now)}</div>
+          </div>
+        </div>
+      );
+    }
+  }
+  /* Знищення вірусу у своїй країні: оплачується з банку країни, лише лідер */
+  const cureBlock = (e, r) => {
+    if (!r || r.cured) return null;
+    const snap = snaps[e.id];
+    if (snap === undefined) return <div className="cn-cure-line">Рахуємо вартість знищення…</div>;
+    const c = cureCost(snap, r.infected, r.deaths);
+    const short = bankBal === null ? 0 : Math.max(0, c.total - bankBal);
+    const doCure = async () => {
+      if (cureBusy || !isLeader) return;
+      setCureBusy(true);
+      setNote("");
+      const res = await cureVirus(e.id, c.total);
+      if (res.ok) {
+        const prev = getCures();
+        setPandemicState({ cures: [...prev, { id: e.id, code: mine, ts: res.ts }] });
+        pushNews(`💉 ${COUNTRY_MAP[mine]?.name || mine} знищила вірус «${e.disease}» у себе за ${fmt(res.cost)} Power`);
+        setBankBal(res.balance);
+        setNote("✓ Вірус знищено");
+      } else setNote("✗ " + res.reason);
+      setCureBusy(false);
+    };
+    return (
+      <div className="cn-cure">
+        <div className="cn-cure-line">Знищити вірус у країні: <b>{fmt(c.total)} Power</b></div>
+        <div className="cn-cure-line cn-cure-sub">
+          База ({Math.round(CURE_BASE * 100)}% від {fmt(c.snap)} Power гравців на початку) {fmt(c.base)} · за хворих +{fmt(c.byInf)} · за померлих +{fmt(c.byDead)}
+        </div>
+        <div className="cn-cure-line cn-cure-sub">У банку країни: {bankBal === null ? "…" : fmt(bankBal)} Power{short > 0 ? ` · не вистачає ${fmt(short)}` : ""}</div>
+        <div className="cn-brief-act cn-cure-act">
+          {isLeader ? (
+            <button type="button" className="cn-dev-btn cn-dev-btn--primary" disabled={cureBusy || short > 0 || bankBal === null} onClick={doCure}>Знищити вірус</button>
+          ) : (
+            <span className="cn-cure-line cn-cure-sub">Знищити може лише лідер</span>
+          )}
+          <button type="button" className="cn-dev-btn" onClick={onOpenBank}>Внести в банк</button>
+        </div>
+      </div>
+    );
+  };
+  /* Пандемії: як вони стосуються моєї країни */
+  const vByC = virusByCountry(now);
+  const closedN = closedBordersOf(mine, now).length;
+  for (const e of activePandemics(now)) {
+    const d = diseaseByName(e.disease);
+    const row = vByC[mine]?.list.find((l) => l.e.id === e.id);
+    items.push(
+      <div key={"vir" + e.id} className={"cn-brief-card cn-brief-card--evt cn-brief-card--col"}>
+        <div className="cn-brief-row">
+          <span className="cn-brief-emoji">🦠</span>
+          <div className="cn-brief-main">
+            <div className="cn-brief-title">Пандемія: {e.disease} · осередок {COUNTRY_MAP[e.code]?.name || e.code}</div>
+            <div className="cn-brief-sub">
+              {row
+                ? (row.cured ? `У вас вірус знищено. Померло ${fmtPct(row.deaths)}` : `У вас: хворіє ${fmtPct(row.infected)}, померло ${fmtPct(row.deaths)}`)
+                : `Вірус ще не дійшов до вас${closedN ? "" : isLeader ? ". Закрий кордони в Дипломатії" : ""}`}
+              {" · "}заразність {CONTAG_LABEL[d.contag]}, летальність {lethalLabel(d.cfr)}
+              {closedN ? ` · закритих кордонів: ${closedN}` : ""}
+            </div>
+          </div>
+        </div>
+        {cureBlock(e, row)}
+      </div>
+    );
+  }
+  for (const e of activeFor(mine).filter((x) => x.type !== "pandemic")) {
+    items.push(
+      <div key={e.id} className="cn-brief-card cn-brief-card--evt">
+        <span className="cn-brief-emoji">{e.meta.emoji}</span>
+        <div className="cn-brief-main">
+          <div className="cn-brief-title">{e.meta.label}{e.code ? "" : ": весь світ"}</div>
+          <div className="cn-brief-sub">{e.effect} · до {new Date(e.end).toLocaleDateString("uk-UA", { day: "numeric", month: "short" })}</div>
+        </div>
+      </div>
+    );
+  }
+  for (const r of outgoing) {
+    items.push(
+      <div key={"out" + r.id} className="cn-brief-card">
+        <Flag code={r.to} size={24} className="cn-country-badge--lg" />
+        <div className="cn-brief-main">
+          <div className="cn-brief-title">{KIND[r.type] || "Пропозиція"}: чекаємо {COUNTRY_MAP[r.to]?.name || r.to}</div>
+          <div className="cn-brief-sub">Відповідь протягом {left(24 * 3600 * 1000 - (now - r.ts))}</div>
+        </div>
+      </div>
+    );
+  }
+  if (unreadCount > 0) {
+    items.push(
+      <button key="mail" type="button" className="cn-brief-card cn-brief-card--btn" onClick={onOpenMail}>
+        <Mail size={20} />
+        <div className="cn-brief-main">
+          <div className="cn-brief-title">Нові листи: {unreadCount}</div>
+          <div className="cn-brief-sub">Відкрити пошту</div>
+        </div>
+        <ChevronRight size={16} />
+      </button>
+    );
+  }
+  return (
+    <div className="cn-brief">
+      <div className="cn-brief-head">Головне зараз{items.length ? <span className="cn-brief-count">{items.length}</span> : null}</div>
+      {note && <div className="cn-brief-note">{note}</div>}
+      {items.length ? items : (
+        <div className="cn-brief-empty">
+          <Shield size={26} strokeWidth={1.6} />
+          <div>Усе спокійно. Нових запитів і загроз немає.</div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, onChangeCountry, lang = "uk", mail = [], unreadCount = 0, onRefreshMail, onRefreshData, war = null, onWarDeclared, onUpdatePlayer }) {
   const [view, setView] = useState(null); // null | id розділу | "dev"
@@ -3882,6 +3722,13 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
   }, []);
   useEffect(() => {
     if (view === "diplomacy" || view === "army") reloadDip();
+  }, [view, reloadDip]);
+  /* Головний екран Штабу: підтягуємо дипломатію (запити на союз/пакт/перемир'я) і оновлюємо раз на 30 с */
+  useEffect(() => {
+    if (view) return undefined;
+    reloadDip();
+    const id = setInterval(reloadDip, 30000);
+    return () => clearInterval(id);
   }, [view, reloadDip]);
   useEffect(() => {
     if (!lockedMsg) return undefined;
@@ -3938,6 +3785,13 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
   const onPickCountry = async (countryId) => {
     const kind = pickKind;
     setPickKind(null);
+    if (kind === "border") {
+      const r = await closeBorder(player.countryCode, countryId);
+      if (r.ok) { cnSfx.purchase(); setDipMsg(`✓ Кордон із ${COUNTRY_MAP[countryId]?.name || countryId} закрито`); }
+      else { cnSfx.error(); setDipMsg("✗ " + r.reason); }
+      reloadDip();
+      return;
+    }
     const res = await sendDiplomacyRequest(kind, player.countryCode, countryId);
     if (res.ok) {
       cnSfx.purchase();
@@ -3961,16 +3815,12 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
       attacker: player.countryCode,
       defender: target,
       city,
-      owners: nations?.owners,
-      cityOwners: nations?.cityOwners,
-      players,
-      immune: isSuperAdmin() && !!player.timeImmunity,
       selfId: player.id,
+      onUpdatePlayer,
     });
     if (res.ok) {
       cnSfx.purchase();
       setWarMsg("");
-      onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: Math.max(0, (prev.power || 0) - WAR_DECLARE_COST) }));
       onWarDeclared && onWarDeclared(res.war);
     } else {
       cnSfx.error();
@@ -4019,8 +3869,8 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
     if (war && war.status !== "ended" && war.cityKey === defCity.key) return fail("Під час війни за місто оборону покращувати не можна");
     if (lvl + 1 > upgLevel(player, "cdef")) return fail(`Спершу відкрий рівень ${lvl + 1} «Оборона міста» у розділі «Покращення» (за Points)`);
     if ((player.power || 0) < CITY_DEF_UPGRADE_COST) return fail(`Потрібно ${fmt(CITY_DEF_UPGRADE_COST)} Power`);
-    await storageSet(CITY_DEF_PREFIX + defCity.key, String(lvl + 1), true);
-    onUpdatePlayer && onUpdatePlayer((prev) => ((prev.power || 0) >= CITY_DEF_UPGRADE_COST ? { ...prev, power: prev.power - CITY_DEF_UPGRADE_COST } : prev));
+    const dr = await worldPaid("citydef", { cityKey: defCity.key }, onUpdatePlayer);
+    if (!dr.ok) return fail(dr.reason);
     cnSfx.purchase();
     setDefLevel(lvl + 1);
     setDefMsg(`✓ Оборону міста ${defCity.name} покращено до рівня ${lvl + 1}`);
@@ -4168,9 +4018,10 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
           lang={lang}
           dip={dip}
           pick={{
-            label: pickKind === "ally" ? "Обери країну для союзу" : "Обери країну для пакту про ненапад",
+            label: pickKind === "ally" ? "Обери країну для союзу" : pickKind === "border" ? "Обери країну, з якою закрити кордон" : "Обери країну для пакту про ненапад",
             onPick: onPickCountry,
             onCancel: () => setPickKind(null),
+            virus: pickKind === "border",
           }}
         />
       </div>
@@ -4261,6 +4112,11 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
             dip={dip}
             msg={dipMsg}
             onStartPick={(k) => { setDipMsg(""); setPickKind(k); }}
+            onOpenBorder={async (other) => {
+              const r = await openBorder(player.countryCode, other);
+              setDipMsg(r.ok ? `✓ Кордон із ${COUNTRY_MAP[other]?.name || other} відкрито` : "✗ " + r.reason);
+              reloadDip();
+            }}
             onBreak={async (kind, other) => {
               await breakDiplomacy(kind, player.countryCode, other);
               setDipMsg(`✓ ${DIP_KIND[kind].title} з ${COUNTRY_MAP[other]?.name || other} розірвано. 4 години нападати заборонено.`);
@@ -4268,6 +4124,8 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
               onRefreshData && onRefreshData();
             }}
           />
+        ) : view === "bank" ? (
+          <BankPanel me={player} players={players} isLeader={isLeader} onUpdatePlayer={onUpdatePlayer} />
         ) : view === "settings" ? (
           <ControlPanel
             player={player}
@@ -4298,37 +4156,18 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
         )}
       </div>
 
-      <div className="cn-hq-stage">
-        <div className="cn-hq-hero">
-          <svg className="cn-hq-radar" viewBox="0 0 200 200" aria-hidden="true">
-            <defs>
-              <radialGradient id="cn-hq-core" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stopColor="var(--hq)" stopOpacity="0.55" />
-                <stop offset="70%" stopColor="var(--hq)" stopOpacity="0.12" />
-                <stop offset="100%" stopColor="var(--hq)" stopOpacity="0" />
-              </radialGradient>
-              <linearGradient id="cn-hq-sweep" x1="0" y1="0" x2="1" y2="0">
-                <stop offset="0%" stopColor="var(--hq)" stopOpacity="0" />
-                <stop offset="100%" stopColor="var(--hq)" stopOpacity="0.55" />
-              </linearGradient>
-            </defs>
-            <circle cx="100" cy="100" r="98" fill="url(#cn-hq-core)" />
-            <circle cx="100" cy="100" r="92" className="cn-hq-ring" />
-            <circle cx="100" cy="100" r="68" className="cn-hq-ring cn-hq-ring--dash" />
-            <circle cx="100" cy="100" r="44" className="cn-hq-ring" />
-            {Array.from({ length: 24 }).map((_, i) => (
-              <line key={i} x1="100" y1="6" x2="100" y2={i % 6 === 0 ? 16 : 11} className="cn-hq-tick" transform={`rotate(${i * 15} 100 100)`} />
-            ))}
-            <g className="cn-hq-sweep-g">
-              <path d="M100 100 L100 8 A92 92 0 0 1 178 54 Z" fill="url(#cn-hq-sweep)" />
-            </g>
-          </svg>
-          <div className="cn-hq-core">
-            <Shield size={46} strokeWidth={1.6} />
-            <span className="cn-hq-core-label">{country?.name}</span>
-          </div>
-        </div>
-      </div>
+      <HqBrief
+        me={player}
+        players={players}
+        onUpdatePlayer={onUpdatePlayer}
+        onOpenBank={() => openView("bank")}
+        isLeader={isLeader}
+        dip={dip}
+        war={war}
+        unreadCount={unreadCount}
+        onOpenMail={() => openView("mail")}
+        onAnswered={() => { reloadDip(); onRefreshData && onRefreshData(); }}
+      />
 
       <div className="cn-hq-chips">
         <div className="cn-hq-chip"><span>Сила</span><b>{fmt(stats.power)}</b></div>
@@ -4364,6 +4203,94 @@ function HQScreen({ player, players, nations, isLeader, onChangeCountryColor, on
 }
 
 
+
+/* Банк країни: внески роблять усі гравці країни, знімає й витрачає на знищення вірусів лише лідер */
+function BankPanel({ me, players, isLeader, onUpdatePlayer }) {
+  const code = me.countryCode;
+  const [bank, setBank] = useState(undefined); // undefined — вантажимо, null — помилка
+  const [amount, setAmount] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const reload = useCallback(async () => setBank(await loadBank(code)), [code]);
+  useEffect(() => {
+    reload();
+    const id = setInterval(reload, 20000);
+    return () => clearInterval(id);
+  }, [reload]);
+  const nameOf = (id, fallback) => (players || []).find((p) => p.id === id)?.username || fallback || "Гравець";
+  const num = Math.floor(Number(String(amount).replace(/\s/g, "")) || 0);
+  const deposit = async () => {
+    if (busy) return;
+    if (num <= 0) return setMsg("✗ Вкажи суму");
+    if (num > (me.power || 0)) return setMsg("✗ У тебе немає стільки Power");
+    setBusy(true);
+    setMsg("");
+    if (FLUSH_POWER) await FLUSH_POWER();
+    const r = await bankDeposit(num);
+    if (!r.ok) {
+      setMsg("✗ " + r.reason);
+    } else {
+      onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: r.power }));
+      setMsg(`✓ Внесено ${fmt(num)} Power`);
+      setAmount("");
+    }
+    await reload();
+    setBusy(false);
+  };
+  const withdraw = async () => {
+    if (busy || !isLeader) return;
+    if (num <= 0) return setMsg("✗ Вкажи суму");
+    setBusy(true);
+    setMsg("");
+    const r = await bankWithdraw(num);
+    if (r.ok) {
+      onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: r.power }));
+      setMsg(`✓ Знято ${fmt(num)} Power`);
+      setAmount("");
+    } else setMsg("✗ " + r.reason);
+    await reload();
+    setBusy(false);
+  };
+  const KIND = { dep: "Внесок", wd: "Зняття", cure: "Знищення вірусу" };
+  return (
+    <div className="cn-bank">
+      <div className="cn-bank-card">
+        <div className="cn-bank-label">Банк країни {COUNTRY_MAP[code]?.name || code}</div>
+        <div className="cn-bank-sum">{bank === undefined ? "…" : bank === null ? "—" : fmt(bank.balance)} <small>Power</small></div>
+        <div className="cn-bank-hint">Вносити можуть усі гравці країни. Зняти може лише лідер. З банку оплачується знищення вірусів.</div>
+      </div>
+      <div className="cn-bank-form">
+        <input className="cn-bank-input" inputMode="numeric" placeholder="Сума Power" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^0-9\s]/g, ""))} />
+        <div className="cn-bank-btns">
+          <button type="button" className="cn-dev-btn cn-dev-btn--primary" disabled={busy} onClick={deposit}>Внести</button>
+          <button type="button" className="cn-dev-btn" disabled={busy || !isLeader} onClick={withdraw}>{isLeader ? "Зняти" : "Зняти (лідер)"}</button>
+        </div>
+        <div className="cn-bank-sub">Твій Power: {fmt(me.power || 0)}</div>
+        {msg && <div className="cn-bank-msg">{msg}</div>}
+      </div>
+      {bank && bank.top.length > 0 && (
+        <div className="cn-bank-block">
+          <div className="cn-bank-h">Найбільші внески</div>
+          {bank.top.slice(0, 5).map((t, i) => (
+            <div key={i} className="cn-bank-row"><span>{i + 1}. {t.n || "Гравець"}</span><b>{fmt(t.a)}</b></div>
+          ))}
+        </div>
+      )}
+      {bank && (
+        <div className="cn-bank-block">
+          <div className="cn-bank-h">Останні операції</div>
+          {bank.list.length === 0 && <div className="cn-bank-sub">Поки порожньо</div>}
+          {bank.list.slice(0, 12).map((x, i) => (
+            <div key={i} className="cn-bank-row">
+              <span>{KIND[x.t]} · {nameOf(x.p, x.n)} <small>{new Date(x.ts).toLocaleString("uk-UA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</small></span>
+              <b className={x.t === "dep" ? "cn-bank-plus" : "cn-bank-minus"}>{x.t === "dep" ? "+" : "−"}{fmt(x.a)}</b>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* Плитка-рядок для меню розділів Армії/Економіки */
 function HqRowTile({ Icon, label, hint, onClick, badge }) {
@@ -4576,8 +4503,8 @@ function CountryStatsPanel({ stats }) {
 }
 
 /* Дипломатія (лише лідер): союзи та пакти про ненапад */
-function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak }) {
-  const [sub, setSub] = useState(null); // null | "allies" | "pacts"
+function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak, onOpenBorder }) {
+  const [sub, setSub] = useState(null); // null | "allies" | "pacts" | "borders"
   const [confirmId, setConfirmId] = useState(null);
   const [busy, setBusy] = useState(false);
   const mine = me.countryCode;
@@ -4632,6 +4559,37 @@ function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak }) {
     );
   };
 
+  const myBorders = (dip?.borders || []).filter((b) => (b.a === mine || b.b === mine) && b.hist?.length && !b.hist[b.hist.length - 1][1]);
+  if (sub === "borders") {
+    return (
+      <div className="cn-dip-menu">
+        <button className="cn-dev-btn" type="button" onClick={() => { setSub(null); setConfirmId(null); }} style={{ alignSelf: "flex-start" }}>
+          <ArrowLeft size={13} /> Закриті кордони
+        </button>
+        {msg && <div className="cn-dev-status-msg">{msg}</div>}
+        <div className="cn-dip-list">
+          {!dip && <div className="cn-lb-empty">Завантаження…</div>}
+          {dip && myBorders.length === 0 && <div className="cn-lb-empty">Закритих кордонів немає</div>}
+          {myBorders.map((b) => {
+            const other = b.a === mine ? b.b : b.a;
+            const byMe = b.by === mine;
+            return (
+              <div className="cn-dip-row" key={other}>
+                <Flag code={other} size={22} className="cn-country-badge--lg" />
+                <div className="cn-dip-row-name">{COUNTRY_MAP[other]?.name || other}</div>
+                {byMe ? (
+                  <button type="button" className="cn-dev-btn" disabled={busy} onClick={async () => { setBusy(true); await onOpenBorder(other); setBusy(false); }}>Відкрити</button>
+                ) : (
+                  <span className="cn-dip-sub">закрила вона</span>
+                )}
+              </div>
+            );
+          })}
+          {myBorders.length > 0 && <div className="cn-dip-sub">Закритий кордон зупиняє вірус між вашими країнами в обидва боки. Країну, яку вже заразили, це не лікує.</div>}
+        </div>
+      </div>
+    );
+  }
   if (sub) {
     return (
       <div className="cn-dip-menu">
@@ -4649,6 +4607,8 @@ function DiplomacyPanel({ me, dip, msg, onStartPick, onBreak }) {
     { id: "pacts", label: "Договори", Icon: ShieldCheck, run: () => setSub("pacts") },
     { id: "ally", label: "Підписати союз", Icon: Handshake, run: () => onStartPick("ally") },
     { id: "pact", label: "Підписати пакт про ненапад", Icon: Ban, run: () => onStartPick("pact") },
+    { id: "border", label: "Закрити кордон (від епідемій)", Icon: Lock, run: () => onStartPick("border") },
+    { id: "borders", label: `Закриті кордони${myBorders.length ? " · " + myBorders.length : ""}`, Icon: ShieldCheck, run: () => setSub("borders") },
   ];
   return (
     <div className="cn-dip-menu">
@@ -4829,6 +4789,7 @@ function MapReplayModal({ lang = "uk", onClose }) {
     stateRef.current = st;
     cv.width = sc.W;
     cv.height = sc.H;
+    sc.setChanged(events, idx);
     sc.draw(cv.getContext("2d"), st, idx > 0 ? events[idx - 1] : null);
   }, [stage, events, idx]);
 
@@ -4899,11 +4860,22 @@ function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk
       for (const c of data.list) {
         const o = (nations?.cityOwners && nations.cityOwners[cityKey(c)]) || nations?.owners?.[c.rid];
         if (!o) continue;
-        const row = m[o] || (m[o] = [0, 0]);
+        const row = m[o] || (m[o] = [0, 0, 0]);
         row[0] += 1;
-        row[1] += c.p || 0;
       }
       setCityStats(m);
+      /* Справжнє населення країн (з щоденною зміною) замість суми міст */
+      computeNationPops(nations).then((pops) => {
+        if (off) return;
+        const next = { ...m };
+        for (const code of Object.keys(pops)) {
+          const row = next[code] ? [...next[code]] : [0, 0, 0];
+          row[1] = pops[code][0];
+          row[2] = pops[code][1];
+          next[code] = row;
+        }
+        setCityStats(next);
+      }).catch(() => {});
     });
     return () => { off = true; };
   }, [nations]);
@@ -4922,6 +4894,7 @@ function LeaderboardScreen({ me, players, loading, onRefresh, onBack, lang = "uk
       members: members[c.code] || 0,
       cities: cityStats?.[c.code]?.[0] || 0,
       pop: cityStats?.[c.code]?.[1] || 0,
+      popDelta: cityStats?.[c.code]?.[2] || 0,
     })).sort((a, b) => b[keyOf] - a[keyOf] || b.power - a.power);
   }, [players, countriesRev, cityStats, metric]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -5013,7 +4986,7 @@ function CountryList({ list, myCountry, metric = "power" }) {
             <Flag code={c.code} size={20} className="cn-row-flag" />
             <span className="cn-row-name">
               {c.name}
-              <span className="cn-row-sub">міст {fmt(c.cities)} · нас. {fmtPopulation(c.pop)} · армія {fmt(c.power)} · гравців {fmt(c.members)}</span>
+              <span className="cn-row-sub">міст {fmt(c.cities)} · нас. {c.pop ? fmtPop(c.pop) : "—"}{c.pop ? ` (${fmtDelta(c.popDelta)}/добу)` : ""} · армія {fmt(c.power)} · гравців {fmt(c.members)}</span>
             </span>
             <span className="cn-row-value">{main(c)}</span>
           </div>
@@ -6852,6 +6825,8 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
     const npt = Math.max(0, Math.round(Number(pts) || 0));
     const updated = { ...sel, power: np, points: npt, totalClicks: nc };
     await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
+    const pwRes = await powerAdminSet(sel.id, np); // Power змінює сервер
+    if (!pwRes.ok && !pwRes.offline) { setMsg("✗ Power не змінено: " + pwRes.reason); setBusy(false); return; }
     await adminLogAction(sel.id, `Адмін змінив Power ${fmt(sel.power || 0)} → ${fmt(np)}, Points ${fmt(sel.points || 0)} → ${fmt(npt)}, кліки ${fmt(sel.totalClicks || 0)} → ${fmt(nc)}`);
     if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
     setMsg("✓ Збережено");
@@ -6865,8 +6840,9 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
     if (!sel) return;
     setBusy(true);
     const blocked = !sel.blocked;
-    const updated = { ...sel, blocked, blockedReason: blocked ? reason || "Заблоковано адміністрацією" : "" };
-    await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
+    const opr = await adminPlayerOp(sel.id, "block", blocked, reason);
+    if (!opr.ok) { setMsg("✗ " + opr.reason); setBusy(false); return; }
+    const updated = opr.record;
     await adminLogAction(sel.id, blocked ? `Адмін заблокував гравця: ${updated.blockedReason}` : "Адмін розблокував гравця");
     if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
     setMsg(blocked ? "⛔ Гравця заблоковано" : "✓ Гравця розблоковано");
@@ -6895,8 +6871,9 @@ function AdminPlayersView({ players, me, onSetPlayer, onRefreshGameData, onBack 
     if (!sel) return;
     setBusy(true);
     const has = !sel.hasPremiumPass;
-    const updated = { ...sel, hasPremiumPass: has };
-    await storageSet(PLAYER_PREFIX + sel.id, JSON.stringify(updated), true);
+    const opr = await adminPlayerOp(sel.id, "premium", has);
+    if (!opr.ok) { setMsg("✗ " + opr.reason); setBusy(false); return; }
+    const updated = opr.record;
     await adminLogAction(sel.id, has ? "Адмін видав Premium Pass" : "Адмін забрав Premium Pass");
     if (me.id === sel.id && onSetPlayer) onSetPlayer(updated);
     setMsg(has ? "✓ Premium видано" : "✓ Premium забрано");
@@ -7168,24 +7145,15 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     if (onRefreshGameData) onRefreshGameData();
     setAdminWarBusy(false);
   };
-  const skipWarPrep = (w) =>
-    adminWarAction(async () => {
-      const now = Date.now();
-      await setJSON(WAR_PREFIX + w.id, { ...w, prepEnd: now, battleEnd: now + WAR_BATTLE_MS }, true);
-    }, "Підготовку завершено, битва почалась");
-  const endWarNow = (w) =>
-    adminWarAction(async () => {
-      await setJSON(WAR_PREFIX + w.id, { ...w, battleEnd: Date.now() - 1 }, true);
-    }, "Війну завершено за поточним балансом (підсумки підрахує гра за кілька секунд)");
-  const forceCeasefire = (w) =>
-    adminWarAction(async () => {
-      const done = await ceaseWar(w);
-      if (!done) throw new Error("Війну вже завершено");
-    }, "Війну припинено перемир'ям");
+  const adminWarOp = async (w, action, side) => {
+    const r = await worldOp("admin-war", { warId: w.id, action, side });
+    if (!r.ok) throw new Error(r.reason);
+  };
+  const skipWarPrep = (w) => adminWarAction(() => adminWarOp(w, "skip-prep"), "Підготовку завершено, битва почалась");
+  const endWarNow = (w) => adminWarAction(() => adminWarOp(w, "end-now"), "Війну завершено за поточним балансом (підсумки підрахує гра за кілька секунд)");
+  const forceCeasefire = (w) => adminWarAction(() => adminWarOp(w, "ceasefire"), "Війну припинено перемир'ям");
   const setWarWinner = (w, side) =>
-    adminWarAction(async () => {
-      await finalizeWar(w, players, side);
-    }, `Переможець: ${COUNTRY_MAP[side === "att" ? w.attacker : w.defender]?.name || ""}`);
+    adminWarAction(() => adminWarOp(w, "winner", side), `Переможець: ${COUNTRY_MAP[side === "att" ? w.attacker : w.defender]?.name || ""}`);
 
   const saveSeasonEndDate = async () => {
     if (!adminSeasonDate) return;
@@ -7307,6 +7275,59 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     setAdminBusy(false);
   };
 
+  /* Тестовий таймер телепередачі: через N хвилин у вкладці «ТБ» на 30 хвилин іде випуск */
+  const [tvTest, setTvTest] = useState(null);
+  const [tvMin, setTvMin] = useState(1);
+  const [tvTick, setTvTick] = useState(0);
+  useEffect(() => {
+    if (!adminOpen) return undefined;
+    let off = false;
+    storageGet("cfg:tvtest", true).then((raw) => {
+      try { const v = raw ? JSON.parse(raw) : null; if (!off) setTvTest(v && v.at ? v : null); } catch { /* ignore */ }
+    }).catch(() => {});
+    const id = setInterval(() => setTvTick((x) => x + 1), 1000);
+    return () => { off = true; clearInterval(id); };
+  }, [adminOpen]);
+  const setTvTimer = async (clear) => {
+    setAdminBusy(true);
+    try {
+      const r = await fetch("/api/game?action=admin-tv-timer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", minutes: tvMin, clear: !!clear }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || "Не вдалося встановити таймер");
+      setTvTest(d.value || null);
+      setAdminMsg(clear ? "✓ Таймер ТБ скасовано" : `📺 Тестовий випуск вийде через ${tvMin} хв`);
+    } catch (e) {
+      setAdminMsg("✗ " + (e?.message || "Помилка"));
+    }
+    setAdminBusy(false);
+  };
+  /* Пандемії: запуск в обраній країні або негайне припинення в усьому світі */
+  const [pdCode, setPdCode] = useState("CD");
+  const [pdDisease, setPdDisease] = useState("");
+  const pandemicOp = async (op) => {
+    if (op === "cancel" && !window.confirm("Припинити ВСІ пандемії у світі зараз?")) return;
+    setAdminBusy(true);
+    try {
+      const r = await fetch("/api/game?action=admin-pandemic", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: window.Telegram?.WebApp?.initData || "", op, code: pdCode, disease: pdDisease }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || "Не вдалося");
+      setPandemicState({ cfg: d.cfg });
+      setAdminMsg(op === "start" ? `🦠 Пандемію запущено: ${COUNTRY_MAP[pdCode]?.name || pdCode}` : "✓ Усі пандемії у світі припинено");
+    } catch (e) {
+      setAdminMsg("✗ " + (e?.message || "Помилка"));
+    }
+    setAdminBusy(false);
+  };
+  const tvLeft = tvTest ? tvTest.at - Date.now() : 0; // eslint-disable-line no-unused-vars
+  void tvTick;
   const toggleTgNotify = async () => {
     setAdminBusy(true);
     const nextOff = !tgOff;
@@ -7435,7 +7456,8 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
   const devBecomeLeader = async () => {
     setBusy(true);
     try {
-      await setLeaderStorage(me.countryCode, me.id);
+      const lr = await adminSetLeader(me.countryCode, me.id); // лише адмін, перевіряє сервер
+      if (!lr.ok) { flashStatus("✗ " + lr.reason); setBusy(false); return; }
       await onRefreshGameData();
       flashStatus(
         storagePersistenceHealthy
@@ -7457,6 +7479,7 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
     setBusy(true);
     try {
       await storageSet(PLAYER_PREFIX + me.id, JSON.stringify({ ...me, power: 0, points: 0, passBaseClicks: 0, totalClicks: 0, upg: {}, energy: MAX_ENERGY, lastEnergyTs: Date.now() }), true);
+      await powerAdminSet(me.id, 0, true);
       await setJSON(MAIL_PREFIX + me.id, [], true);
       await saveWars([]);
       await saveAlliances([]);
@@ -7627,8 +7650,9 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                     disabled={adminBusy}
                     onClick={async () => {
                       setAdminBusy(true);
-                      const updated = { ...me, timeImmunity: !me.timeImmunity };
-                      await storageSet(PLAYER_PREFIX + me.id, JSON.stringify(updated), true);
+                      const opr = await adminPlayerOp(me.id, "immunity", !me.timeImmunity);
+                      if (!opr.ok) { setAdminMsg("✗ " + opr.reason); setAdminBusy(false); return; }
+                      const updated = opr.record;
                       if (onSetPlayer) onSetPlayer(updated);
                       setAdminMsg(updated.timeImmunity ? "✓ Імунітет до лімітів часу увімкнено" : "✓ Імунітет вимкнено");
                       setAdminBusy(false);
@@ -7691,6 +7715,47 @@ function SettingsScreen({ me, theme, onChangeTheme, onBack, onSetPlayer, wars, s
                   </button>
                 </div>
                 <div className="cn-adm-hint">Стосується повідомлень про війни: напад, початок битви, підсумки, перемир'я, знищення країни. Листи в грі працюють як завжди.</div>
+              </AdmSec>
+
+              <AdmSec id="tvtest" cur={admSec} setCur={setAdmSec} Icon={Play} title="Тест телепередачі" badge={tvTest && Date.now() < tvTest.until ? "ТБ" : null}>
+                <div className="cn-adm-row">
+                  <select className="cn-adm-in" value={tvMin} onChange={(e) => setTvMin(+e.target.value)}>
+                    {[0, 1, 2, 5, 10, 30].map((m) => <option key={m} value={m}>{m === 0 ? "Одразу" : `Через ${m} хв`}</option>)}
+                  </select>
+                  <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={() => setTvTimer(false)}>Запустити таймер</button>
+                  {tvTest && <button className="cn-adm-btn cn-adm-btn--danger" type="button" disabled={adminBusy} onClick={() => setTvTimer(true)}>Скасувати</button>}
+                </div>
+                <div className="cn-adm-hint">
+                  {tvTest
+                    ? Date.now() < tvTest.at
+                      ? `Випуск почнеться за ${Math.max(0, Math.ceil(tvLeft / 1000))} с. Далі 30 хв у новинах, вкладка «ТБ».`
+                      : Date.now() < tvTest.until
+                        ? "Тестовий випуск зараз в ефірі (вкладка «ТБ» у світових новинах)."
+                        : "Останній тест завершено."
+                    : "Після таймера у вкладці «ТБ» світових новин 30 хвилин іде випуск, незалежно від ранку чи вечора. Бачать усі гравці."}
+                </div>
+              </AdmSec>
+
+              <AdmSec id="pandemic" cur={admSec} setCur={setAdmSec} Icon={Wrench} title="Пандемія" badge={activePandemics().length ? String(activePandemics().length) : null}>
+                <div className="cn-adm-row">
+                  <select className="cn-adm-in" value={pdCode} onChange={(e) => setPdCode(e.target.value)}>
+                    {[...COUNTRIES].sort((a, b) => a.name.localeCompare(b.name, "uk")).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                  <select className="cn-adm-in" value={pdDisease} onChange={(e) => setPdDisease(e.target.value)}>
+                    <option value="">Хвороба: підібрати логічно</option>
+                    {DISEASES.map((d) => <option key={d.n} value={d.n}>{d.n}</option>)}
+                  </select>
+                </div>
+                <div className="cn-adm-row">
+                  <button className="cn-adm-btn" type="button" disabled={adminBusy} onClick={() => pandemicOp("start")}>Запустити в цій країні</button>
+                  <button className="cn-adm-btn cn-adm-btn--danger" type="button" disabled={adminBusy} onClick={() => pandemicOp("cancel")}>Припинити в усьому світі</button>
+                </div>
+                <div className="cn-adm-hint">
+                  {activePandemics().length
+                    ? "Зараз: " + activePandemics().map((e) => `${e.disease} (${COUNTRY_MAP[e.code]?.name || e.code})`).join(", ")
+                    : "Зараз пандемій немає."}{" "}
+                  Запуск працює в будь-якій країні, навіть поза списком 20 осередків. Припинення зупиняє вірус у всіх країнах одразу.
+                </div>
               </AdmSec>
 
               <AdmSec id="maint" cur={admSec} setCur={setAdmSec} Icon={Wrench} title="Технічна перерва" badge={maintenance.enabled ? "ON" : null}>
@@ -7776,37 +7841,14 @@ function AdminMapEditor({ city = null, rid, regionName, onDone }) {
     }
     setBusy(false);
   };
-  const giveCity = (owner) =>
-    run(async () => {
-      const key = cityKey(city);
-      const prevOwner = (await storageGet(CITY_OWN_PREFIX + key, true).catch(() => null)) || "";
-      await storageSet(CITY_OWN_PREFIX + key, owner, true);
-      await storageSet(CITY_DEF_PREFIX + key, "0", true);
-      logMapEvent({ k: "ct", ck: key, rid, from: prevOwner, to: owner, name: city.n, src: "admin" });
-    }, "Місто передано: " + (COUNTRY_MAP[owner]?.name || owner));
-  const giveRegion = (owner) =>
-    run(async () => {
-      const prevReg = (await storageGet(TERRITORY_PREFIX + rid, true).catch(() => null)) || "";
-      await storageSet(TERRITORY_PREFIX + rid, owner, true);
-      logMapEvent({ k: "rg", rid, from: prevReg, to: owner, name: regionName, src: "admin" });
-      for (const c of await cityOf()) {
-        await storageSet(CITY_OWN_PREFIX + cityKey(c), owner, true);
-        await storageSet(CITY_DEF_PREFIX + cityKey(c), "0", true);
-      }
-    }, "Область передано: " + (COUNTRY_MAP[owner]?.name || owner));
-  const baseOwner = async () => {
-    const ro = await loadRegionOwners();
-    const base = ro?.r?.[rid];
-    if (!base) throw new Error("Початкового власника не знайдено");
-    return base;
+  const mapOp = async (action, extra = {}) => {
+    const r = await worldOp("admin-map", { action, rid, name: regionName, ...extra });
+    if (!r.ok) throw new Error(r.reason);
   };
-  const resetCity = () => run(async () => { await storageSet(CITY_OWN_PREFIX + cityKey(city), await baseOwner(), true); }, "Місто повернуто початковому власнику");
-  const resetRegion = () =>
-    run(async () => {
-      const base = await baseOwner();
-      await storageSet(TERRITORY_PREFIX + rid, base, true);
-      for (const c of await cityOf()) await storageSet(CITY_OWN_PREFIX + cityKey(c), base, true);
-    }, "Область повернуто початковому власнику");
+  const giveCity = (owner) => run(() => mapOp("giveCity", { owner, cityKey: cityKey(city) }), "Місто передано: " + (COUNTRY_MAP[owner]?.name || owner));
+  const giveRegion = (owner) => run(() => mapOp("giveRegion", { owner }), "Область передано: " + (COUNTRY_MAP[owner]?.name || owner));
+  const resetCity = () => run(() => mapOp("resetCity", { cityKey: cityKey(city) }), "Місто повернуто початковому власнику");
+  const resetRegion = () => run(() => mapOp("resetRegion"), "Область повернуто початковому власнику");
 
   return (
     <div className="cn-adm cn-adm-map">
@@ -7862,11 +7904,46 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
   };
   useEffect(() => { setClaimMsg(null); }, [selected?.rid]);
 
-  const countries = nations?.countries || [];
+  /* Режими карти: плоска/глобус та шар «Вірус» (колір країн за захворюваністю або летальністю) */
+  const [virusMode, setVirusMode] = useState(() => {
+    try { return localStorage.getItem("cn_map_virus") === "1"; } catch { return false; }
+  });
+  const [virusMetric, setVirusMetric] = useState("sick"); // "sick" | "dead"
+  const [modeMenu, setModeMenu] = useState(false);
+  const [virusTick, setVirusTick] = useState(0);
+  useEffect(() => onPandemicChange(() => setVirusTick((x) => x + 1)), []);
+  useEffect(() => {
+    const id = setInterval(() => setVirusTick((x) => x + 1), 5 * 60000);
+    return () => clearInterval(id);
+  }, []);
+  const setVirus = (on) => {
+    cnSfx.toggle();
+    setVirusMode(on);
+    try { localStorage.setItem("cn_map_virus", on ? "1" : "0"); } catch { /* ignore */ }
+  };
+  const virusShown = virusMode || !!pick?.virus; // при виборі країни для закриття кордону вірус показуємо завжди
+  const virusNow = useMemo(() => {
+    const now = Date.now();
+    return { byCountry: virusByCountry(now), world: worldVirus(now) };
+  }, [virusTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const baseCountries = nations?.countries || [];
+  /* У режимі вірусу колір кожної країни замінюється кольором шкали (хворі/померлі) */
+  const countries = useMemo(
+    () => (virusShown ? baseCountries.map((c) => ({ ...c, color: virusColor(virusNow.byCountry[c.id], virusMetric) })) : baseCountries),
+    [virusShown, virusMetric, virusNow, baseCountries]
+  );
   const owners = nations?.owners || {};
   const myCountry = COUNTRY_MAP[me?.countryCode];
   const [citiesData, setCitiesData] = useState(null);
   useEffect(() => { let off = false; loadCities().then((d) => { if (!off) setCitiesData(d); }).catch(() => {}); return () => { off = true; }; }, []);
+  /* Справжнє населення країн із щоденною зміною */
+  const [natPops, setNatPops] = useState({});
+  useEffect(() => {
+    let off = false;
+    computeNationPops(nations).then((p) => { if (!off) setNatPops(p); }).catch(() => {});
+    return () => { off = true; };
+  }, [nations]);
   /* Скільки міст зараз контролює кожна країна (захоплені міста мають власний запис) */
   const cityCounts = useMemo(() => {
     const out = {};
@@ -7996,20 +8073,8 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
     if ((me.power || 0) < FREE_CAPTURE_COST) { cnSfx.error(); setClaimMsg({ ok: false, text: `Потрібно ${fmt(FREE_CAPTURE_COST)} Power` }); return; }
     setClaimBusy(true);
     try {
-      const cd = Number(await storageGet(CAPCD_PREFIX + me.countryCode, true)) || 0;
-      if (cd > Date.now()) { cnSfx.error(); setClaimMsg({ ok: false, text: "Наступне захоплення через " + fmtDuration(cd - Date.now()) }); setClaimBusy(false); return; }
-      const active = await loadActiveWars();
-      if (active.some((w) => warInvolves(w, me.countryCode))) { cnSfx.error(); setClaimMsg({ ok: false, text: "Під час війни захоплювати вільні області не можна" }); setClaimBusy(false); return; }
-      const fresh = await loadNations();
-      if (fresh && fresh.owners[sel.rid]) {
-        cnSfx.error(); setClaimMsg({ ok: false, text: "Цю область уже захопили" }); onRefresh && onRefresh(); setClaimBusy(false); return;
-      }
-      const res = await sbStorageInsertIfAbsent(TERRITORY_PREFIX + sel.rid, me.countryCode, true);
-      if (res !== "ok") { cnSfx.error(); setClaimMsg({ ok: false, text: "Цю область уже захопили" }); onRefresh && onRefresh(); setClaimBusy(false); return; }
-      await storageSet(CAPCD_PREFIX + me.countryCode, String(Date.now() + FREE_CAPTURE_CD_MS), true);
-      onUpdatePlayer && onUpdatePlayer((prev) => ({ ...prev, power: Math.max(0, (prev.power || 0) - FREE_CAPTURE_COST) }));
-      const cn = COUNTRY_MAP[me.countryCode];
-      pushNews(`🚩 ${cn?.flag || ""} ${cn?.name || me.countryCode} захопили вільну область «${sel.name}».`);
+      const cr = await worldPaid("capture", { rid: sel.rid, name: sel.name }, onUpdatePlayer);
+      if (!cr.ok) { cnSfx.error(); setClaimMsg({ ok: false, text: cr.reason }); onRefresh && onRefresh(); setClaimBusy(false); return; }
       cnSfx.purchase();
       setClaimMsg({ ok: true, text: `✓ Область «${sel.name}» тепер належить твоїй країні` });
       onRefresh && onRefresh();
@@ -8077,6 +8142,16 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             </>
           )}
         </div>
+        {modeMenu && (
+          <div className="cn-mode-menu" onClick={(e) => e.stopPropagation()}>
+            <div className="cn-mode-head">Вигляд</div>
+            <button type="button" className={"cn-mode-opt" + (!globe ? " on" : "")} onClick={() => { if (globe) toggleGlobe(); setModeMenu(false); }}>Звичайна карта</button>
+            {GLOBE_SUPPORTED && <button type="button" className={"cn-mode-opt" + (globe ? " on" : "")} onClick={() => { if (!globe) toggleGlobe(); setModeMenu(false); }}>Глобус</button>}
+            <div className="cn-mode-head">Шар</div>
+            <button type="button" className={"cn-mode-opt" + (!virusMode ? " on" : "")} onClick={() => { setVirus(false); setModeMenu(false); }}>Країни</button>
+            <button type="button" className={"cn-mode-opt" + (virusMode ? " on" : "")} onClick={() => { setVirus(true); setModeMenu(false); }}>Вірус: хворі й померлі</button>
+          </div>
+        )}
         <div className="cn-tmap-viewport">
           <TerritoryMap
             ref={mapRef}
@@ -8093,7 +8168,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
             }}
             showCities
             tools={[
-              ...(GLOBE_SUPPORTED ? [{ id: "globe", label: "Глобус / плоска карта", svg: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18"/>', onClick: toggleGlobe }] : []),
+              { id: "mode", label: "Режим карти", svg: '<path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/>', onClick: () => setModeMenu((v) => !v) },
               { id: "search", label: "Пошук", svg: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', onClick: () => setSearchOpen((v) => !v) },
               { id: "refresh", label: "Оновити", svg: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>', onClick: () => { onRefresh(); loadWars(); } },
             ]}
@@ -8139,7 +8214,7 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
         )}
       </div>
             <div className="cn-map-bottom-row">
-              <MapLegend lang={lang} myColor={myCountry?.color} />
+              {virusShown ? <VirusLegend metric={virusMetric} onMetric={setVirusMetric} world={virusNow.world} /> : <MapLegend lang={lang} myColor={myCountry?.color} />}
               <button className="cn-map-mine-pill" type="button" onClick={goToMine}>
                 <Compass size={14} /> {t(lang, "nn_goto_mine")}
               </button>
@@ -8230,6 +8305,22 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
                     <span className="cn-map-card-stat-value">{fmt(selectedCountry.regionCount || 0)}</span>
                   </div>
                   <div className="cn-map-card-stat">
+                    <span className="cn-map-card-stat-label">{t(lang, "nn_population")}</span>
+                    <span className="cn-map-card-stat-value">
+                      {natPops[selectedCountry.id] ? fmtPop(natPops[selectedCountry.id][0]) : "—"}
+                      {natPops[selectedCountry.id] && <small style={{ display: "block", fontSize: 10, fontWeight: 600, color: natPops[selectedCountry.id][1] >= 0 ? "#6fe3a1" : "#ff8a8a" }}>{fmtDelta(natPops[selectedCountry.id][1])} за добу</small>}
+                    </span>
+                  </div>
+                  {virusNow.byCountry[selectedCountry.id] && (
+                    <div className="cn-map-card-stat">
+                      <span className="cn-map-card-stat-label">Вірус</span>
+                      <span className="cn-map-card-stat-value">
+                        {fmtPct(virusNow.byCountry[selectedCountry.id].infected)} хворих
+                        <small style={{ display: "block", fontSize: 10, fontWeight: 600, color: "#ff9a9a" }}>померло {fmtPct(virusNow.byCountry[selectedCountry.id].deaths)}</small>
+                      </span>
+                    </div>
+                  )}
+                  <div className="cn-map-card-stat">
                     <span className="cn-map-card-stat-label">{t(lang, "nn_cities_count")}</span>
                     <span className="cn-map-card-stat-value">{fmt(cityCounts[selectedCountry.id] || 0)}</span>
                   </div>
@@ -8240,6 +8331,9 @@ function MapScreen({ players, me, loading, onRefresh, nations, lang = "uk", pick
                     </span>
                   </div>
                 </div>
+                {activeFor(selectedCountry.id).map((e) => (
+                  <div key={e.id} className="cn-rel-tag" style={{ background: "rgba(194,139,255,0.14)", color: "#e3d2fa", border: "1px solid rgba(194,139,255,0.4)" }}>{e.meta.emoji} {e.meta.label}: {e.effect}</div>
+                ))}
                 {relTag && <div className={"cn-rel-tag cn-rel-tag--" + relTag.cls}>{relTag.text}</div>}
               </>
             )}
@@ -8611,7 +8705,7 @@ function PremiumOffer({ me, onOpen }) {
   );
 }
 
-function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, isAdvisor, onRefreshGameData }) {
+function ShopScreen({ onGoToSeason, me, onSetPlayer, isLeader, onRefreshGameData }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [termOpen, setTermOpen] = useState(false);
   const tapRef = useRef({ n: 0, t: 0 });
@@ -10574,6 +10668,54 @@ function GlobalStyles() {
         display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; color: #FDE68A;
         padding: 5px 10px; border-radius: 999px; background: rgba(6,16,34,0.7); border: 1px solid rgba(253,230,138,0.35); white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis;
       }
+      .cn-mode-menu { position: absolute; top: 56px; right: 58px; z-index: 6; width: 190px; padding: 8px; border-radius: 12px; background: rgba(8,16,32,0.94); border: 1px solid rgba(255,255,255,0.14); box-shadow: 0 8px 24px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 4px; }
+      .cn-mode-head { font-size: 9.5px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255,255,255,0.5); padding: 4px 4px 0; }
+      .cn-mode-opt { text-align: left; padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; background: rgba(255,255,255,0.06); color: #fff; font: 600 12px/1.2 inherit; }
+      .cn-mode-opt.on { border-color: #5ec2ff; background: rgba(94,194,255,0.16); }
+      .cn-virus-legend { flex: 1; min-width: 0; padding: 6px 9px; border-radius: 12px; background: rgba(6,14,28,0.78); border: 1px solid rgba(255,255,255,0.1); color: #fff; display: flex; flex-direction: column; gap: 4px; }
+      .cn-virus-chips { display: flex; gap: 4px; }
+      .cn-virus-line { font-size: 10.5px; line-height: 1.3; }
+      .cn-virus-scale { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 9px; opacity: 0.9; }
+      .cn-virus-sw { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 3px; }
+      .cn-virus-sw-wrap { display: inline-flex; align-items: center; }
+      .cn-brief { flex: 1; min-height: 160px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; padding: 2px 0 6px; }
+      .cn-brief-head { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase; color: rgba(255,255,255,0.6); }
+      .cn-brief-count { background: var(--hq); color: #0a0f1a; border-radius: 9px; padding: 1px 7px; font-size: 10px; letter-spacing: 0; }
+      .cn-brief-card { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.05); color: #fff; text-align: left; font: inherit; }
+      .cn-brief-card--hot { border-color: var(--hq); background: rgba(255,255,255,0.09); }
+      .cn-brief-card--war { border-color: rgba(255,90,90,0.5); background: rgba(255,90,90,0.09); }
+      .cn-brief-card--evt { border-color: rgba(194,139,255,0.4); background: rgba(194,139,255,0.08); }
+      .cn-brief-card--btn { cursor: pointer; }
+      .cn-brief-card--col { flex-direction: column; align-items: stretch; gap: 8px; }
+      .cn-brief-row { display: flex; align-items: center; gap: 10px; }
+      .cn-cure { display: flex; flex-direction: column; gap: 3px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.1); }
+      .cn-cure-line { font-size: 11.5px; }
+      .cn-cure-sub { font-size: 10.5px; opacity: 0.7; }
+      .cn-cure-act { flex-direction: row; flex-wrap: wrap; margin-top: 4px; }
+      .cn-bank { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; }
+      .cn-bank-card { padding: 14px; border-radius: 16px; border: 1px solid color-mix(in srgb, var(--hq) 55%, transparent); background: rgba(255,255,255,0.06); }
+      .cn-bank-label { font-size: 11px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.65; }
+      .cn-bank-sum { font-size: 30px; font-weight: 800; margin: 4px 0; }
+      .cn-bank-sum small { font-size: 13px; opacity: 0.6; font-weight: 600; }
+      .cn-bank-hint, .cn-bank-sub { font-size: 11px; opacity: 0.65; }
+      .cn-bank-form { display: flex; flex-direction: column; gap: 8px; }
+      .cn-bank-input { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.07); color: #fff; font: 700 16px/1 inherit; }
+      .cn-bank-btns { display: flex; gap: 8px; }
+      .cn-bank-btns .cn-dev-btn { flex: 1; }
+      .cn-bank-msg { font-size: 12px; }
+      .cn-bank-block { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px; border-radius: 14px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); }
+      .cn-bank-h { font-size: 10.5px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.6; }
+      .cn-bank-row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+      .cn-bank-row small { opacity: 0.55; margin-left: 4px; }
+      .cn-bank-plus { color: #7ccf8a; }
+      .cn-bank-minus { color: #ff8a8a; }
+      .cn-brief-emoji { font-size: 20px; width: 24px; text-align: center; }
+      .cn-brief-main { flex: 1; min-width: 0; }
+      .cn-brief-title { font-size: 12.5px; font-weight: 700; line-height: 1.25; }
+      .cn-brief-sub { font-size: 10.5px; opacity: 0.7; margin-top: 2px; }
+      .cn-brief-act { display: flex; flex-direction: column; gap: 4px; }
+      .cn-brief-note { font-size: 11px; opacity: 0.85; }
+      .cn-brief-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 12px; opacity: 0.6; text-align: center; padding: 18px; }
       .cn-hq-stage { display: flex; gap: 10px; align-items: stretch; flex: 1; min-height: 210px; }
       .cn-hq-hero {
         position: relative; flex: 1; min-width: 0;

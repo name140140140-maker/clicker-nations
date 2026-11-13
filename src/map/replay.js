@@ -86,6 +86,12 @@ export async function prepareReplay({ width = 900, lang = "uk" } = {}) {
     else if (e.ck) st.city[e.ck] = e.to || "";
   };
   const k0 = W / 900;
+  let changedCities = [];
+  const setChanged = (events, n) => {
+    const seen = new Set();
+    for (let i = 0; i < n; i++) if (events[i].ck) seen.add(events[i].ck);
+    changedCities = cities.list.filter((c) => seen.has(cityKey(c)));
+  };
   const draw = (ctx, st, last) => {
     ctx.fillStyle = WATER;
     ctx.fillRect(0, 0, W, H);
@@ -96,14 +102,14 @@ export async function prepareReplay({ width = 900, lang = "uk" } = {}) {
     ctx.strokeStyle = "rgba(0,0,0,0.25)";
     ctx.lineWidth = 0.4 * k0;
     for (let i = 0; i < paths.length; i++) ctx.stroke(paths[i]);
-    for (const c of bigCities) {
-      const k = cityKey(c);
-      const owner = st.city[k] || "";
+    /* Точки міст не малюємо (їх забагато й вони закривають карту): лише міста, що вже змінили власника в цьому повторі */
+    for (const c of changedCities) {
+      const owner = st.city[cityKey(c)] || "";
       ctx.beginPath();
-      ctx.arc(px(c.x), py(c.y), (c.cap === 2 ? 3.2 : 2) * k0, 0, Math.PI * 2);
+      ctx.arc(px(c.x), py(c.y), 3.5 * k0, 0, Math.PI * 2);
       ctx.fillStyle = colorOf[owner] || "#fff";
       ctx.fill();
-      ctx.lineWidth = 1 * k0;
+      ctx.lineWidth = 1.2 * k0;
       ctx.strokeStyle = "#fff";
       ctx.stroke();
     }
@@ -123,5 +129,5 @@ export async function prepareReplay({ width = 900, lang = "uk" } = {}) {
       }
     }
   };
-  return { W, H, stateAt, apply, draw, colorOf, countries: nations.countries, baseRegion };
+  return { W, H, stateAt, apply, draw, setChanged, colorOf, countries: nations.countries, baseRegion };
 }

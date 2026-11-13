@@ -15,7 +15,7 @@ import { verifyTelegramInitData } from "../_telegramAuth.js";
 import { adminIds, rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "../_security.js";
 
 const GAME_STATE_KEY = "game-state";
-const WIPE_PREFIXES = ["terr:", "cityown:", "citydef:", "war:", "warc:", "warcd:", "warend:", "warevt:", "mapevt:", "dip:", "capcd:"];
+const WIPE_PREFIXES = ["terr:", "cityown:", "citydef:", "war:", "warc:", "warcd:", "warend:", "warevt:", "mapevt:", "dip:", "capcd:", "cure:", "virussnap:"];
 const REWARDS = [50000, 30000, 20000, 12000, 12000, 7000, 7000, 7000, 7000, 7000]; // місця 1–10
 const REWARD_11_20 = 3000;
 
@@ -71,7 +71,26 @@ async function allPlayers() {
     }
     if (rows.length < 1000) break;
   }
-  return out;
+  /* Power веде сервер (pwr:<id>): він важливіший за поле power у записі гравця */
+  const pw = new Map();
+  for (let from = 0; ; from += 1000) {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/kv_store?key=like.${encodeURIComponent("pwr:*")}&shared=eq.true&select=key,value&order=key.asc&limit=1000&offset=${from}`,
+      { headers: serviceHeaders() }
+    );
+    const rows = await res.json();
+    if (!Array.isArray(rows)) throw new Error("pwr read failed");
+    for (const r of rows) {
+      try {
+        const v = JSON.parse(r.value);
+        if (v && Number.isFinite(v.p)) pw.set(r.key.slice(4), v.p);
+      } catch {
+        /* пошкоджений запис */
+      }
+    }
+    if (rows.length < 1000) break;
+  }
+  return out.map((p) => (pw.has(p.id) ? { ...p, power: pw.get(p.id) } : p));
 }
 
 export default async function handler(req, res) {
@@ -115,6 +134,9 @@ export default async function handler(req, res) {
     const wiped = [];
     for (const prefix of WIPE_PREFIXES) wiped.push(await sbDeletePrefix(prefix));
     if (wiped.some((ok) => !ok)) console.error("admin-season-reset: частину ключів не вдалося видалити", wiped);
+
+    /* Усі пандемії нового сезону починаються з чистого аркуша (банки країн не чіпаємо) */
+    await sbUpsert("cfg:pandemic", JSON.stringify({ manual: [], cancelAt: Date.now() }));
 
     /* 3. Новий сезон і історія */
     const history = [...(state.seasonHistory || []), { season: n, endedAt: Date.now(), top: ranked.slice(0, 10) }].slice(-20);
