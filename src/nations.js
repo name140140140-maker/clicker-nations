@@ -7,6 +7,7 @@
    Нові таблиці чи міграції в Supabase не потрібні. */
 
 import { loadRegionOwners, buildRealCountries } from "./realCountries";
+import { worldOp, stateOp } from "./powerApi";
 import { sbStorageGet, sbStorageSet, sbStorageListEntries, sbStorageInsertIfAbsent } from "./supabaseStorage";
 
 export const COUNTRY_PREFIX = "country:";
@@ -15,12 +16,8 @@ export const CITY_OWN_PREFIX = "cityown:"; // перехоплені міста:
 export const CHANGELOG_KEY = "changelog";
 
 /* Обмежена палітра кольорів країн (кожна країна має свій колір; лідер може змінити в Панелі управління). */
-export const COUNTRY_COLORS = [
-  "#ef4444", "#f97316", "#f59e0b", "#eab308", "#84cc16", "#22c55e",
-  "#10b981", "#14b8a6", "#06b6d4", "#3b82f6", "#6366f1", "#8b5cf6",
-  "#a855f7", "#d946ef", "#ec4899", "#f43f5e", "#b91c1c", "#c2410c",
-  "#a16207", "#4d7c0f", "#15803d", "#0f766e", "#1d4ed8", "#6d28d9",
-];
+export { COUNTRY_COLORS } from "./progressData";
+import { COUNTRY_COLORS } from "./progressData";
 
 export const NAME_MIN = 2;
 export const NAME_MAX = 24;
@@ -100,13 +97,8 @@ export async function createCountry() {
 /* Лише лідер змінює колір (перевірка на боці інтерфейсу). */
 export async function updateCountryColor(countryId, color) {
   if (!COUNTRY_COLORS.includes(color)) return { ok: false, reason: "Недопустимий колір" };
-  const raw = await sbStorageGet(COUNTRY_PREFIX + countryId, true);
-  if (!raw) return { ok: false, reason: "Країну не знайдено" };
-  let c;
-  try { c = JSON.parse(raw); } catch { return { ok: false, reason: "Пошкоджені дані країни" }; }
-  c.color = color;
-  const ok = await sbStorageSet(COUNTRY_PREFIX + countryId, JSON.stringify(c), true);
-  return ok ? { ok: true, country: c } : { ok: false, reason: "Не вдалося зберегти" };
+  const r = await worldOp("country-color", { color });
+  return r.ok ? { ok: true, country: r.country } : { ok: false, reason: r.reason };
 }
 
 /* --- Список оновлень (для адмін-панелі) --- */
@@ -122,5 +114,6 @@ export async function loadChangelog() {
 }
 
 export async function saveChangelog(list) {
-  return sbStorageSet(CHANGELOG_KEY, JSON.stringify(list), true);
+  const r = await stateOp("changelog", { list });
+  return r.ok;
 }

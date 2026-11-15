@@ -42,7 +42,8 @@ export default async function handler(req, res) {
         const cp = Math.min(pow, allow);
         const cw = Math.min(war, Math.max(0, allow - cp));
         const left = Math.max(0, cur - cp - cw);
-        return { st: { ...st, p: st.p + cp, e: Math.min(left, maxEnergyOf(rec)), t: now }, out: { cp, cw } };
+        const tc0 = Math.max(0, Math.floor(st.tc ?? (Number(rec.totalClicks) || 0)));
+        return { st: { ...st, p: st.p + cp, tc: tc0 + cp + cw, e: Math.min(left, maxEnergyOf(rec)), t: now }, out: { cp, cw } };
       }, rec);
       if (!r.ok) return fail(res, 500, r.error);
       // кліки в битву зараховує лише сервер: війна має бути в фазі битви, а країна гравця — на одному з боків
@@ -84,7 +85,7 @@ export default async function handler(req, res) {
       const trec = await getRecord(target);
       if (!trec) return fail(res, 404, "Гравця не знайдено");
       const power = Math.max(0, Math.floor(Number(body.power) || 0));
-      const r = await mutatePwr(target, (st, now) => ({ st: { ...st, p: power, ...(body.resetEnergy ? { e: maxEnergyOf(trec), t: now } : {}) } }), trec);
+      const r = await mutatePwr(target, (st, now) => ({ st: { ...st, p: power, ...(body.resetEnergy ? { e: maxEnergyOf(trec), t: now, tc: 0 } : {}), ...(Number.isFinite(Number(body.tc)) && body.tc !== null ? { tc: Math.max(0, Math.floor(Number(body.tc))) } : {}) } }), trec);
       if (!r.ok) return fail(res, 500, r.error);
       return res.status(200).json({ ok: true, power });
     }

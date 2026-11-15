@@ -5,6 +5,7 @@ import { buildRegionModel } from "./regionsModel.js";
 import { loadCities, cityKey } from "./cities.js";
 import { loadNations } from "../nations.js";
 import { sbStorageSet, sbStorageListEntries } from "../supabaseStorage.js";
+import { TOPOLOGY_URL } from "./dataUrls.js";
 
 export const MAPEVT_PREFIX = "mapevt:";
 const WATER = "#1f7fe8";
@@ -40,7 +41,7 @@ export async function loadMapEvents(sinceMs) {
 
 /* Готує сцену: повертає { H, startState(events), draw(state, ctx, highlight) } */
 export async function prepareReplay({ width = 900, lang = "uk" } = {}) {
-  const [res, nations, cities] = await Promise.all([fetch("/data/world-topology.json"), loadNations(lang), loadCities()]);
+  const [res, nations, cities] = await Promise.all([fetch(TOPOLOGY_URL), loadNations(lang), loadCities()]);
   if (!res.ok || !nations) throw new Error("Не вдалося завантажити карту");
   const model = await buildRegionModel(await res.json(), () => new Promise((r) => setTimeout(r, 0)));
   const W = width;

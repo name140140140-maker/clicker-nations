@@ -5,6 +5,7 @@
 import { buildRegionModel } from "./regionsModel.js";
 import { loadCities, cityKey } from "./cities.js";
 import { loadNations } from "../nations.js";
+import { TOPOLOGY_URL } from "./dataUrls.js";
 
 const WATER = "#1f7fe8";
 const FREE = "#8ad84f";
@@ -16,7 +17,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 export async function renderWorldImage({ width = 4096, lang = "uk", onStage = () => {} } = {}) {
   onStage("Завантажуємо дані…");
-  const [res, nations, cities] = await Promise.all([fetch("/data/world-topology.json"), loadNations(lang), loadCities()]);
+  const [res, nations, cities] = await Promise.all([fetch(TOPOLOGY_URL), loadNations(lang), loadCities()]);
   if (!res.ok || !nations) throw new Error("Не вдалося завантажити карту");
   const topology = await res.json();
   onStage("Будуємо кордони…");

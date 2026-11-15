@@ -4,6 +4,7 @@ import { sbStorageGet } from "./supabaseStorage";
 import { activeEvents, eventNews } from "./worldEvents";
 import { worldVirus, fmtBig } from "./virusStats";
 import { onPandemicChange } from "./pandemic";
+import { setTick, clearTick } from "./core/ticker.js";
 
 /* «Світові новини» — компактна стрічка подій гри: рубрика кольором, час і короткий заголовок.
    Без ефектів та емодзі; одним рядком — підсумок за добу. */
@@ -112,10 +113,10 @@ export default function NewsBroadcast({ news, onClose, timeAgo }) {
       if (!off) setTest(v && typeof v.at === "number" && typeof v.until === "number" ? v : null);
     };
     load();
-    const id = setInterval(load, 20000);
-    return () => { off = true; clearInterval(id); };
+    const id = setTick(load, 20000);
+    return () => { off = true; clearTick(id); };
   }, []);
-  useEffect(() => { const id = setInterval(() => setNow(new Date()), test ? 2000 : 30000); return () => clearInterval(id); }, [!!test]);
+  useEffect(() => { const id = setTick(() => setNow(new Date()), test ? 2000 : 30000); return () => clearTick(id); }, [!!test]);
 
   /* Події світу (пандемії, землетруси, санкції, революції) рахуються за датою й додаються до стрічки */
   const minute = Math.floor(now.getTime() / 60000);

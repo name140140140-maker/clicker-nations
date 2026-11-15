@@ -1,0 +1,131 @@
+/* Візуальний напрям C «Мультяшна планета».
+   Підключається ПІСЛЯ legacy.css: змінює токени (кольори, шрифти) і ключові компоненти (фон, навігація, модальні вікна, кнопки),
+   не чіпаючи розмітку екранів. Палітра: океан #1f7fe8, сонце #ffd54a, фіолет #6c4dff, корал #ff6b6b, трава #8ad84f, чорнило #0b2a6b. */
+
+:root {
+  --cn-panel-rgb: 12, 50, 125;
+  --cn-border-rgb: 255, 255, 255;
+  --cn-nav-rgb: 11, 42, 107;
+  --cn-accent-rgb: 255, 213, 74;
+  --cn-accent-bright: #ffe27a;
+  --cc-ink: #0b2a6b;
+  --cc-sun: #ffd54a;
+  --cc-ocean: #1f7fe8;
+  --cc-violet: #6c4dff;
+  --cc-coral: #ff6b6b;
+  --cc-grass: #8ad84f;
+  --cc-font: 'Nunito', ui-rounded, 'SF Pro Rounded', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+html, body, #root { background: #1f7fe8; }
+body { font-family: var(--cc-font); }
+.cn-root { font-family: var(--cc-font); }
+.cn-root button, .cn-root input, .cn-root select, .cn-root textarea { font-family: inherit; }
+
+/* Фон: небо-океан із «бульбашками» замість важкої картинки (економить трафік і декодування на слабких пристроях) */
+.cn-root::before {
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(255,255,255,.22) 0 7px, transparent 8px),
+    radial-gradient(circle at 84% 12%, rgba(255,255,255,.18) 0 11px, transparent 12px),
+    radial-gradient(circle at 70% 46%, rgba(255,255,255,.14) 0 5px, transparent 6px),
+    radial-gradient(circle at 20% 62%, rgba(255,255,255,.16) 0 9px, transparent 10px),
+    radial-gradient(circle at 90% 78%, rgba(255,255,255,.15) 0 6px, transparent 7px),
+    radial-gradient(ellipse at 50% -10%, #6cc6ff 0%, rgba(108,198,255,0) 55%),
+    linear-gradient(180deg, #3aa6ff 0%, #1f7fe8 42%, #1456b8 100%);
+}
+
+/* Вхід екранів: пружна поява */
+.cn-content--anim { animation: ccTabIn .3s cubic-bezier(.2, 1.1, .4, 1); }
+@keyframes ccTabIn { from { opacity: 0; transform: translate3d(0, 14px, 0) scale(.985); } to { opacity: 1; transform: none; } }
+
+/* Нижня навігація: великі зони торкання (≥58px), яскравий активний стан */
+.cn-nav {
+  background: var(--cc-ink); border-top: 4px solid #fff; gap: 6px; padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+  box-shadow: 0 -6px 0 rgba(11,42,107,.25);
+}
+.cn-nav-btn {
+  min-height: 58px; gap: 3px; border-radius: 18px; background: rgba(255,255,255,.1); border: 2.5px solid rgba(255,255,255,.28); color: #dbeaff;
+  transition: transform .14s cubic-bezier(.3,1.6,.5,1), background .14s, color .14s;
+}
+.cn-nav-btn:active { transform: scale(.92); }
+.cn-nav-btn--active { background: var(--cc-sun); color: var(--cc-ink); border-color: #fff; box-shadow: 0 4px 0 #b88a00; transform: translateY(-3px); }
+.cn-nav-btn--active .cn-nav-icon-wrap { animation: none; }
+.cn-nav-label { font-size: 10.5px; font-weight: 900; letter-spacing: .01em; }
+.cn-nav-dot { background: var(--cc-coral); border: 2px solid #fff; width: 10px; height: 10px; top: -4px; right: -6px; }
+
+/* Кнопки */
+.cn-primary-btn {
+  background: linear-gradient(180deg, #ffe27a 0%, #ffd54a 50%, #ffb826 100%); color: var(--cc-ink); font-weight: 900;
+  border: 3px solid var(--cc-ink); box-shadow: 0 5px 0 var(--cc-ink); transition: transform .08s, box-shadow .08s;
+}
+.cn-primary-btn:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--cc-ink); }
+.cn-primary-btn:disabled { filter: grayscale(.6); opacity: .7; }
+
+/* Модальні вікна */
+.cn-modal-overlay { background: rgba(6, 28, 80, .62); animation: ccFade .18s ease-out; }
+.cn-modal-sheet {
+  background: linear-gradient(180deg, #1a5fc9, #0f3f93); border: 4px solid #fff; border-bottom: 0; border-radius: 28px 28px 0 0;
+  box-shadow: 0 -8px 0 var(--cc-ink); animation: ccSheetIn .3s cubic-bezier(.2, 1.15, .4, 1);
+}
+.cn-modal-title { font-weight: 900; font-size: 17px; }
+@keyframes ccFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ccSheetIn { from { transform: translateY(40px); opacity: .4; } to { transform: none; opacity: 1; } }
+
+/* Заглушка підвантаження lazy-екранів */
+.cn-lazy-fallback { min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #fff; font-weight: 900; }
+.cn-lazy-orb { width: 44px; height: 44px; border-radius: 50%; border: 5px solid #fff; border-top-color: var(--cc-sun); animation: ccOrb .8s linear infinite; background: var(--cc-ocean); box-shadow: 0 0 0 3px var(--cc-ink); }
+@keyframes ccOrb { to { transform: rotate(360deg); } }
+
+/* Доступність: видимий фокус і повага до «зменшити рух» */
+.cn-root button:focus-visible, .cn-root [role="button"]:focus-visible, .cn-root a:focus-visible, .cn-root input:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .cn-root *, .cn-root *::before, .cn-root *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
+}
+
+/* ===== Етапи 4–5: єдиний мультяшний вигляд для рейтингу, штабу, воєн, сезону, профілю й пошти ===== */
+/* Картки/рядки: густий білий контур + «товща» тінь замість неонового світіння */
+.cn-root .cn-row { background: rgba(11,42,107,.55); border: 2.5px solid rgba(255,255,255,.55); border-radius: 18px; box-shadow: 0 3px 0 rgba(11,42,107,.55); }
+.cn-root .cn-row--mine { background: rgba(255,213,74,.22); border-color: var(--cc-sun); box-shadow: 0 3px 0 #b88a00; }
+.cn-root .cn-row-value { color: var(--cc-sun); font-weight: 900; }
+.cn-root .cn-row-rank { color: #fff; font-weight: 900; }
+.cn-root .cn-screen-title { font-weight: 900; font-size: 22px; text-shadow: 0 3px 0 var(--cc-ink); letter-spacing: .01em; }
+.cn-root .cn-stat-chip { background: rgba(11,42,107,.6); border: 3px solid #fff; border-radius: 22px; box-shadow: 0 4px 0 var(--cc-ink); }
+.cn-root .cn-stat-chip-value { font-weight: 900; }
+
+/* Поля вводу й перемикачі */
+.cn-root .cn-input { background: #fff; color: var(--cc-ink); border: 3px solid var(--cc-ink); border-radius: 16px; box-shadow: 0 3px 0 rgba(11,42,107,.5); font-weight: 800; }
+.cn-root .cn-input::placeholder { color: #6b82b8; }
+.cn-root .cn-input:focus { border-color: var(--cc-violet); box-shadow: 0 0 0 4px rgba(108,77,255,.3); }
+.cn-root .cn-segmented { background: rgba(11,42,107,.55); border: 3px solid #fff; border-radius: 18px; }
+.cn-root .cn-seg-btn { border-radius: 13px; min-height: 40px; font-weight: 900; color: #dbeaff; }
+.cn-root .cn-seg-btn--active { background: var(--cc-sun); color: var(--cc-ink); box-shadow: 0 3px 0 #b88a00; }
+.cn-root .cn-refresh-btn { border: 2.5px solid #fff; background: rgba(11,42,107,.6); color: #fff; width: 40px; height: 40px; border-radius: 14px; }
+
+/* Штаб */
+.cn-root .cn-hq-chip { border: 2.5px solid rgba(255,255,255,.6); border-radius: 16px; background: rgba(11,42,107,.55); box-shadow: 0 3px 0 rgba(11,42,107,.55); }
+.cn-root .cn-choice-btn { border: 3px solid #fff; border-radius: 22px; box-shadow: 0 5px 0 var(--cc-ink); transition: transform .08s, box-shadow .08s; }
+.cn-root .cn-choice-btn:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--cc-ink); }
+
+/* Війни: яскраві «мультяшні» стани замість темних неонових */
+.cn-root .cn-warhud { border: 3px solid #fff; border-radius: 22px; background: linear-gradient(160deg, #e0444e, #8e1d3c); box-shadow: 0 5px 0 var(--cc-ink); }
+.cn-root .cn-warhud--prep { background: linear-gradient(160deg, #ffb826, #d9731a); border-color: #fff; }
+.cn-root .cn-warhud-kicker, .cn-root .cn-warhud--prep .cn-warhud-kicker { color: #fff; font-weight: 900; text-shadow: 0 2px 0 rgba(11,42,107,.5); }
+.cn-root .cn-warhud-btn { border: 2.5px solid #fff; border-radius: 14px; min-height: 44px; background: rgba(11,42,107,.55); font-weight: 900; box-shadow: 0 3px 0 var(--cc-ink); }
+.cn-root .cn-warhud-btn:active { transform: translateY(3px); box-shadow: 0 0 0 var(--cc-ink); }
+.cn-root .cn-warhud-declare { border: 3px solid #fff; border-radius: 22px; background: linear-gradient(160deg, #e0444e, #8e1d3c); box-shadow: 0 5px 0 var(--cc-ink); }
+
+/* Сезон / Battle Pass / нагороди */
+.cn-root .cn-reward-cell { border-width: 2.5px; border-radius: 16px; }
+.cn-root .cn-season-timer { font-weight: 900; }
+
+/* Мінімальні зони торкання для дрібних кнопок (доступність) */
+.cn-root button { touch-action: manipulation; }
+.cn-root .cn-dev-btn, .cn-root .cn-color-swatch { min-height: 40px; }
+
+/* Перемикачі звуку/вібрації в налаштуваннях */
+.cn-feel-toggles { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.cn-feel-toggle { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 16px; border-radius: 18px; border: 3px solid #fff; background: rgba(11,42,107,.6); color: #fff; font-weight: 900; font-size: 15px; cursor: pointer; box-shadow: 0 3px 0 var(--cc-ink); }
+.cn-feel-toggle i { position: relative; width: 52px; height: 30px; border-radius: 15px; background: #5b6e99; border: 2.5px solid #fff; transition: background .15s; }
+.cn-feel-toggle i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 21px; height: 21px; border-radius: 50%; background: #fff; transition: transform .18s cubic-bezier(.3,1.6,.5,1); }
+.cn-feel-toggle--on i { background: var(--cc-grass); }
+.cn-feel-toggle--on i::after { transform: translateX(22px); }

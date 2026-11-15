@@ -7,6 +7,8 @@ import adminPandemic from "./_game/admin-pandemic.js";
 import adminTvTimer from "./_game/admin-tv-timer.js";
 import adminMapSend from "./_game/admin-map-send.js";
 import world from "./_game/world.js";
+import progress from "./_game/progress.js";
+import state from "./_game/state.js";
 import leader from "./_game/leader.js";
 import adminPlayer from "./_game/admin-player.js";
 import power from "./_game/power.js";
@@ -25,6 +27,8 @@ const ACTIONS = {
   power,
   leader,
   world,
+  progress,
+  state,
   "admin-player": adminPlayer,
 };
 

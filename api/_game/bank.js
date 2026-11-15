@@ -10,6 +10,7 @@ import { setPandemicState, countryStatus, pandemicEnd } from "../../src/pandemic
 import { allPandemics } from "../../src/worldEvents.js";
 import { cureCost } from "../../src/cureCost.js";
 import { adjustPower } from "./pwrStore.js";
+import { addNews } from "./kv.js";
 
 const MAX_AMOUNT = 1e12;
 const rest = (path) => `${SUPABASE_URL}/rest/v1/kv_store${path}`;
@@ -203,6 +204,9 @@ export default async function handler(req, res) {
         await sbDelete(ck);
         return fail(res, 409, "Баланс змінився, спробуй ще раз");
       }
+      let cname = code;
+      try { cname = new Intl.DisplayNames(["uk"], { type: "region" }).of(code) || code; } catch { /* лишаємо код */ }
+      await addNews(`💉 ${cname} знищила вірус «${String(e.disease || "").slice(0, 40)}» у себе за ${new Intl.NumberFormat("uk-UA").format(cost)} Power`).catch(() => null);
       return res.status(200).json({ ok: true, ts: now, cost, balance: after, disease: e.disease });
     }
 

@@ -4,6 +4,7 @@
 // відмітку «забрано» ставить теж сервер. Нагорода видається один раз: атомарна умовна зміна запису.
 
 import { verifyTelegramInitData } from "../_telegramAuth.js";
+import { casJson } from "./kv.js";
 import { rateLimit, clientIp, SUPABASE_URL, serviceHeaders, fail } from "../_security.js";
 
 async function sbGet(key) {
@@ -39,7 +40,9 @@ export default async function handler(req, res) {
     const rows = patch.ok ? await patch.json().catch(() => []) : [];
     if (!Array.isArray(rows) || rows.length !== 1) return res.status(200).json({ ok: true, points: 0 });
 
-    res.status(200).json({ ok: true, points: rec.points, rank: rec.rank, season: rec.season, countryCode: rec.countryCode });
+    let total = null;
+    await casJson("players:" + playerId, (r) => { if (!r) return undefined; total = Math.floor(Number(r.points) || 0) + rec.points; return { ...r, points: total }; });
+    res.status(200).json({ ok: true, total, points: rec.points, rank: rec.rank, season: rec.season, countryCode: rec.countryCode });
   } catch (err) {
     console.error("claim-season-reward error:", err?.message || err);
     fail(res, 500, "Помилка сервера");

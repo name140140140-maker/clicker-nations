@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
+import { DRONE_MODELS } from "./droneModels.js";
+export { DRONE_MODELS };
 
 /* Дрон-камікадзе: псевдо-3D політ над містом (чистий canvas, без залежностей).
    Камера «від третьої особи» — ззаду зверху. Лівий палець (ліва половина екрана) — рух
@@ -176,12 +178,6 @@ function shadeHex(hex, k) {
   const h = (v) => Math.max(0, Math.min(255, Math.round(v * k))).toString(16).padStart(2, "0");
   return "#" + h(r) + h(g) + h(b);
 }
-
-export const DRONE_MODELS = {
-  quad: { id: "quad", name: "Квадрокоптер", desc: "Маневровий, зависає й різко повертає", speed: 1 },
-  shahed: { id: "shahed", name: "Шахед", desc: "Трикутне крило, швидкий, інерційний", speed: 1.3 },
-  bayraktar: { id: "bayraktar", name: "Байрактар", desc: "Літак з крилами, плавний і керований", speed: 1.1 },
-};
 
 // моделі-літаки: полігони в локальних координатах (x вправо, y вгору, z вперед)
 const box3 = (x0, x1, y0, y1, z0, z1, col) => [

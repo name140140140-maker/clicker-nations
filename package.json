@@ -11,7 +11,9 @@
     "repair:topology": "node --max-old-space-size=4096 scripts/repair-topology.mjs",
     "build:cities": "node --max-old-space-size=4096 scripts/build-cities.mjs",
     "fetch:regions": "node --max-old-space-size=4096 scripts/fetch-regions.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
+    "topology:lite": "node scripts/simplify-topology.mjs 0.02"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

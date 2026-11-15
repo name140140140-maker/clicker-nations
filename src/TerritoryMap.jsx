@@ -1,6 +1,7 @@
 import LoadingScreen from "./LoadingScreen.jsx";
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
+import { MAP_COLORS } from "./map/colors.js";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { buildRegionModel } from "./map/regionsModel.js";
 import { loadCities, citiesGeoJson, cityKey } from "./map/cities.js";
@@ -20,20 +21,11 @@ import { geoLabelsGeoJson, GEO_LABELS } from "./map/geoLabels.js";
 // Режими: "view" — перегляд карти (клік показує інформацію про область);
 //         "pick" — вибір вільної області для створення нової країни.
 
-const TOPOLOGY_URL = "/data/world-topology.json";
+import { TOPOLOGY_URL } from "./map/dataUrls.js";
 const MAX_ZOOM = 12;
 const SOURCE_MAX_ZOOM = 8;
 
-export const MAP_COLORS = {
-  water: "#1f7fe8", // насичений мультяшний океан
-  free: "#8ad84f", // яскраво-зелена суша
-  border: "#0b2412",
-  borderInternal: "#5fa83a",
-  mine: "#ffffff",
-  selected: "#ffd54a",
-  coast: "#f6ffc4", // світла облямівка узбережжя
-  glow: "#8fdcff", // світле сяйво навколо суші
-};
+export { MAP_COLORS };
 
 const OWNER_OPACITY = 0.9;
 
@@ -1049,7 +1041,7 @@ const TerritoryMap = forwardRef(function TerritoryMap(
             color: "#f87171", fontSize: 13, background: MAP_COLORS.water, borderRadius: 12, padding: 16, textAlign: "center",
           }}
         >
-          Не вдалося завантажити карту. Перевір, що файл /data/world-topology.json існує.
+          Не вдалося завантажити карту. Перевір, що файл /data/world-topology-lite.json існує.
         </div>
       )}
 

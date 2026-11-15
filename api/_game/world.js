@@ -5,8 +5,9 @@
 
 import { verifyTelegramInitData } from "../_telegramAuth.js";
 import { adminIds, rateLimit, clientIp, fail } from "../_security.js";
-import { sbGet, getJson, sbList, sbInsert, sbUpsert, parse, casJson, addNews, addMail, loadPlayers, leaderOf } from "./kv.js";
+import { sbGet, getJson, sbList, sbInsert, sbUpsert, sbDelete, parse, casJson, addNews, addMail, loadPlayers, leaderOf } from "./kv.js";
 import { mapData } from "./mapdata.js";
+import { COUNTRY_COLORS } from "../../src/progressData.js";
 import { mutatePwr, adjustPower, getRecord } from "./pwrStore.js";
 
 export const WAR_PREP_MS = 10 * 60 * 1000;
@@ -181,7 +182,9 @@ export default async function handler(req, res) {
   try {
     const pid = await sbGet("tgmap:" + tg);
     const me = pid ? parse(await sbGet("players:" + pid)) : null;
-    if (!me || me.id !== pid || !REAL_ID.test(String(me.countryCode || ""))) return fail(res, 403, "Гравця не знайдено");
+    if (!me || me.id !== pid) return fail(res, 403, "Гравця не знайдено");
+    // гравець зі старою вигаданою країною може лише обрати нову (set-country)
+    if (!REAL_ID.test(String(me.countryCode || "")) && b.op !== "set-country") return fail(res, 403, "Спершу обери країну");
     if (me.blocked) return fail(res, 403, "Гравця заблоковано");
     if (!rateLimit("world-p:" + pid, 40, 60_000)) return fail(res, 429, "Забагато дій, зачекай хвилину");
     const C = me.countryCode;
@@ -189,6 +192,49 @@ export default async function handler(req, res) {
     const needLeader = () => (isLeader ? false : (fail(res, 403, "Це може лише лідер країни"), true));
     const needAdmin = () => (isAdmin ? false : (fail(res, 403, "Недостатньо прав"), true));
     const op = b.op;
+
+
+    /* ===== Зміна країни: раз на добу, не під час війни; лідерство складає й отримує сервер ===== */
+    if (op === "set-country") {
+      const newId = String(b.countryCode || "");
+      const o = await loadOwners();
+      if (!o) return fail(res, 500, "Дані карти недоступні");
+      if (!REAL_ID.test(newId) || !o.md.countries.has(newId)) return fail(res, 400, "Такої країни немає");
+      if (cityCount(o, newId) === 0) return fail(res, 400, "Ця країна вибула з гри, обери іншу");
+      if (newId === me.countryCode) return fail(res, 400, "Ти вже граєш за цю країну");
+      const dead = !REAL_ID.test(String(me.countryCode || "")) || !o.md.countries.has(me.countryCode) || cityCount(o, me.countryCode) === 0;
+      if (!dead) {
+        const left = (Number(me.countryChangedAt) || 0) + 24 * 3600 * 1000 - Date.now();
+        if (left > 0) return fail(res, 400, "Змінити країну можна раз на добу. Лишилось " + Math.ceil(left / 3600000) + " год.");
+        if ((await activeWars()).some((w) => warInvolves(w, me.countryCode))) return fail(res, 400, "Поки твоя країна у війні, змінити країну не можна.");
+      }
+      if ((await activeWars()).some((w) => warInvolves(w, newId))) return fail(res, 400, "Нова країна зараз у війні, зачекай її завершення.");
+      const wasLeader = !!me.countryCode && (await leaderOf(me.countryCode)) === pid;
+      if (wasLeader) await sbUpsert("leader:" + me.countryCode, "");
+      const okc = await casJson("players:" + pid, (r) => (r && r.id === pid ? { ...r, countryCode: newId, countryChangedAt: Date.now() } : undefined));
+      if (!okc) return fail(res, 500, "Не вдалося змінити країну");
+      let leader = false;
+      const cur = await leaderOf(newId);
+      const curRec = cur && cur !== pid ? parse(await sbGet("players:" + cur)) : null;
+      if (!cur || cur === pid || !curRec || curRec.countryCode !== newId) leader = await sbUpsert("leader:" + newId, pid);
+      return ok({ countryCode: newId, leader });
+    }
+
+    /* ===== Колір країни: лише лідер ===== */
+    if (op === "country-color") {
+      if (needLeader()) return;
+      const color = String(b.color || "");
+      if (!COUNTRY_COLORS.includes(color)) return fail(res, 400, "Недопустимий колір");
+      const all = (await sbList("country:")) || [];
+      for (const r of all) {
+        const v = parse(r.value);
+        if (v && v.color === color && r.key !== "country:" + C) return fail(res, 400, "Цей колір уже обрала інша країна");
+      }
+      const prev = parse(await sbGet("country:" + C)) || { id: C };
+      const country = { ...prev, color };
+      await sbUpsert("country:" + C, JSON.stringify(country));
+      return ok({ country });
+    }
 
     /* ===== Захоплення вільної області ===== */
     if (op === "capture") {

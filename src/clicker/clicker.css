@@ -1,0 +1,109 @@
+/* Екран клікера «Мультяшна планета». Усі колізії з legacy.css уникаємо префіксом cc-. */
+.cc-clicker { width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding-bottom: 8px; }
+.cc-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* верх */
+.cc-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; }
+.cc-country {
+  display: inline-flex; align-items: center; gap: 8px; max-width: 58%; padding: 8px 14px; border-radius: 999px;
+  background: #fff; color: #0b2a6b; font-weight: 900; font-size: 15px; border: 3px solid #0b2a6b; box-shadow: 0 4px 0 #0b2a6b;
+}
+.cc-country span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-actions { display: flex; gap: 8px; }
+.cc-actions--bottom { justify-content: center; margin-top: 4px; }
+.cc-icon-btn {
+  position: relative; width: 48px; height: 48px; border-radius: 16px; border: 3px solid #0b2a6b; background: #ffd54a; color: #0b2a6b;
+  display: grid; place-items: center; cursor: pointer; box-shadow: 0 4px 0 #0b2a6b; transition: transform .08s, box-shadow .08s;
+}
+.cc-icon-btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #0b2a6b; }
+.cc-icon-btn:focus-visible, .cc-card:focus-visible, .cc-planet-btn:focus-visible { outline: 4px solid #fff; outline-offset: 3px; }
+.cc-dot { position: absolute; top: -5px; right: -5px; width: 15px; height: 15px; border-radius: 50%; background: #ff4d6d; border: 3px solid #fff; }
+
+/* Power / Points */
+.cc-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cc-stat {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 20px; color: #fff; min-width: 0;
+  border: 3px solid #0b2a6b; box-shadow: 0 5px 0 #0b2a6b;
+}
+.cc-stat--power { background: linear-gradient(180deg, #3d9bff, #1f6fe0); }
+.cc-stat--points { background: linear-gradient(180deg, #9b7bff, #6c4dff); }
+.cc-stat-col { display: flex; flex-direction: column; min-width: 0; line-height: 1.05; }
+.cc-stat-label { font-size: 11px; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; opacity: .9; }
+.cc-stat-value { font-size: clamp(20px, 6.2vw, 27px); font-weight: 900; font-variant-numeric: tabular-nums; text-shadow: 0 2px 0 rgba(11,42,107,.55); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* сцена з планетою */
+.cc-stage { position: relative; display: grid; place-items: center; padding: 6px 0 2px; touch-action: none; }
+.cc-planet-btn { position: relative; width: min(76vw, 40vh, 310px); aspect-ratio: 1; border-radius: 50%; cursor: pointer; touch-action: none; -webkit-user-select: none; user-select: none; animation: ccBob 3.6s ease-in-out infinite; }
+.cc-planet-btn--empty { filter: saturate(.45) brightness(.9); animation: none; }
+.cc-planet-wrap, .cc-planet, .cc-clip { position: absolute; inset: 0; border-radius: 50%; }
+.cc-halo { position: absolute; inset: -9%; border-radius: 50%; background: radial-gradient(circle, rgba(124,240,255,.55) 0%, rgba(124,240,255,0) 68%); }
+.cc-planet { will-change: transform; border: 6px solid #fff; box-shadow: 0 0 0 5px #0b2a6b, 0 14px 0 5px rgba(7,32,92,.6); background: #1f7fe8; }
+.cc-clip { overflow: hidden; background: radial-gradient(circle at 35% 30%, #5ec0ff, #1f7fe8 55%, #1456b8); }
+.cc-strip { position: absolute; top: 0; left: 0; height: 100%; width: 200%; display: flex; animation: ccSpin 30s linear infinite; will-change: transform; }
+.cc-tile { width: 50%; height: 100%; flex: none; display: block; }
+.cc-shade { position: absolute; inset: 0; border-radius: 50%; background:
+  radial-gradient(circle at 70% 78%, rgba(6,30,100,0) 36%, rgba(6,30,100,.5) 100%),
+  radial-gradient(circle at 30% 24%, rgba(255,255,255,.5) 0, rgba(255,255,255,0) 34%); }
+.cc-gloss { position: absolute; left: 17%; top: 12%; width: 26%; height: 13%; border-radius: 50%; background: rgba(255,255,255,.55); transform: rotate(-32deg); filter: blur(1px); }
+.cc-fx { position: absolute; inset: -18%; width: 136%; height: 136%; left: -18%; top: -18%; pointer-events: none; }
+@keyframes ccSpin { to { transform: translate3d(-50%, 0, 0); } }
+@keyframes ccBob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+
+/* комбо */
+.cc-combo {
+  position: absolute; left: 50%; bottom: -4px; transform: translate(-50%, 14px) scale(.85); opacity: 0; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; color: #fff; font-weight: 900;
+  background: #ff6b3d; border: 3px solid #0b2a6b; box-shadow: 0 4px 0 #0b2a6b; transition: opacity .12s, transform .16s cubic-bezier(.3,1.6,.5,1); white-space: nowrap;
+}
+.cc-combo--on { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.cc-combo[data-level="2"] { background: #ff8a1f; } .cc-combo[data-level="3"] { background: #e8344f; } .cc-combo[data-level="4"] { background: #7c4dff; }
+.cc-combo-num { font-size: 20px; font-variant-numeric: tabular-nums; min-width: 2.2ch; text-align: center; }
+.cc-combo-name { font-size: 13px; letter-spacing: .04em; text-shadow: 0 1px 0 rgba(0,0,0,.4); }
+.cc-combo-track { width: 54px; height: 8px; border-radius: 6px; background: rgba(11,42,107,.55); overflow: hidden; }
+.cc-combo-bar { display: block; width: 100%; height: 100%; background: #ffe27a; transform-origin: left; transform: scaleX(0); transition: transform .1s linear; }
+
+/* картки */
+.cc-card { background: #fff; color: #0b2a6b; border: 3px solid #0b2a6b; border-radius: 20px; box-shadow: 0 5px 0 #0b2a6b; padding: 10px 12px; }
+button.cc-card { font: inherit; text-align: left; width: 100%; cursor: pointer; display: flex; align-items: center; gap: 10px; }
+button.cc-card:active { transform: translateY(3px); box-shadow: 0 2px 0 #0b2a6b; }
+button.cc-card:disabled { cursor: default; }
+
+/* шкали */
+.cc-bar { position: relative; display: block; height: 18px; border-radius: 12px; background: rgba(11,42,107,.8); border: 3px solid #fff; overflow: hidden; box-shadow: 0 0 0 3px #0b2a6b; }
+.cc-bar--thin { height: 12px; border-width: 2px; box-shadow: 0 0 0 2px #0b2a6b; background: #d7e6ff; }
+.cc-bar-fill { position: absolute; inset: 0; transform-origin: left; background: linear-gradient(180deg, #fff3a8 0, #ffd54a 40%, #ffa51f 100%); transition: transform .25s ease-out; }
+.cc-bar-fill::after { content: ""; position: absolute; left: 4px; right: 4px; top: 2px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.55); }
+.cc-bar-fill--violet { background: linear-gradient(180deg, #c9b5ff, #8a63ff); }
+.cc-energy { padding: 0 3px; }
+.cc-energy-row { display: flex; justify-content: space-between; align-items: center; margin: 0 2px 6px; font-weight: 900; color: #fff; text-shadow: 0 2px 0 rgba(11,42,107,.7); }
+.cc-energy-label { display: inline-flex; align-items: center; gap: 4px; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; }
+.cc-energy-val { font-size: 15px; font-variant-numeric: tabular-nums; }
+.cc-energy--low .cc-bar-fill { background: linear-gradient(180deg, #ffb3b3, #ff4d6d); animation: ccPulse 1s ease-in-out infinite; }
+.cc-energy--mid .cc-bar-fill { background: linear-gradient(180deg, #ffe9a0, #ffb43a); }
+.cc-energy-note { margin-top: 8px; text-align: center; font-size: 13px; font-weight: 800; color: #fff; text-shadow: 0 2px 0 rgba(11,42,107,.7); }
+@keyframes ccPulse { 50% { opacity: .65; } }
+
+/* шлях сезону */
+.cc-season-lvl { flex: none; width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; font-weight: 900; font-size: 20px; color: #fff; background: #6c4dff; border: 3px solid #0b2a6b; }
+.cc-season-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.cc-season-title { font-weight: 900; font-size: 15px; }
+.cc-season-sub { font-size: 12.5px; font-weight: 800; color: #3a5ea8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* цілі дня */
+.cc-goals-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: 900; font-size: 14px; }
+.cc-goals-title { display: inline-flex; align-items: center; gap: 6px; }
+.cc-goals-count { background: #0b2a6b; color: #fff; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+.cc-goals-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.cc-goal { position: relative; overflow: hidden; border-radius: 12px; border: 2.5px solid #0b2a6b; background: #e6efff; height: 36px; display: grid; place-items: center; }
+.cc-goal-fill { position: absolute; inset: 0; transform-origin: left; background: #8ad84f; transition: transform .3s ease-out; }
+.cc-goal-text { position: relative; font-weight: 900; font-size: 12.5px; white-space: nowrap; color: #0b2a6b; }
+.cc-goal--done { background: #8ad84f; }
+
+.cc-total { text-align: center; font-weight: 900; font-size: 13px; color: #fff; text-shadow: 0 2px 0 rgba(11,42,107,.7); letter-spacing: .02em; }
+.cc-total-val { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .cc-strip, .cc-planet-btn, .cc-energy--low .cc-bar-fill { animation: none; }
+  .cc-combo { transition: none; }
+}
+@media (max-height: 700px) { .cc-planet-btn { width: min(66vw, 34vh, 260px); } .cc-card { padding: 8px 10px; } }

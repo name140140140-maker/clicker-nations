@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "maplibre-gl/dist/maplibre-gl.css";
+import "./styles/legacy.css";
+import "./styles/theme-c.css";
 import App from "./App.jsx";
 
 // Telegram Mini App: сказати Telegram, що додаток готовий і розгорнути на весь екран

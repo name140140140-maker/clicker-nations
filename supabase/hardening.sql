@@ -34,19 +34,19 @@ create policy kv_insert on public.kv_store
   with check (
     length(key) <= 300
     and length(value) <= 500000
-    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:)'
-    and key <> 'premium_pass_price_stars'
+    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:|mail:|country:|seasonend:|leadernews:)'
+    and key not in ('premium_pass_price_stars', 'game-state', 'changelog')
   );
 
 -- Оновлення записів: ті самі обмеження
 create policy kv_update on public.kv_store
   for update to anon, authenticated
-  using (key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:)' and key <> 'premium_pass_price_stars')
+  using (key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:|mail:|country:|seasonend:|leadernews:)' and key not in ('premium_pass_price_stars', 'game-state', 'changelog'))
   with check (
     length(key) <= 300
     and length(value) <= 500000
-    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:)'
-    and key <> 'premium_pass_price_stars'
+    and key !~ '^(support:|payment:|warnotify:|cfg:|seasonrew:|pwr:|bank:|cure:|virussnap:|leader:|tgmap:|war:|warc:|warend:|warcd:|terr:|cityown:|citydef:|capcd:|dip:|mapevt:|mail:|country:|seasonend:|leadernews:)'
+    and key not in ('premium_pass_price_stars', 'game-state', 'changelog')
   );
 
 -- Видалення: політики немає → анонімний ключ видаляти не може.
@@ -60,29 +60,49 @@ create policy kv_update on public.kv_store
 --  Уже застосовано в проєкті через міграцію guard_player_sensitive_fields_and_bankldr.
 -- =====================================================================
 create or replace function public.kv_guard_players() returns trigger
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path to 'public' as $f$
 declare
   r text := coalesce(nullif(current_setting('request.jwt.claims', true), '')::json ->> 'role', '');
   o jsonb := '{}'::jsonb;
+  ex text;
   n jsonb;
+  k text;
 begin
   if r not in ('anon', 'authenticated') then return new; end if;
   if new.key not like 'players:%' then return new; end if;
   begin n := new.value::jsonb; exception when others then return new; end;
-  if tg_op = 'UPDATE' then
-    begin o := old.value::jsonb; exception when others then o := '{}'::jsonb; end;
-  end if;
+  -- поточний запис у базі (працює й для upsert, який приходить як INSERT)
+  select value into ex from kv_store where key = new.key;
+  if ex is not null then begin o := ex::jsonb; exception when others then o := '{}'::jsonb; end; end if;
   if coalesce(n -> 'hasPremiumPass', 'false'::jsonb) is distinct from coalesce(o -> 'hasPremiumPass', 'false'::jsonb)
      or coalesce(n -> 'blocked', 'false'::jsonb) is distinct from coalesce(o -> 'blocked', 'false'::jsonb)
      or coalesce(n -> 'blockedReason', '""'::jsonb) is distinct from coalesce(o -> 'blockedReason', '""'::jsonb)
      or coalesce(n -> 'timeImmunity', 'false'::jsonb) is distinct from coalesce(o -> 'timeImmunity', 'false'::jsonb)
-     -- telegramId, раз заданий, незмінний: на ньому тримається прив'язка tgmap
      or (o ? 'telegramId' and o -> 'telegramId' <> 'null'::jsonb and n -> 'telegramId' is distinct from o -> 'telegramId')
   then
     raise exception 'protected player field' using errcode = '42501';
   end if;
+  -- Points, покращення, Battle Pass: клієнт їх не змінює, значення повертаються до збережених на сервері
+  foreach k in array array['points','upg','passClaimedFree','passClaimedPremium','passBaseClicks','passRev','unlockedTitles','unlockedPassBanners','unlockedBadges','unlockedIcons'] loop
+    if o ? k then n := jsonb_set(n, array[k], o -> k);
+    elsif k in ('points','passBaseClicks') then n := jsonb_set(n, array[k], '0'::jsonb);
+    elsif k = 'upg' then n := jsonb_set(n, array[k], '{}'::jsonb);
+    elsif k = 'passRev' then n := n - k;
+    else n := jsonb_set(n, array[k], '[]'::jsonb);
+    end if;
+  end loop;
+  -- Країну гравця змінює лише сервер (api/_game/world.js, op set-country): раз на добу й не під час війни
+  foreach k in array array['countryCode','countryChangedAt'] loop
+    if o ? k then n := jsonb_set(n, array[k], o -> k); end if;
+  end loop;
+  -- єдиний дозволений клієнтом виняток: секретна аватарка «donkey»
+  if (new.value::jsonb -> 'unlockedIcons') ? 'donkey' and not (coalesce(n -> 'unlockedIcons', '[]'::jsonb) ? 'donkey') then
+    n := jsonb_set(n, '{unlockedIcons}', coalesce(n -> 'unlockedIcons', '[]'::jsonb) || '"donkey"'::jsonb);
+  end if;
+  new.value := n::text;
   return new;
-end $$;
+end $f$;
+
 
 drop trigger if exists kv_guard_players_trg on public.kv_store;
 create trigger kv_guard_players_trg before insert or update on public.kv_store

@@ -14,7 +14,7 @@
 Кордон між областями різних власників — товстіша лінія, між областями одного власника — тонка (з'являється при наближенні).
 
 ## Дані
-* Геометрія: `public/data/world-topology.json` (3224 області, у кожної унікальний `cn_region_id`).
+* Геометрія: клієнт вантажує спрощену `public/data/world-topology-lite.json` (генерується `npm run topology:lite` з оригінального `world-topology.json`, Дуглас–Пекер 0.02°, індекси дуг збережено → суміжність областей не ламається; оригінал лише для скриптів). Оригінал: `public/data/world-topology.json` (3224 області, у кожної унікальний `cn_region_id`).
   Оновити: `npm run fetch:regions` → `npm run build:topology`.
 * Країни й володіння — Supabase, таблиця `kv_store` (див. `src/nations.js`):
   * `country:<id>` — `{ id, name, color, leaderId, createdAt, regionIds }`
@@ -43,3 +43,7 @@
   як прев'ю майбутніх ліній фронту.
 * Підписи міст використовують шрифти Noto Sans Protomaps (`GLYPHS_URL` у `TerritoryMap.jsx`).
   Для незалежності від зовнішнього сервера скопіюй шрифти в `public/fonts/` і заміни URL на `/fonts/{fontstack}/{range}.pbf`.
+
+
+## Міста на слабких пристроях
+Замість кластеризації використовується пріоритетне проріджування: тири міст a–g за важливістю, дрібні з minzoom/fadeIn, `text-optional` і `symbol-sort-key` — на малих масштабах малюється лише головне.

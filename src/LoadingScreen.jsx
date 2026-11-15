@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { setTick, clearTick } from "./core/ticker.js";
 
 /* Екран завантаження: анімований глобус із орбітами, смуга прогресу й підказки, що змінюються. */
 
@@ -145,8 +146,8 @@ export default function LoadingScreen({ lang = "uk", variant = "full", title = n
   const [i, setI] = useState(() => Math.floor(Math.random() * list.length));
   useEffect(() => {
     if (!tips) return undefined;
-    const id = setInterval(() => setI((x) => (x + 1) % list.length), 5200);
-    return () => clearInterval(id);
+    const id = setTick(() => setI((x) => (x + 1) % list.length), 5200);
+    return () => clearTick(id);
   }, [tips, list.length]);
   const word = LOADING_WORD[lang] || LOADING_WORD.en;
   const pct = progress == null ? null : Math.max(0, Math.min(100, Math.round(progress * 100)));

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Volume2, VolumeX, Music } from "lucide-react";
+import { setTick, clearTick } from "./core/ticker.js";
 
 const MAINTENANCE_BG = "/img/maintenance-bg.webp";
 
@@ -102,7 +103,7 @@ function useClockAudio(tickOn, musicOn) {
     r.tickGain.gain.setTargetAtTime(tickOn ? 0.06 : 0, now, 0.05);
     r.musicGain.gain.setTargetAtTime(musicOn ? 0.5 : 0, now, 0.4);
     if (r.timer) return undefined;
-    r.timer = setInterval(() => {
+    r.timer = setTick(() => {
       const c = r.ctx;
       const horizon = c.currentTime + 1.2;
       const offset = c.currentTime - performance.now() / 1000;
@@ -128,7 +129,7 @@ function useClockAudio(tickOn, musicOn) {
 
   useEffect(() => () => {
     const r = ref.current;
-    if (r.timer) clearInterval(r.timer);
+    if (r.timer) clearTick(r.timer);
     r.timer = null;
     if (r.ctx) r.ctx.close().catch(() => {});
     r.ctx = null;
@@ -173,14 +174,14 @@ export default function MaintenanceScreen({ message }) {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const show = setTimeout(() => setVisible(true), 50);
-    const id = setInterval(() => {
+    const id = setTick(() => {
       setVisible(false);
       setTimeout(() => {
         setPos((p) => (p + 1) % order.length);
         setVisible(true);
       }, 600);
     }, 5000);
-    return () => { clearTimeout(show); clearInterval(id); };
+    return () => { clearTimeout(show); clearTick(id); };
   }, [order.length]);
   const fact = FACTS[order[pos]];
 
